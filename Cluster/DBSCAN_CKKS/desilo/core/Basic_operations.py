@@ -1,4 +1,6 @@
 def Basic_Inv(engine, x,d, relineralization_key):  # 0 < x < 2
+    #Goldschmidt 역수 근사
+    #TODO: newton rapshon 방법으로 수정
     a = engine.subtract(2, x)  # a = 2 - x
     b = engine.subtract(1, x)  # b = 1 - x
     for _ in range(d):
@@ -24,7 +26,7 @@ def Basic_sqrt(engine, x, d, relinearization_key, conjugation_key, bootstrap_key
         if factor.level < 5 or a.level < 5 or b.level < 5:
             a = engine.bootstrap(a,relinearization_key, conjugation_key, bootstrap_key)
             b = engine.bootstrap(b,relinearization_key, conjugation_key, bootstrap_key)
-            print("    Bootstrapping performed")
+            print("Bootstrapping performed")
     return a
 
 def CKKS_min(engine, a, b, d, relinearization_key, conjugation_key, bootstrap_key): # 0 <= x < 1
@@ -41,13 +43,14 @@ def CKKS_max(engine, a, b, d, relinearization_key, conjugation_key, bootstrap_ke
     z= Basic_sqrt(engine, y_2, d, relinearization_key, conjugation_key, bootstrap_key)
     return engine.add(x,z)
 
-def rotate_sum(engine, enc_vec, num_slots, rotation_key):
-    result = engine.clone(enc_vec)
-    rotated = enc_vec
-    for _ in range(num_slots):
-        rotated = engine.rotate(rotated, rotation_key, -1)
-        result = engine.add(result, rotated)
-    return result
+# TODO: rotate_sum함수 수정 필요
+# def rotate_sum(engine, enc_vec, num_slots, rotation_key):
+#     result = engine.clone(enc_vec)
+#     rotated = enc_vec
+#     for _ in range(num_slots):
+#         rotated = engine.rotate(rotated, rotation_key, -1)
+#         result = engine.add(result, rotated)
+#     return result
 
 def MaxIdx(engine, enc_values, n, d_a, d_b, t, m, relinearization_key, rotation_key, conjugation_key=None, bootstrap_key=None):
     
