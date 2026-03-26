@@ -12,21 +12,11 @@ class ClusteringConfig:
     n_clusters: int     # 클러스터 개수 (k) - 참고용
     slot_counts: int    # FHE 슬롯 개수 (예: 32768)
 
-CLUSTERING_DATASETS = [
-    # Synthetic Datasets (S-sets)
-    ClusteringConfig("G2-1-20", 2048, 1, 2, 1 << 15),
-    ClusteringConfig("G2-2-20", 2048, 2, 2, 1 << 15),
-    ClusteringConfig("G2-4-20", 2048, 4, 2, 1 << 15),
-    ClusteringConfig("G2-8-20", 2048, 8, 2, 1 << 15),
-    ClusteringConfig("G2-16-20", 2048, 16, 2, 1 << 15),
-    
-    # Real-world Datasets (UCI 등) - 논문 실험용
-    ClusteringConfig("Iris", 150, 4, 3, 1 << 15),
-    ClusteringConfig("Wine", 178, 13, 3, 1 << 15),
-    ClusteringConfig("Cancer", 569, 30, 2, 1 << 15), # Breast Cancer Wisconsin
-    
-    # Large scale (A-sets)
-    ClusteringConfig("A1", 3000, 2, 20, 1 << 15),
-    ClusteringConfig("A2", 5250, 2, 35, 1 << 15),
-    ClusteringConfig("A3", 7500, 2, 50, 1 << 15),
-]
+class ComparisonConfig:
+    def __init__(self, name, n_samples, d, m, t, slot_counts=1<<15):
+        self.name = name
+        self.n_samples = n_samples
+        self.d = d          # Goldschmidt 반복 횟수
+        self.m = m          # Plaintext 상한값 (inv_goldschmidts용)
+        self.t = t          # Scaling factor 또는 반복 횟수 (Comp용)
+        self.slot_counts = slot_counts
