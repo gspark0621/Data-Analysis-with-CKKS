@@ -1,0 +1,4 @@
+normalize_sec: 1614.715282
+core_sec: 8.269945
+label_propagation_sec: 21756.012648
+postprocess_sec: 1.290576

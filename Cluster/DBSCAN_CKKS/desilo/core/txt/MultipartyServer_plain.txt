@@ -1,0 +1,109 @@
+# core/plain/MultipartyServer_plain.py
+from core.plaintext.GridIndex_plain import build_grid_adjacency
+from core.plaintext.Normalize_plain import is_neighbor_plain
+from core.plaintext.Core_plain import identify_core_points_plain
+from core.plaintext.Label_Propagation_plain import run_label_propagation_plain
+
+
+def assign_global_indices(owner_blocks_list):
+    global_counter = 0
+    all_points = []
+
+    for owner_blocks in owner_blocks_list:
+        for blk in owner_blocks:
+            for i, ref in enumerate(blk["point_refs"]):
+                if ref is not None and blk["selection_mask"][i] == 1:
+                    ref["global_idx"] = global_counter
+                    all_points.append({
+                        "global_idx": global_counter,
+                        "owner_id": ref["owner_id"],
+                        "owner_local_idx": ref["owner_local_idx"],
+                        "point_raw": blk["points_raw"][i],
+                        "point_norm": blk["points_norm"][i],
+                        "grid_idx": blk["grid_idx"],
+                        "block_idx": blk["block_idx"]
+                    })
+                    global_counter += 1
+
+    return all_points, global_counter
+
+
+def build_owner_lookup(owner_blocks_list):
+    lookup_list = []
+    for owner_blocks in owner_blocks_list:
+        table = {}
+        for blk in owner_blocks:
+            table[(blk["grid_idx"], blk["block_idx"])] = blk
+        lookup_list.append(table)
+    return lookup_list
+
+
+def run_multiparty_point_dbscan_plain(owner_blocks_list,
+                                      grid_centers_norm,
+                                      epsilon_norm,
+                                      min_pts,
+                                      bucket_size,
+                                      max_blocks_per_grid):
+    grid_adj = build_grid_adjacency(grid_centers_norm, epsilon_norm)
+    all_points, num_points = assign_global_indices(owner_blocks_list)
+    owner_lookup = build_owner_lookup(owner_blocks_list)
+
+    print(f"[DEBUG] total valid points assigned = {num_points}")
+
+    adjacency_sets = [set() for _ in range(num_points)]
+    neighbor_counts = [1] * num_points
+
+    num_grids = len(grid_centers_norm)
+
+    for g in range(num_grids):
+        neighbor_grids = [j for j, v in enumerate(grid_adj[g]) if v == 1]
+
+        for table_a in owner_lookup:
+            for block_a in range(max_blocks_per_grid):
+                if (g, block_a) not in table_a:
+                    continue
+                left_blk = table_a[(g, block_a)]
+
+                for ng in neighbor_grids:
+                    for table_b in owner_lookup:
+                        for block_b in range(max_blocks_per_grid):
+                            if (ng, block_b) not in table_b:
+                                continue
+                            right_blk = table_b[(ng, block_b)]
+
+                            for i in range(bucket_size):
+                                if left_blk["selection_mask"][i] == 0:
+                                    continue
+                                left_ref = left_blk["point_refs"][i]
+                                u = left_ref["global_idx"]
+                                p = left_blk["points_norm"][i]
+
+                                for j in range(bucket_size):
+                                    if right_blk["selection_mask"][j] == 0:
+                                        continue
+                                    right_ref = right_blk["point_refs"][j]
+                                    v = right_ref["global_idx"]
+                                    q = right_blk["points_norm"][j]
+
+                                    if u == v:
+                                        continue
+
+                                    if is_neighbor_plain(p, q, epsilon_norm):
+                                        if v not in adjacency_sets[u]:
+                                            adjacency_sets[u].add(v)
+                                            neighbor_counts[u] += 1
+                                        if u not in adjacency_sets[v]:
+                                            adjacency_sets[v].add(u)
+                                            neighbor_counts[v] += 1
+
+    adjacency_list = [sorted(list(s)) for s in adjacency_sets]
+    core_mask = identify_core_points_plain(neighbor_counts, min_pts)
+    final_labels = run_label_propagation_plain(adjacency_list, core_mask, num_points)
+
+    return {
+        "all_points": all_points,
+        "adjacency_list": adjacency_list,
+        "neighbor_counts": neighbor_counts,
+        "core_mask": core_mask,
+        "labels": final_labels
+    }

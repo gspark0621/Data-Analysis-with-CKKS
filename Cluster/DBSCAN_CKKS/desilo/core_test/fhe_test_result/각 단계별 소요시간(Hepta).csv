@@ -1,0 +1,5 @@
+﻿Normalize 단계            , 1614.72초
+Core 단계                 , 8.27초
+Label_Propagation 단계    , 21756.01초
+Final scale-back 단계     , 1.29초
+합계(서버 주요 단계)      , 23380.29초
