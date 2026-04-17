@@ -1,0 +1,65 @@
+# core/client/FinalClient.py
+
+def assign_global_indices(owner_blocks_list):
+    """
+    여러 Owner의 블록들을 순회하며, 패딩(가짜 점)을 제외한 
+    실제 유효한 점들에만 전역 고유 번호(Global Index)를 부여하고 
+    복호화 후 결과를 맵핑할 메타데이터 리스트를 생성합니다.
+    """
+    global_counter = 0
+    all_points = []
+
+    for owner_blocks in owner_blocks_list:
+        for blk in owner_blocks:
+            for i, ref in enumerate(blk["point_refs"]):
+                # 마스크가 1인 진짜 데이터(Valid point)에만 인덱스 할당
+                if ref is not None and blk["selection_mask"][i] == 1:
+                    ref["global_idx"] = global_counter
+                    all_points.append({
+                        "global_idx": global_counter,
+                        "owner_id": ref["owner_id"],
+                        "owner_local_idx": ref["owner_local_idx"],
+                        "point_norm": blk["points_norm"][i],
+                        "grid_idx": blk["grid_idx"],
+                        "block_idx": blk["block_idx"]
+                    })
+                    global_counter += 1
+
+    return all_points, global_counter
+
+
+def reconstruct_results(engine, secret_key, final_ct, plain_all_points, global_min, scale_factor):
+    """
+    서버로부터 전달받은 FHE 라벨 암호문을 복호화한 뒤, 
+    미리 생성해둔 plain_all_points(메타데이터 지도)를 이용해 
+    원본 점들과 라벨을 매칭하여 반환합니다.
+    """
+    # 1. FHE 연산 결과를 평문 배열로 통째로 복호화 (패딩 결과까지 모두 포함됨)
+    decrypted_labels_raw = engine.decrypt(final_ct, secret_key)
+    
+    results = []
+    # 2. 메타데이터 지도를 보며 내 진짜 데이터의 라벨만 쏙쏙 뽑아오기
+    for item in plain_all_points:
+        gidx = item["global_idx"]
+        
+        # 다항식 근사 오차 보정을 위한 라벨 반올림 처리
+        label = int(round(decrypted_labels_raw[gidx]))
+        
+        # 원본 좌표로 역정규화(Scaling up)
+        point_reconstructed = [
+            round((v * scale_factor) + global_min, 6) 
+            for v in item["point_norm"]
+        ]
+        
+        results.append({
+            "global_idx": gidx,
+            "owner_id": item["owner_id"],
+            "owner_local_idx": item["owner_local_idx"],
+            "point_norm": item["point_norm"],
+            "point_reconstructed": point_reconstructed,
+            "grid_idx": item["grid_idx"],
+            "block_idx": item["block_idx"],
+            "label": label
+        })
+        
+    return results

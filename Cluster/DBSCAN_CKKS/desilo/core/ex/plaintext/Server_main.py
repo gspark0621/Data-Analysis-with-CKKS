@@ -1,7 +1,7 @@
 import numpy as np
-from core.plaintext.Normalize import check_neighbor_closed_interval_np
-from core.plaintext.Core import identify_core_points_np
-from core.plaintext.Label_Propagation import fhe_max_propagation_np
+from core.ex.plaintext.Normalize import check_neighbor_closed_interval_np
+from core.ex.plaintext.Core import identify_core_points_np
+from core.ex.plaintext.Label_Propagation import fhe_max_propagation_np
 
 def send_to_server_np(encrypted_columns, num_points, eps, min_pts, dimension):
     dim = len(encrypted_columns)

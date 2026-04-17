@@ -1,0 +1,99 @@
+# core/server/MultipartyServer.py
+from core.ciphertext.server.Normalize import check_neighbor_closed_interval
+from core.ciphertext.server.Core import identify_core_points_fhe_converted
+from core.ciphertext.server.LabelPropagation import fhe_max_propagation_fhe, _refresh
+# GridIndex는 평문 로직을 그대로 재사용하여 인접 행렬을 구성합니다.
+from core.plaintext.GridIndex_plain import build_grid_adjacency 
+
+def compare_two_blocks(engine, keypack, left_coords, left_mask_pt, right_coords, right_mask_pt, bucket_size, eps, dimension):
+    relin_key = keypack.relinearization_key
+    left_mask = engine.encode(left_mask_pt)
+    right_mask = engine.encode(right_mask_pt)
+
+    masked_left = [engine.multiply(c, left_mask) for c in left_coords]
+    masked_right = [engine.multiply(c, right_mask) for c in right_coords]
+
+    neighbor_ct_list = []
+    total_neighbor_from_this_pair = None
+
+    for k in range(bucket_size):
+        dist_sq_k = None
+        for d in range(dimension):
+            rotated_right = engine.rotate(masked_right[d], keypack.rotation_key, k)
+            diff_ct = engine.subtract(masked_left[d], rotated_right)
+            sq_ct = engine.square(diff_ct, relin_key)
+            dist_sq_k = sq_ct if dist_sq_k is None else engine.add(dist_sq_k, sq_ct)
+
+        # FHE 다항식 근사를 이용한 거리 판별
+        adj_k = check_neighbor_closed_interval(engine, dist_sq_k, eps ** 2, keypack, dimension)
+        neighbor_ct_list.append(adj_k)
+        
+        if total_neighbor_from_this_pair is None:
+            total_neighbor_from_this_pair = adj_k
+        else:
+            total_neighbor_from_this_pair = engine.add(total_neighbor_from_this_pair, adj_k)
+
+    return total_neighbor_from_this_pair, neighbor_ct_list
+
+def run_multiparty_point_dbscan(engine, keypack, encrypted_owner_blocks_list, 
+                                       grid_centers_norm, query_epsilon_norm, base_epsilon_norm, 
+                                       min_pts, bucket_size, max_blocks_per_grid, total_points_upper_bound):
+    
+    # 평문 버전에 추가된 아키텍처: query_epsilon과 base_epsilon을 분리 적용하여 인접 격자 계산
+    adjacency_grid = build_grid_adjacency(grid_centers_norm, query_epsilon_norm, base_epsilon_norm)
+    num_grids = len(grid_centers_norm)
+    
+    N = total_points_upper_bound
+    dimension = len(grid_centers_norm[0]) 
+    adjacency_ct_list = []
+    total_neighbors_ct = None
+
+    owner_lookup = []
+    for owner_blocks in encrypted_owner_blocks_list:
+        table = {(blk["grid_idx"], blk["block_idx"]): blk for blk in owner_blocks}
+        owner_lookup.append(table)
+
+    for g in range(num_grids):
+        neighbor_grids = [j for j, val in enumerate(adjacency_grid[g]) if val == 1]
+        for table_a in owner_lookup:
+            for block_a in range(max_blocks_per_grid):
+                if (g, block_a) not in table_a: continue
+                left_blk = table_a[(g, block_a)]
+
+                for ng in neighbor_grids:
+                    for table_b in owner_lookup:
+                        for block_b in range(max_blocks_per_grid):
+                            if (ng, block_b) not in table_b: continue
+                            right_blk = table_b[(ng, block_b)]
+
+                            pair_neighbor_sum_ct, pair_adj_list = compare_two_blocks(
+                                engine=engine, keypack=keypack,
+                                left_coords=left_blk["enc_coords"], left_mask_pt=left_blk["selection_mask"],
+                                right_coords=right_blk["enc_coords"], right_mask_pt=right_blk["selection_mask"],
+                                bucket_size=bucket_size, eps=query_epsilon_norm, dimension=dimension
+                            )
+
+                            if total_neighbors_ct is None:
+                                total_neighbors_ct = pair_neighbor_sum_ct
+                            else:
+                                total_neighbors_ct = engine.add(total_neighbors_ct, pair_neighbor_sum_ct)
+                            adjacency_ct_list.extend(pair_adj_list)
+
+    if total_neighbors_ct is None:
+        total_neighbors_ct = engine.encode([0.0 for _ in range(N)])
+
+    ones_plaintext = engine.encode([1.0 for _ in range(N)])
+    total_neighbors_ct = engine.add(total_neighbors_ct, ones_plaintext) # 자기 자신 포함
+
+    # 1. 코어 포인트 판별 (FHE 부호 다항식)
+    core_ct = identify_core_points_fhe_converted(engine, total_neighbors_ct, min_pts, N, keypack)
+
+    # 2. 라벨 전파 (Max Propagation)
+    cluster_id_pt = [(i + 1) / float(N + 1) for i in range(N)]
+    final_norm_ct = fhe_max_propagation_fhe(engine, keypack, adjacency_ct_list, core_ct, cluster_id_pt, N, max_iter=5)
+
+    # 3. 결과 역정규화 스케일링
+    scale_back_pt = engine.encode([float(N + 1) for _ in range(N)])
+    final_ct = engine.multiply(final_norm_ct, scale_back_pt)
+    
+    return _refresh(engine, final_ct, keypack)

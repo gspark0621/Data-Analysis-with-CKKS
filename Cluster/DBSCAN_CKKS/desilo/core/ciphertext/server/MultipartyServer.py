@@ -1,145 +1,243 @@
-# core/server/MultipartyServer.py
-from core.server.Normalize import check_neighbor_closed_interval
-from core.server.Core import identify_core_points_fhe_converted
-from core.server.LabelPropagation import fhe_max_propagation_fhe, _refresh
-from core.server.GridIndex import build_grid_adjacency
+# core/ciphertext/server/MultipartyServer.py
+import os
+import glob
+import tempfile
+import gc
+
+from core.ciphertext.server.Normalize import check_neighbor_closed_interval
+from core.ciphertext.server.Core import identify_core_points_fhe_converted
+from core.ciphertext.server.LabelPropagation import fhe_max_propagation_fhe, _refresh
+
+try:
+    import torch
+    _has_torch = True
+except ImportError:
+    _has_torch = False
 
 
-def multiply_masked_coords(engine, coord_ct, mask_ct, relin_key):
-    return engine.multiply(coord_ct, mask_ct, relin_key)
+def _gpu_cleanup():
+    gc.collect()
+    if _has_torch:
+        torch.cuda.empty_cache()
 
 
-def compare_two_blocks(engine,
-                       keypack,
-                       left_coords,
-                       left_mask_pt,
-                       right_coords,
-                       right_mask_pt,
-                       bucket_size,
-                       eps,
-                       dimension):
-    relin_key = keypack.relinearization_key
+# ── 블록 CPU ↔ GPU 전송 헬퍼 ─────────────────────────────────────
 
-    left_mask = engine.encode(left_mask_pt)
-    right_mask = engine.encode(right_mask_pt)
+# ── 블록 CPU ↔ GPU 전송 헬퍼 (in-place 버전) ──────────────────────
 
-    masked_left = [engine.multiply(c, left_mask) for c in left_coords]
-    masked_right = [engine.multiply(c, right_mask) for c in right_coords]
+def _block_to_gpu(engine, blk: dict) -> None:
+    """블록 내 모든 CT를 GPU로 이동 (in-place). 반환값 없음."""
+    for c in blk["enc_coords"]:
+        engine.to_cuda(c)
+    engine.to_cuda(blk["enc_selection_mask"])
 
-    neighbor_ct_list = []
-    total_neighbor_from_this_pair = None
+
+def _block_to_cpu(engine, blk: dict) -> None:
+    """블록 내 모든 CT를 CPU로 이동 (in-place). 반환값 없음."""
+    for c in blk["enc_coords"]:
+        engine.to_cpu(c)
+    engine.to_cpu(blk["enc_selection_mask"])
+
+
+def _free_gpu_block(blk_gpu: dict) -> None:
+    """GPU 블록 CT 즉시 해제. 비교 완료 직후 호출."""
+    del blk_gpu["enc_coords"]
+    del blk_gpu["enc_selection_mask"]
+
+
+# ── adj_ct 스트리밍 (write_ciphertext / read_ciphertext) ─────────
+
+class _AdjacencyStreamWriter:
+    def __init__(self, engine, dir_path: str = None):
+        self._engine  = engine
+        self._dir     = dir_path or tempfile.mkdtemp(prefix="adj_cts_")
+        self._created = (dir_path is None)
+        self._index   = 0
+
+    def write(self, ct) -> None:
+        path = os.path.join(self._dir, f"{self._index}.ct")
+        self._engine.write_ciphertext(ct, path)
+        self._index += 1
+        del ct
+
+    def total_count(self) -> int:
+        return self._index
+
+    def path(self) -> str:
+        return self._dir
+
+    def close(self) -> None:
+        pass
+
+    def cleanup(self) -> None:
+        if self._created:
+            import shutil
+            shutil.rmtree(self._dir, ignore_errors=True)
+
+
+def _stream_load_chunks(engine, dir_path: str, chunk_size: int):
+    files = sorted(
+        glob.glob(os.path.join(dir_path, "*.ct")),
+        key=lambda p: int(os.path.splitext(os.path.basename(p))[0])
+    )
+    chunk = []
+    for fpath in files:
+        chunk.append(engine.read_ciphertext(fpath))
+        if len(chunk) >= chunk_size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
+
+
+# ── 블록 쌍 비교 ─────────────────────────────────────────────────
+
+def compare_two_blocks(engine, keypack,
+                       left_coords, left_mask_ct,
+                       right_coords, right_mask_ct,
+                       bucket_size, eps, dimension):
+    """두 GPU 블록 간 거리 비교. 중간 CT 즉시 해제."""
+    relin_key    = keypack.relinearization_key
+    masked_left  = [engine.multiply(c, left_mask_ct,  relin_key) for c in left_coords]
+    masked_right = [engine.multiply(c, right_mask_ct, relin_key) for c in right_coords]
+
+    neighbor_ct_list         = []
+    total_neighbor_from_pair = None
 
     for k in range(bucket_size):
         dist_sq_k = None
         for d in range(dimension):
-            rotated_right = engine.rotate(masked_right[d], keypack.rotation_key, k)
-            diff_ct = engine.subtract(masked_left[d], rotated_right)
-            sq_ct = engine.square(diff_ct, relin_key)
-            dist_sq_k = sq_ct if dist_sq_k is None else engine.add(dist_sq_k, sq_ct)
+            rotated   = engine.rotate(masked_right[d], keypack.rotation_key, k)
+            diff      = engine.subtract(masked_left[d], rotated)
+            sq        = engine.square(diff, relin_key)
+            del rotated, diff
+            dist_sq_k = sq if dist_sq_k is None else engine.add(dist_sq_k, sq)
+            del sq
 
-        adj_k = check_neighbor_closed_interval(engine, dist_sq_k, eps ** 2, keypack, dimension)
+        adj_k = check_neighbor_closed_interval(
+            engine, dist_sq_k, eps ** 2, keypack, dimension
+        )
+        del dist_sq_k
+
         neighbor_ct_list.append(adj_k)
-        total_neighbor_from_this_pair = adj_k if total_neighbor_from_this_pair is None else engine.add(total_neighbor_from_this_pair, adj_k)
+        total_neighbor_from_pair = (
+            adj_k if total_neighbor_from_pair is None
+            else engine.add(total_neighbor_from_pair, adj_k)
+        )
 
-    return total_neighbor_from_this_pair, neighbor_ct_list
+    del masked_left, masked_right
+    return total_neighbor_from_pair, neighbor_ct_list
 
 
-def run_multiparty_point_dbscan(engine,
-                                keypack,
-                                encrypted_owner_blocks_list,
-                                grid_centers,
-                                epsilon,
-                                normalized_eps,
-                                min_pts,
-                                bucket_size,
-                                max_blocks_per_grid,
-                                total_points_upper_bound):
+# ── 메인 클러스터링 ───────────────────────────────────────────────
+
+def run_multiparty_point_dbscan(engine, keypack,
+                                encrypted_server_blocks_list,
+                                grid_centers_norm,
+                                query_epsilon_norm, base_epsilon_norm,
+                                min_pts, bucket_size, max_blocks_per_grid,
+                                total_points_upper_bound,
+                                adj_chunk_size: int = 2000,
+                                adj_stream_dir: str = None):
     """
-    encrypted_owner_blocks_list:
-      [
-        [ {enc_coords:[ct_x, ct_y], enc_mask:ct, grid_idx:g, block_idx:b}, ... ],   # owner A
-        [ ... ],                                                                    # owner B
-        ...
-      ]
+    GPU 메모리 관리 전략:
+      - 모든 블록 CT: CPU RAM 상주 (to_cpu 완료 상태로 전달받음)
+      - 비교 시: left 블록 to_cuda → 전체 right 순회 → left to_gpu 해제
+                right 블록: 매 쌍마다 to_cuda → 비교 후 즉시 해제
+      - 동시 GPU 점유: left(1) + right(1) + 중간 CT = 최소화
+      - running_sum: GPU 상주 (1개만 유지)
+      - adj_ct: write_ciphertext 즉시 디스크 → GPU 해제
     """
-    adjacency_grid = build_grid_adjacency(grid_centers, epsilon)
-    num_grids = len(grid_centers)
+    N         = total_points_upper_bound
+    dimension = len(grid_centers_norm[0])
 
-    # 전역 point graph adjacency 누적용
-    adjacency_ct_list = []
-    total_neighbors_ct = None
+    # 모든 owner의 CPU 블록을 flat list로 통합
+    all_blocks_cpu = []
+    for server_blocks in encrypted_server_blocks_list:
+        all_blocks_cpu.extend(server_blocks)
 
-    # 전역 point 수 상한 = owner수 * grid수 * block수 * bucket_size
-    N = total_points_upper_bound
-    dimension = 2
+    total_pairs = len(all_blocks_cpu) ** 2
+    running_sum = None
+    writer      = _AdjacencyStreamWriter(engine, dir_path=adj_stream_dir)
 
-    # owner별 block lookup
-    owner_lookup = []
-    for owner_blocks in encrypted_owner_blocks_list:
-        table = {}
-        for blk in owner_blocks:
-            table[(blk["grid_idx"], blk["block_idx"])] = blk
-        owner_lookup.append(table)
+    try:
+        pair_count = 0
 
-    for g in range(num_grids):
-        neighbor_grids = [j for j, val in enumerate(adjacency_grid[g]) if val == 1]
+        for i, left_blk in enumerate(all_blocks_cpu):
 
-        for owner_a_idx, table_a in enumerate(owner_lookup):
-            for block_a in range(max_blocks_per_grid):
-                if (g, block_a) not in table_a:
-                    continue
-                left_blk = table_a[(g, block_a)]
+            # left: CPU → GPU (in-place, 원본 dict 수정됨)
+            _block_to_gpu(engine, left_blk)
 
-                for ng in neighbor_grids:
-                    for owner_b_idx, table_b in enumerate(owner_lookup):
-                        for block_b in range(max_blocks_per_grid):
-                            if (ng, block_b) not in table_b:
-                                continue
-                            right_blk = table_b[(ng, block_b)]
+            for right_blk in all_blocks_cpu:
 
-                            pair_neighbor_sum_ct, pair_adj_list = compare_two_blocks(
-                                engine=engine,
-                                keypack=keypack,
-                                left_coords=left_blk["enc_coords"],
-                                left_mask_pt=left_blk["selection_mask_pt"],
-                                right_coords=right_blk["enc_coords"],
-                                right_mask_pt=right_blk["selection_mask_pt"],
-                                bucket_size=bucket_size,
-                                eps=normalized_eps,
-                                dimension=dimension
-                            )
+                # right: CPU → GPU (in-place)
+                _block_to_gpu(engine, right_blk)
 
-                            if total_neighbors_ct is None:
-                                total_neighbors_ct = pair_neighbor_sum_ct
-                            else:
-                                total_neighbors_ct = engine.add(total_neighbors_ct, pair_neighbor_sum_ct)
+                pair_sum_ct, pair_adj_list = compare_two_blocks(
+                    engine=engine, keypack=keypack,
+                    left_coords=left_blk["enc_coords"],
+                    left_mask_ct=left_blk["enc_selection_mask"],
+                    right_coords=right_blk["enc_coords"],
+                    right_mask_ct=right_blk["enc_selection_mask"],
+                    bucket_size=bucket_size,
+                    eps=query_epsilon_norm,
+                    dimension=dimension,
+                )
 
-                            adjacency_ct_list.extend(pair_adj_list)
+                # right: GPU → CPU (in-place, 즉시 반환)
+                _block_to_cpu(engine, right_blk)
 
-    if total_neighbors_ct is None:
-        zero_pt = engine.encode([0.0 for _ in range(N)])
-        total_neighbors_ct = zero_pt
+                if running_sum is None:
+                    running_sum = pair_sum_ct
+                else:
+                    running_sum = engine.add(running_sum, pair_sum_ct)
+                    del pair_sum_ct
 
-    ones_plaintext = engine.encode([1.0 for _ in range(N)])
-    total_neighbors_ct = engine.add(total_neighbors_ct, ones_plaintext)
+                for adj_ct in pair_adj_list:
+                    writer.write(adj_ct)
+                del pair_adj_list
 
-    core_ct = identify_core_points_fhe_converted(
-        engine, total_neighbors_ct, min_pts, N, keypack=keypack
-    )
+                pair_count += 1
+                if pair_count % 5 == 0:
+                    _gpu_cleanup()
+                    print(f"  └─ [{pair_count}/{total_pairs}] 쌍 처리 완료")
 
-    cluster_id_pt = [(i + 1) / float(N + 1) for i in range(N)]
-    final_norm_ct = fhe_max_propagation_fhe(
-        engine,
-        keypack,
-        adjacency_ct_list,
-        core_ct,
-        cluster_id_pt,
-        N,
-        max_iter=5
-    )
+            # left: GPU → CPU (in-place, 이 행 끝나면 반환)
+            _block_to_cpu(engine, left_blk)
+            _gpu_cleanup()
 
-    scale_back_pt = engine.encode([float(N + 1) for _ in range(N)])
-    final_ct = engine.multiply(final_norm_ct, scale_back_pt)
-    final_ct = _refresh(engine, final_ct, keypack)
+        writer.close()
+        adj_path = writer.path()
 
-    return final_ct
+        # neighbor count 완성 (+1: 자기 자신 포함)
+        ones_pt            = engine.encode([1.0] * N)
+        total_neighbors_ct = engine.add(running_sum, ones_pt)
+        del running_sum
+
+        core_ct = identify_core_points_fhe_converted(
+            engine, total_neighbors_ct, min_pts, N, keypack
+        )
+
+        cluster_id_pt = [(i + 1) / float(N + 1) for i in range(N)]
+        final_norm_ct = None
+
+        for chunk in _stream_load_chunks(engine, adj_path, adj_chunk_size):
+            if final_norm_ct is None:
+                final_norm_ct = fhe_max_propagation_fhe(
+                    engine, keypack, chunk, core_ct,
+                    cluster_id_pt, N, max_iter=5
+                )
+            else:
+                final_norm_ct = fhe_max_propagation_fhe(
+                    engine, keypack, chunk, core_ct,
+                    cluster_id_pt, N, max_iter=5,
+                    init_label_ct=final_norm_ct
+                )
+            del chunk
+
+    finally:
+        writer.cleanup()
+
+    scale_back_pt = engine.encode([float(N + 1)] * N)
+    final_ct      = engine.multiply(final_norm_ct, scale_back_pt)
+    return _refresh(engine, final_ct, keypack)

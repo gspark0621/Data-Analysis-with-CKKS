@@ -12,9 +12,7 @@ from core.plaintext.GridIndex_plain import (
 from core.plaintext.MultipartyServer_plain import run_multiparty_point_dbscan_plain
 from core.plaintext.FinalClient_plain import reconstruct_results_plain
 
-
 DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/hepta.arff"
-
 
 def load_arff_to_pts_with_labels(filepath: str):
     pts = []
@@ -177,8 +175,11 @@ def main():
         scale_factor=scale_factor
     )
 
+    # 수정점 1: 공간(global_idx) 기준 정렬을 원본 입력(owner_id, owner_local_idx) 기준으로 변경
+    ordered_results = sorted(results, key=lambda x: (x["owner_id"], x["owner_local_idx"]))
+
     cluster_labels_pt = []
-    for row in sorted(results, key=lambda x: x["global_idx"]):
+    for row in ordered_results:
         cluster_labels_pt.append(int(row["label"]))
 
     cluster_labels_pt = remap_labels_to_sequential(cluster_labels_pt)
@@ -195,11 +196,22 @@ def main():
     core_mask = server_result["core_mask"]
     adjacency_list = server_result["adjacency_list"]
 
+    # 수정점 2: 디버그 변수들을 원래 순서(ordered_results)에 맞춰서 서버의 배열에서 매핑 추출
+    debug_pt_total_neighbors = []
+    debug_pt_core_mask = []
+    debug_pt_adjacency_size = []
+
+    for row in ordered_results:
+        g_idx = row["global_idx"]
+        debug_pt_total_neighbors.append(float(neighbor_counts[g_idx]))
+        debug_pt_core_mask.append(float(core_mask[g_idx]))
+        debug_pt_adjacency_size.append(len(adjacency_list[g_idx]))
+
     debug_pt = {
-        "total_neighbors": [float(x) for x in neighbor_counts],
-        "core_mask": [float(x) for x in core_mask],
+        "total_neighbors": debug_pt_total_neighbors,
+        "core_mask": debug_pt_core_mask,
         "final_labels": [float(x) for x in cluster_labels_pt],
-        "adjacency_size": [len(x) for x in adjacency_list],
+        "adjacency_size": debug_pt_adjacency_size,
     }
 
     timings = {
@@ -213,10 +225,11 @@ def main():
     # 4. 결과 출력
     # ---------------------------------------------------------
     print("================ 결과 샘플 ==============================")
-    for row in sorted(results, key=lambda x: x["global_idx"])[:min(20, len(results))]:
+    for row in ordered_results[:min(20, len(ordered_results))]:
         print(
             f"gid={row['global_idx']:4d} | "
             f"owner={row['owner_id']} | "
+            f"local_idx={row['owner_local_idx']} | "
             f"pt_recon={row['point_reconstructed']} | "
             f"pt_norm={row['point_norm']} | "
             f"grid={row['grid_idx']} | "
@@ -285,13 +298,13 @@ def main():
     try:
         with open(output_filename, 'w', encoding='utf-8') as f:
             axis_headers = [f"x{i+1}" for i in range(dimension)]
-            header_str = ",".join(axis_headers) + ",True_Class,PT_BModel_Cluster\n"
+            header_str = ",".join(axis_headers) + ",PT_BModel_Cluster,True_Class\n"
             f.write(header_str)
 
-            ordered_results = sorted(results, key=lambda x: x["global_idx"])
             for i in range(N):
                 coords = ",".join([f"{val:.4f}" for val in ordered_results[i]["point_reconstructed"]])
-                f.write(f"{coords},{true_labels[i]},{cluster_labels_pt[i]}\n")
+                # 수정점 3: 헤더의 선언 순서에 맞춰 예측 라벨(cluster_labels_pt)을 먼저, 정답 라벨(true_labels)을 뒤에 배치
+                f.write(f"{coords},{cluster_labels_pt[i]},{true_labels[i]}\n")
 
         print("✅ 파일 저장 완료! (복원 좌표 기준 저장)")
     except Exception as e:

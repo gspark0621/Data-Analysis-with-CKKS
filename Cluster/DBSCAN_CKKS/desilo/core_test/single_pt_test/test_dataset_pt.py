@@ -5,7 +5,7 @@ import numpy as np
 from sklearn.metrics import adjusted_rand_score  # 클러스터링 정답률 평가 도구
 
 # 작성해둔 평문 시뮬레이션 모듈 임포트
-from core.plaintext.Client_main import run_client_dbscan
+from core.ex.plaintext.Client_main import run_client_dbscan
 
 def load_fcps_dataset(file_path):
     """

@@ -13,8 +13,7 @@ def prepare_owner_blocks_plain(owner_points_raw,
                                owner_id):
     # 정규화 진행
     owner_points_norm, _ = normalize_points_global(owner_points_raw, global_min, global_max)
-
-    # points_raw 인자 제거
+    
     blocks = bucketize_points_by_grid(
         points_norm=owner_points_norm,
         domain_mins_norm=domain_mins_norm,

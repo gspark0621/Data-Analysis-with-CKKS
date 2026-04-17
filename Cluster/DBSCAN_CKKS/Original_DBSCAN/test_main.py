@@ -4,7 +4,7 @@ from time import time
 # 원본 dbscan 코드가 담긴 파일에서 함수와 변수를 임포트합니다.
 from Original_DBSCAN.dbscan import dbscan, NOISE
 
-DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/hepta.arff"
+DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/hepta.arff"
 
 def load_arff_to_pts(filepath: str, ignore_last_column: bool = True):
     """

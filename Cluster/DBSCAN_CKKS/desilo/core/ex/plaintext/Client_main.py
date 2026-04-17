@@ -1,7 +1,7 @@
 # Client_main.py (완전 평문 버전)
 from time import time
 import numpy as np
-from core.plaintext.Server_main import send_to_server_np
+from core.ex.plaintext.Server_main import send_to_server_np
 
 def run_client_dbscan(pts: list, eps: float, min_pts: int):
     start = time()

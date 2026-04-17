@@ -1,1 +1,1 @@
-plaintext_bmodel_sec: 0.101221
+plaintext_bmodel_sec: 0.100836

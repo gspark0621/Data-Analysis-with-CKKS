@@ -1,0 +1,40 @@
+# core/ciphertext/client/MultipartyDataOwner.py
+from core.plaintext.GridIndex_plain import normalize_points_global, bucketize_points_by_grid
+
+def prepare_and_encrypt_owner_blocks(engine, keypack, owner_points_raw, domain_mins_norm, domain_maxs_norm, 
+                                     epsilon_norm, axis_cell_counts, bucket_size, max_blocks_per_grid, 
+                                     global_min, global_max, owner_id):
+    
+    # 1. 평문 모듈을 사용하여 정규화 및 버케팅 수행
+    owner_points_norm, _ = normalize_points_global(owner_points_raw, global_min, global_max)
+    
+    plain_blocks = bucketize_points_by_grid(
+        points_norm=owner_points_norm,
+        domain_mins_norm=domain_mins_norm,
+        domain_maxs_norm=domain_maxs_norm,
+        epsilon_norm=epsilon_norm,
+        axis_cell_counts=axis_cell_counts,
+        bucket_size=bucket_size,
+        max_blocks_per_grid=max_blocks_per_grid,
+        owner_id=owner_id
+    )
+
+    encrypted_blocks = []
+    dimension = len(owner_points_norm[0]) if owner_points_norm else 2
+
+    # 2. 버케팅된 평문 데이터를 FHE Ciphertext로 암호화
+    for blk in plain_blocks:
+        enc_coords = []
+        for d in range(dimension):
+            dim_values = [p[d] if p is not None else 0.0 for p in blk["points_norm"]]
+            pt = engine.encode(dim_values)
+            ct = engine.encrypt(pt, keypack.public_key)
+            enc_coords.append(ct)
+        
+        # 💡 [수정된 부분] 원본 평문 메타데이터(point_refs, points_norm 등)를 모두 보존
+        enc_blk = blk.copy()  
+        enc_blk["enc_coords"] = enc_coords  # 암호화된 좌표 데이터만 새로 추가
+        
+        encrypted_blocks.append(enc_blk)
+
+    return encrypted_blocks
