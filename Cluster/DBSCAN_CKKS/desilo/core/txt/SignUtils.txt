@@ -1,0 +1,158 @@
+# core/ciphertext/server/SignUtils.py
+"""
+Lifting + sign_bootstrap 기반 sign 함수 모음.
+
+변경 내용:
+  - bootstrap_key(일반 bootstrap) 완전 제거
+  - _refresh() 함수 제거 → 모든 레벨 복원을 sign_bootstrap 기반으로 수행
+  - refresh_via_sign(): lifting(depth=1) → sign_bootstrap 으로 레벨 복원 대체
+    주의: 레벨 복원 전용이므로 입력 슬롯값이 ≈ ±1 범위임을 가정하지 않음.
+          입력값을 [-1,1] 범위로 스케일링 후 sign_bootstrap → 원래 스케일로 복원.
+          단, 값이 0에 매우 가까운 경우 sign_bootstrap이 부호만 보존하므로
+          절대값 정보는 손실됨 (sign 연산의 본질적 특성).
+  - fhe_sign_lifted(): fallback 경로 제거 (sign_bootstrap_key 항상 존재)
+"""
+
+import math
+from desilofhe import Engine, Ciphertext
+from util.keypack import KeyPack
+
+
+_BOOTSTRAP_INTERVAL = 3
+
+
+def _poly_step(engine: Engine, ct: Ciphertext, kp: KeyPack) -> Ciphertext:
+    """
+    1.5x - 0.5x³ 한 번 적용 (2 레벨 소모).
+    입력이 [-1,1] 안에 있을 때 ±1 방향으로 수렴.
+    """
+    relin = kp.relinearization_key
+    x_sq  = engine.square(ct, relin)
+    x_cub = engine.multiply(x_sq, ct, relin)
+    t1    = engine.multiply(ct,    1.5)
+    t2    = engine.multiply(x_cub, 0.5)
+    return engine.subtract(t1, t2)
+
+
+def compute_lifting_depth(min_abs_input: float, tau: float = 0.1) -> int:
+    """
+    lifting 반복 횟수 계산.
+    1.5^n * min_abs_input >= (1 - tau) 조건.
+    """
+    if min_abs_input <= 0:
+        raise ValueError("min_abs_input must be > 0")
+    target = 1.0 - tau
+    depth  = math.ceil(math.log(target / min_abs_input) / math.log(1.5))
+    return max(depth + 2, 4)
+
+
+def refresh_via_sign(
+    engine: Engine,
+    ct:     Ciphertext,
+    kp:     KeyPack,
+    scale:  float,
+) -> Ciphertext:
+    """
+    sign_bootstrap 을 이용한 레벨 복원 대체.
+
+    bootstrap_key(일반 bootstrap)를 사용하지 않기 위해,
+    sign_bootstrap 으로 레벨을 복원하는 우회 경로.
+
+    동작 원리:
+      1. ct 를 scale 로 나눠 [-1, 1] 범위로 정규화
+      2. sign_bootstrap → 슬롯값이 ±1 로 snap (레벨 복원)
+      3. scale 를 곱해 원래 크기로 복원
+
+    ⚠️ 제약:
+      - 이 함수는 sign(ct) 의 부호만 보존하고 절대값 정보는 손실됨.
+      - 따라서 0/1 이진 마스크, ±1 부호값, 정규화 라벨처럼
+        "부호가 의미를 갖는" 값에만 적용 가능.
+      - neighbor_count, dist_sq 처럼 연속값을 가지는 암호문에는
+        직접 적용 불가 → 해당 경우는 lifting + sign_bootstrap 조합 사용.
+
+    Parameters
+    ----------
+    scale : ct 의 슬롯값 절대최대 (스케일링 기준).
+            예) core_ct(0~1) → scale=1.0
+                label_ct(0~1/(N+1)~1) → scale=1.0
+                adj_ct(0~1) → scale=1.0
+    """
+    # ① 정규화: [-1, 1]
+    scale_inv_pt = engine.encode([1.0 / scale] * engine.slot_count)
+    normalized   = engine.multiply(ct, scale_inv_pt)
+
+    # ② sign_bootstrap → ±1 (레벨 복원)
+    snapped = engine.sign_bootstrap(
+        normalized,
+        kp.relinearization_key,
+        kp.conjugation_key,
+        kp.sign_bootstrap_key,
+    )
+
+    # ③ 복원: ×scale → 원래 크기
+    scale_pt = engine.encode([scale] * engine.slot_count)
+    return engine.multiply(snapped, scale_pt)
+
+
+def lifting_to_pm1(
+    engine: Engine,
+    ct:     Ciphertext,
+    kp:     KeyPack,
+    depth:  int,
+) -> Ciphertext:
+    """
+    Step 1 – Lifting: [-1,1] → [-1,-1+τ] ∪ [1-τ,1]
+
+    변경: 중간 bootstrap(_refresh) 완전 제거.
+    대신 _BOOTSTRAP_INTERVAL 마다 sign_bootstrap 기반 레벨 복원 수행.
+    (중간값이 ±1 근방에 있을 때만 의미 있음 → depth 가 충분히 진행된 후)
+    """
+    current = ct
+    for i in range(depth):
+        current = _poly_step(engine, current, kp)
+        if (i + 1) % _BOOTSTRAP_INTERVAL == 0 and (i + 1) < depth:
+            # 중간 레벨 복원: 이 시점 current 는 ±1 근방으로 수렴 중
+            # sign_bootstrap 으로 snap + 레벨 복원
+            current = engine.sign_bootstrap(
+                current,
+                kp.relinearization_key,
+                kp.conjugation_key,
+                kp.sign_bootstrap_key,
+            )
+    return current
+
+
+def fhe_sign_lifted(
+    engine: Engine,
+    ct:     Ciphertext,
+    kp:     KeyPack,
+    depth:  int,
+) -> Ciphertext:
+    """
+    Step 1 + Step 2: lifting → sign_bootstrap → {-1, +1}
+
+    변경:
+      - fallback 경로(일반 bootstrap) 완전 제거
+      - sign_bootstrap_key 항상 존재함을 전제
+    """
+    lifted = lifting_to_pm1(engine, ct, kp, depth)
+    return engine.sign_bootstrap(
+        lifted,
+        kp.relinearization_key,
+        kp.conjugation_key,
+        kp.sign_bootstrap_key,
+    )
+
+
+def fhe_heaviside_lifted(
+    engine: Engine,
+    ct:     Ciphertext,
+    kp:     KeyPack,
+    depth:  int,
+) -> Ciphertext:
+    """
+    Heaviside 함수: ≈ 1 if ct > 0, else ≈ 0.
+    = (1 + sign(ct)) / 2
+    """
+    sign_ct = fhe_sign_lifted(engine, ct, kp, depth)
+    return engine.multiply(engine.add(sign_ct, 1.0), 0.5)

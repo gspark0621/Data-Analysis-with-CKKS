@@ -1,0 +1,70 @@
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Phase 0: Pre-negotiation (plaintext 통신)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ DO_j → FC :  local_min_d, local_max_d (각 차원별)
+              n_DO_j (자신의 그리드 내 최대 점 수)
+
+ FC 내부 계산:
+   global_min  = min(local_min across all DOs & dims)
+   global_max  = max(local_max across all DOs & dims)
+   scale_factor = global_max - global_min
+   ε_norm       = ε / scale_factor
+   cols = rows  = ceil(1 / ε_norm)    [2D 기준]
+   G_total      = cols × rows
+   n            = max(n_DO_j)
+   B            = n × k               (k = DO 수)
+   N_total      = G_total × B
+   K_valid      = 유효 rotation offset 집합 (아래 설명)
+   KeyGen: sk, pk, rotation_key, relin_key, bootstrap_key, conjugation_key
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Phase 1: Key & Parameter 배포
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ FC → DO_j    :  pk, scale_factor, ε_norm, n, slot_offset_j = (j-1)×n
+ FC → Server  :  rotation_key, relin_key, bootstrap_key, conjugation_key,
+                 N_total, B, K_valid, ε_norm², min_pts, d, G_total
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Phase 2: Data Encryption (각 DO_j 독립 수행)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ DO_j 로컬 작업:
+   1. scale_factor로 정규화
+   2. 각 점을 grid (r,c) 할당 → g = r×cols + c
+   3. 전역 슬롯 벡터 생성 (차원 d당 1개, 크기 N_total):
+       - DO_j 할당 범위 내 (슬롯 g×B + slot_offset_j .. g×B + slot_offset_j + n - 1):
+           실제 점 좌표 패킹, 남은 슬롯은 dummy = 2.0
+       - 모든 다른 DO의 범위: 0.0
+   4. d개 ciphertext 암호화
+
+ DO_j → Server: d개 ciphertext
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Phase 3: Server FHE-DBSCAN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ Step A) DO 데이터 합산:
+   combined[dim] = Σ_j  DO_j_ctxt[dim]   (FHE add, k회)
+
+ Step B) Grid-based 이웃 판별 [기존 server_main 수정]:
+   for k_offset in K_valid:    ← for k in range(1, N_total) 에서 변경
+     dist_sq_k = Σ_dim (combined[dim] - rotate(combined[dim], k_offset))²
+     adj_k     = check_neighbor_closed_interval(dist_sq_k, ε²)
+     adj_k_list.append(adj_k)
+     total_neighbors_ct += adj_k
+
+ Step C) Core 판별 (기존 Core.txt 재사용, N_real 기준 depth 계산)
+ Step D) Label Propagation (기존 Label_Propagation.txt 재사용,
+         K_valid로 줄어든 adj_k_list 사용)
+
+ Server → FC: 최종 encrypted cluster label ciphertext
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Phase 4: 복호화
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+ FC: sk로 N_total 슬롯 복호화
+     슬롯 인덱스 → (DO_j, local_point_id) 매핑으로 개별 라벨 추출
+     dummy 슬롯(label≈0): noise(-1)으로 처리

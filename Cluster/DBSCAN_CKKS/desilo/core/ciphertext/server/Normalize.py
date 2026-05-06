@@ -1,59 +1,55 @@
-# core/server/Normalize.py
+# core/ciphertext/server/Normalize.py
+"""
+이웃 판별 함수.
+
+변경 내용:
+  기존: sign 다항식(1.5x-0.5x³) required_depth 회 반복 → 일반 bootstrap
+  변경: 스케일링 → lifting_to_pm1 → sign_bootstrap (fhe_sign_lifted)
+
+핵심 개선:
+  이웃 케이스(dist² << eps²)는 스케일 후 0 근방(-0.023 수준)에 몰리는데,
+  기존 방식은 이 범위에서 수렴이 매우 느렸음.
+  lifting 으로 먼저 ±1 근방으로 밀어낸 뒤 sign_bootstrap 으로 정확히 snap.
+"""
+
 import math
-from desilofhe import Engine
+from desilofhe import Engine, Ciphertext
 from util.keypack import KeyPack
+from core.ciphertext.server.SignUtils import (
+    compute_lifting_depth,
+    fhe_heaviside_lifted,
+)
 
 
 def check_neighbor_closed_interval(
-    engine: Engine,
-    dist_sq_ct,
-    eps_sq: float,
-    keypack: KeyPack,
+    engine:    Engine,
+    dist_sq_ct: Ciphertext,
+    eps_sq:    float,
+    keypack:   KeyPack,
     dimension: int,
-    bootstrap_interval: int = 3
-):
-    relin_key = keypack.relinearization_key
-    conj_key = keypack.conjugation_key
-    boot_key = keypack.bootstrap_key
-
+    margin:    float = 0.05,
+    tau:       float = 0.1,
+) -> Ciphertext:
+    """
+    이웃 판별: dist² ≤ eps²  →  ≈ 1,  아니면  ≈ 0.
+    (내부 로직 변경 없음 — 이 함수는 원래 bootstrap 을 직접 호출하지 않음)
+    """
     slot_count = engine.slot_count
-    margin_val = 0.05
 
-    threshold_pt = engine.encode([eps_sq + margin_val for _ in range(slot_count)])
-    x = engine.subtract(dist_sq_ct, threshold_pt)
+    threshold    = eps_sq + margin
+    threshold_pt = engine.encode([threshold] * slot_count)
+    x            = engine.subtract(dist_sq_ct, threshold_pt)
 
     max_dist_sq = float(dimension)
-    lower_abs = abs(-(eps_sq + margin_val))
-    upper_abs = abs(max_dist_sq - (eps_sq + margin_val))
-    bound = max(lower_abs, upper_abs) * 1.1
+    lower_abs   = threshold
+    upper_abs   = max_dist_sq - threshold
+    bound       = max(lower_abs, upper_abs) * 1.1
 
-    scale_factor = 1.0 / bound
-    scale_pt = engine.encode([scale_factor for _ in range(slot_count)])
-    current_x = engine.multiply(x, scale_pt)
+    scale_pt  = engine.encode([1.0 / bound] * slot_count)
+    x_scaled  = engine.multiply(x, scale_pt)
 
-    min_initial_val = margin_val * scale_factor
-    if min_initial_val <= 0:
-        required_depth = 5
-    else:
-        required_depth = math.ceil(math.log(1.0 / min_initial_val, 1.5)) + 3
+    min_abs_input = margin / bound
+    depth = compute_lifting_depth(min_abs_input, tau=tau)
 
-    c15_pt = engine.encode([1.5 for _ in range(slot_count)])
-    c05_pt = engine.encode([0.5 for _ in range(slot_count)])
-    m05_pt = engine.encode([-0.5 for _ in range(slot_count)])
-
-    for i in range(required_depth):
-        x_sq = engine.square(current_x, relin_key)
-        x_cub = engine.multiply(x_sq, current_x, relin_key)
-        term1 = engine.multiply(current_x, c15_pt)
-        term2 = engine.multiply(x_cub, c05_pt)
-        current_x = engine.subtract(term1, term2)
-
-        if (i + 1) % bootstrap_interval == 0 and (i + 1) != required_depth:
-            current_x = engine.intt(current_x)
-            current_x = engine.bootstrap(current_x, relin_key, conj_key, boot_key)
-
-    minus_half = engine.multiply(current_x, m05_pt)
-    result = engine.add(minus_half, c05_pt)
-
-    result = engine.intt(result)
-    return engine.bootstrap(result, relin_key, conj_key, boot_key)
+    neg_x_scaled = engine.multiply(x_scaled, -1.0)
+    return fhe_heaviside_lifted(engine, neg_x_scaled, keypack, depth)

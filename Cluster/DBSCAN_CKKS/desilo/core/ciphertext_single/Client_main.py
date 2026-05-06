@@ -1,7 +1,7 @@
 from time import time
 import desilofhe
-from core.EncryptModule import DimensionalEncryptor
-from core.Server_main import send_to_server_fhe as send_to_server
+from core.ciphertext_single.EncryptModule import DimensionalEncryptor
+from core.ciphertext_single.Server_main import send_to_server_fhe as send_to_server
 from util.keypack import KeyPack
 
 # 주의: 현재 데이터 개수가 slot_count보다 작은 상황만 가정되어 있습니다. 

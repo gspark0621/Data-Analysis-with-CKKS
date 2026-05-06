@@ -4,9 +4,9 @@ import desilofhe
 from desilofhe import Engine, Ciphertext
 from util.keypack import KeyPack
 import numpy as np
-from core.Normalize import check_neighbor_closed_interval
-from core.Core import identify_core_points_fhe_converted as identify_core_points_fhe
-from core.Label_Propagation import fhe_max_propagation_fhe, fhe_circular_shift
+from core.ciphertext_single.Normalize import check_neighbor_closed_interval
+from core.ciphertext_single.Core import identify_core_points_fhe_converted as identify_core_points_fhe
+from core.ciphertext_single.Label_Propagation import fhe_max_propagation_fhe, fhe_circular_shift
 
 
 def save_vector_csv(filename, values, header):

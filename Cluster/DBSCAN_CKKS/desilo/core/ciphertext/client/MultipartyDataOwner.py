@@ -1,88 +1,82 @@
 # core/ciphertext/client/MultipartyDataOwner.py
-import math
-import random
-from core.ciphertext.client.GridIndex import normalize_points_global, bucketize_owner_blocks
+from core.ciphertext.client.GridIndex import (
+    point_to_grid_index,
+    pack_points_column_major,
+    normalize_points_global
+)
 
 
-def prepare_and_encrypt_owner_blocks(engine, keypack,
-                                     owner_points_raw,
-                                     domain_mins_norm, domain_maxs_norm,
-                                     epsilon_norm, axis_cell_counts,
-                                     bucket_size, max_blocks_per_grid,
-                                     global_min, global_max, owner_id):
+def prepare_and_encrypt_owner_blocks(
+    engine,
+    keypack,
+    owner_points_raw:  list,
+    grid_centers_norm: list,   # FinalClient 가 계산 후 전달
+    epsilon_norm:      float,  # = base_epsilon_norm (격자 셀 크기)
+    bucket_size:       int,
+    global_min:        float,
+    global_max:        float,
+    owner_id:          int,
+):
     """
-    [OOM 수정] 암호화 직후 engine.to_cpu() 로 GPU → CPU RAM 이동.
+    DO 데이터를 컬럼-메이저로 패킹 후 FinalClient PK 로 암호화.
 
-    bootstrap key 등 고정 키가 GPU 메모리 대부분을 점유하므로
-    블록 CT를 GPU에 상주시키면 즉시 OOM 발생.
-    → 암호화 직후 to_cpu() 로 CPU RAM에 보관.
-    → 비교 시 서버가 to_cuda() 로 2개 블록만 순간 GPU 적재.
-
-    GPU 상주 CT:
-      비교 중: left 블록 1개 + right 블록 1개 + 중간 연산 CT (~2-3 GB)
-      비교 외: running_sum 1개만
+    반환:
+      client_pack ─ FinalClient 전용
+                    slot_to_point_norm 포함 (서버에 절대 전달하지 말 것)
+      server_pack ─ 서버 전용
+                    암호문 + selection_mask 평문만 (좌표·ref 없음)
     """
-    dim = len(owner_points_raw[0]) if owner_points_raw else 2
+    dim     = len(owner_points_raw[0]) if owner_points_raw else 2
+    G       = len(grid_centers_norm)
+    N_batch = bucket_size * G
 
+    # ── 1. 전역 정규화 ────────────────────────────────────────
     owner_points_norm, _ = normalize_points_global(
         owner_points_raw, global_min, global_max
     )
 
-    plain_blocks = bucketize_owner_blocks(
-        points_norm=owner_points_norm,
-        domain_mins_norm=domain_mins_norm,
-        domain_maxs_norm=domain_maxs_norm,
-        epsilon_norm=epsilon_norm,
-        axis_cell_counts=axis_cell_counts,
-        bucket_size=bucket_size,
-        max_blocks_per_grid=max_blocks_per_grid,
-        owner_id=owner_id,
-    )
+    # ── 2. 격자별 포인트 할당 (bucket_size 초과 버림) ────────────
+    grid_to_pairs = {g: [] for g in range(G)}
+    for local_idx, pt in enumerate(owner_points_norm):
+        g = point_to_grid_index(pt, grid_centers_norm, epsilon_norm)
+        if g is not None and len(grid_to_pairs[g]) < bucket_size:
+            ref = {"owner_id": owner_id, "owner_local_idx": local_idx}
+            grid_to_pairs[g].append((pt, ref))
 
-    non_empty_blocks = [
-        blk for blk in plain_blocks if sum(blk["selection_mask"]) > 0
-    ]
+    # ── 3. 컬럼-메이저 패킹 ──────────────────────────────────
+    packed_coords, packed_mask, slot_to_ref, slot_to_point_norm = \
+        pack_points_column_major(grid_to_pairs, G, bucket_size, dim)
 
-    # Oblivious Padding
-    total_N     = len(owner_points_raw)
-    upper_bound = math.ceil(total_N / bucket_size) * max_blocks_per_grid
-    num_dummies = max(0, upper_bound - len(non_empty_blocks))
-    dummy_blocks = [{
-        "points_norm":    [[0.0] * dim] * bucket_size,
-        "point_refs":     [None] * bucket_size,
-        "selection_mask": [0.0] * bucket_size,
-        "grid_idx": -1, "block_idx": -1,
-    } for _ in range(num_dummies)]
+    # ── 4. FinalClient PK 로 암호화 ──────────────────────────
+    enc_coords = []
+    for d in range(dim):
+        ct = engine.encrypt(engine.encode(packed_coords[d]), keypack.public_key)
+        engine.to_cpu(ct)
+        enc_coords.append(ct)
 
-    all_plain = non_empty_blocks + dummy_blocks
-    random.shuffle(all_plain)
+    enc_mask = engine.encrypt(engine.encode(packed_mask), keypack.public_key)
+    engine.to_cpu(enc_mask)
 
-    client_blocks = []
-    server_blocks = []
+    # ── 5. 패킷 구성 ─────────────────────────────────────────
+    client_pack = {
+        "owner_id":           owner_id,
+        "slot_to_ref":        slot_to_ref,        # {(i,g): ref}
+        "slot_to_point_norm": slot_to_point_norm, # {slot_idx: pt_norm}
+        "packed_mask":        packed_mask,
+        "N_batch":            N_batch,
+        "G":                  G,
+        "bucket_size":        bucket_size,
+    }
 
-    for blk in all_plain:
-        enc_coords = []
-        for d in range(dim):
-            dim_values = [
-                p[d] if p is not None else 0.0
-                for p in blk["points_norm"]
-            ]
-            ct = engine.encrypt(engine.encode(dim_values), keypack.public_key)
-            engine.to_cpu(ct)           # ✅ in-place, ct 여전히 유효
-            enc_coords.append(ct)
+    server_pack = {
+        "enc_coords":         enc_coords,   # List[Ciphertext] CPU
+        "enc_selection_mask": enc_mask,     # Ciphertext       CPU
+        "selection_mask_pt":  packed_mask,  # 평문 마스크 (연산 편의용)
+    }
 
-        enc_mask = engine.encrypt(
-            engine.encode(blk["selection_mask"]), keypack.public_key
-        )
-        engine.to_cpu(enc_mask)         # ✅ in-place
+    active = sum(1 for pts in grid_to_pairs.values() if pts)
+    valid  = int(sum(packed_mask))
+    print(f"[DO {owner_id}] {len(owner_points_norm)}개 포인트 → "
+          f"{active}/{G} 격자 활성, {valid}/{N_batch} 유효 슬롯")
 
-        ...
-        server_blocks.append({
-            "enc_coords":         enc_coords,
-            "enc_selection_mask": enc_mask,
-        })
-
-    print(f"▶ [DO] 블록: 실제={len(non_empty_blocks)}, "
-          f"더미={num_dummies}, 총={len(all_plain)} (전부 CPU RAM 보관)")
-
-    return client_blocks, server_blocks
+    return client_pack, server_pack

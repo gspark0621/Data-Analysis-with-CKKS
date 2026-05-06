@@ -1,99 +1,180 @@
-# core/server/MultipartyServer.py
-from core.ciphertext.server.Normalize import check_neighbor_closed_interval
-from core.ciphertext.server.Core import identify_core_points_fhe_converted
-from core.ciphertext.server.LabelPropagation import fhe_max_propagation_fhe, _refresh
-# GridIndex는 평문 로직을 그대로 재사용하여 인접 행렬을 구성합니다.
-from core.plaintext.GridIndex_plain import build_grid_adjacency 
+# core/ciphertext/server/MultipartyServer.py
 
-def compare_two_blocks(engine, keypack, left_coords, left_mask_pt, right_coords, right_mask_pt, bucket_size, eps, dimension):
-    relin_key = keypack.relinearization_key
-    left_mask = engine.encode(left_mask_pt)
-    right_mask = engine.encode(right_mask_pt)
+from typing import Dict, List, Tuple
+from core.ciphertext.server.Normalize        import check_neighbor_closed_interval
+from core.ciphertext.server.Core             import identify_core_points_fhe_converted
+from core.ciphertext.server.LabelPropagation import fhe_max_propagation_fhe, refresh
+from core.ciphertext.client.GridIndex import (
+    build_grid_adjacency,
+    get_unique_grid_deltas,
+    build_adjacency_mask_for_delta,
+)
 
-    masked_left = [engine.multiply(c, left_mask) for c in left_coords]
-    masked_right = [engine.multiply(c, right_mask) for c in right_coords]
 
-    neighbor_ct_list = []
-    total_neighbor_from_this_pair = None
+def _rotate_mask_pt(mask_pt: list, k: int, N_batch: int) -> list:
+    return [mask_pt[(s + k) % N_batch] for s in range(N_batch)]
 
-    for k in range(bucket_size):
-        dist_sq_k = None
-        for d in range(dimension):
-            rotated_right = engine.rotate(masked_right[d], keypack.rotation_key, k)
-            diff_ct = engine.subtract(masked_left[d], rotated_right)
-            sq_ct = engine.square(diff_ct, relin_key)
-            dist_sq_k = sq_ct if dist_sq_k is None else engine.add(dist_sq_k, sq_ct)
 
-        # FHE 다항식 근사를 이용한 거리 판별
-        adj_k = check_neighbor_closed_interval(engine, dist_sq_k, eps ** 2, keypack, dimension)
-        neighbor_ct_list.append(adj_k)
-        
-        if total_neighbor_from_this_pair is None:
-            total_neighbor_from_this_pair = adj_k
-        else:
-            total_neighbor_from_this_pair = engine.add(total_neighbor_from_this_pair, adj_k)
+def _compare_batch_with_shift(
+    engine, keypack,
+    left_enc_coords, left_mask_pt,
+    right_enc_coords, right_mask_pt,
+    k_global, adj_mask_pt,
+    N_batch, eps_sq, dim,
+):
+    relin = keypack.relinearization_key
 
-    return total_neighbor_from_this_pair, neighbor_ct_list
+    rot_right = [
+        engine.rotate(ct, keypack.rotation_key, k_global)
+        for ct in right_enc_coords
+    ]
+    rot_right_mask_pt = _rotate_mask_pt(right_mask_pt, k_global, N_batch)
 
-def run_multiparty_point_dbscan(engine, keypack, encrypted_owner_blocks_list, 
-                                       grid_centers_norm, query_epsilon_norm, base_epsilon_norm, 
-                                       min_pts, bucket_size, max_blocks_per_grid, total_points_upper_bound):
-    
-    # 평문 버전에 추가된 아키텍처: query_epsilon과 base_epsilon을 분리 적용하여 인접 격자 계산
-    adjacency_grid = build_grid_adjacency(grid_centers_norm, query_epsilon_norm, base_epsilon_norm)
-    num_grids = len(grid_centers_norm)
-    
-    N = total_points_upper_bound
-    dimension = len(grid_centers_norm[0]) 
-    adjacency_ct_list = []
+    combined_mask_pt = [
+        left_mask_pt[s] * rot_right_mask_pt[s] * adj_mask_pt[s]
+        for s in range(N_batch)
+    ]
+
+    left_mask_enc      = engine.encode(left_mask_pt)
+    rot_right_mask_enc = engine.encode(rot_right_mask_pt)
+
+    dist_sq_ct = None
+    for d in range(dim):
+        l_masked = engine.multiply(left_enc_coords[d], left_mask_enc)
+        r_masked = engine.multiply(rot_right[d],       rot_right_mask_enc)
+        diff     = engine.subtract(l_masked, r_masked)
+        sq       = engine.square(diff, relin)
+        dist_sq_ct = sq if dist_sq_ct is None else engine.add(dist_sq_ct, sq)
+
+    adj_ct = check_neighbor_closed_interval(
+        engine, dist_sq_ct, eps_sq, keypack, dim
+    )
+    adj_ct = engine.multiply(adj_ct, engine.encode(combined_mask_pt))
+    return adj_ct
+
+
+def run_multiparty_point_dbscan(
+    engine,
+    keypack,
+    encrypted_owner_packs,
+    grid_centers_norm,
+    query_epsilon_norm,
+    base_epsilon_norm,
+    min_pts,
+    bucket_size,
+    total_points_upper_bound,
+):
+    adjacency_grid = build_grid_adjacency(
+        grid_centers_norm, query_epsilon_norm, base_epsilon_norm
+    )
+    G       = len(grid_centers_norm)
+    dim     = len(grid_centers_norm[0])
+    N_batch = bucket_size * G
+    eps_sq  = query_epsilon_norm ** 2
+
+    unique_deltas = get_unique_grid_deltas(adjacency_grid, G)
+    print(f"[Server] G={G}, N_batch={N_batch}, "
+          f"unique_deltas={len(unique_deltas)}, "
+          f"owners={len(encrypted_owner_packs)}")
+
     total_neighbors_ct = None
+    adj_accum: Dict[int, object] = {}
 
-    owner_lookup = []
-    for owner_blocks in encrypted_owner_blocks_list:
-        table = {(blk["grid_idx"], blk["block_idx"]): blk for blk in owner_blocks}
-        owner_lookup.append(table)
+    for a_idx, pack_a in enumerate(encrypted_owner_packs):
+        mask_a = pack_a["selection_mask_pt"]
+        for ct in pack_a["enc_coords"]:
+            engine.to_cuda(ct)
 
-    for g in range(num_grids):
-        neighbor_grids = [j for j, val in enumerate(adjacency_grid[g]) if val == 1]
-        for table_a in owner_lookup:
-            for block_a in range(max_blocks_per_grid):
-                if (g, block_a) not in table_a: continue
-                left_blk = table_a[(g, block_a)]
+        for b_idx, pack_b in enumerate(encrypted_owner_packs):
+            mask_b = pack_b["selection_mask_pt"]
+            for ct in pack_b["enc_coords"]:
+                engine.to_cuda(ct)
 
-                for ng in neighbor_grids:
-                    for table_b in owner_lookup:
-                        for block_b in range(max_blocks_per_grid):
-                            if (ng, block_b) not in table_b: continue
-                            right_blk = table_b[(ng, block_b)]
+            for delta in unique_deltas:
+                adj_mask_pt = build_adjacency_mask_for_delta(
+                    delta, G, bucket_size, adjacency_grid
+                )
 
-                            pair_neighbor_sum_ct, pair_adj_list = compare_two_blocks(
-                                engine=engine, keypack=keypack,
-                                left_coords=left_blk["enc_coords"], left_mask_pt=left_blk["selection_mask"],
-                                right_coords=right_blk["enc_coords"], right_mask_pt=right_blk["selection_mask"],
-                                bucket_size=bucket_size, eps=query_epsilon_norm, dimension=dimension
-                            )
+                for k_local in range(bucket_size):
+                    k_global = (k_local * G + delta + N_batch) % N_batch
 
-                            if total_neighbors_ct is None:
-                                total_neighbors_ct = pair_neighbor_sum_ct
-                            else:
-                                total_neighbors_ct = engine.add(total_neighbors_ct, pair_neighbor_sum_ct)
-                            adjacency_ct_list.extend(pair_adj_list)
+                    if k_global == 0 and a_idx == b_idx:
+                        continue
 
+                    adj_ct = _compare_batch_with_shift(
+                        engine, keypack,
+                        pack_a["enc_coords"], mask_a,
+                        pack_b["enc_coords"], mask_b,
+                        k_global, adj_mask_pt,
+                        N_batch, eps_sq, dim,
+                    )
+
+                    if total_neighbors_ct is None:
+                        total_neighbors_ct = adj_ct
+                    else:
+                        engine.to_cuda(total_neighbors_ct)
+                        total_neighbors_ct = engine.add(total_neighbors_ct, adj_ct)
+                    engine.to_cpu(total_neighbors_ct)
+
+                    if k_global not in adj_accum:
+                        adj_accum[k_global] = adj_ct
+                    else:
+                        engine.to_cuda(adj_accum[k_global])
+                        adj_accum[k_global] = engine.add(adj_accum[k_global], adj_ct)
+                    engine.to_cpu(adj_accum[k_global])
+
+                    del adj_ct
+
+            for ct in pack_b["enc_coords"]:
+                engine.to_cpu(ct)
+
+        for ct in pack_a["enc_coords"]:
+            engine.to_cpu(ct)
+
+    # ── self-neighbor +1 ─────────────────────────────────────
+    print("[Server] self-neighbor +1 및 sign_bootstrap refresh...")
     if total_neighbors_ct is None:
-        total_neighbors_ct = engine.encode([0.0 for _ in range(N)])
+        zero_pt = engine.encode([0.0] * N_batch)
+        total_neighbors_ct = engine.encrypt(zero_pt, keypack.public_key)
+    else:
+        engine.to_cuda(total_neighbors_ct)
 
-    ones_plaintext = engine.encode([1.0 for _ in range(N)])
-    total_neighbors_ct = engine.add(total_neighbors_ct, ones_plaintext) # 자기 자신 포함
+    ones_pt = engine.encode([1.0] * N_batch)
+    total_neighbors_ct = engine.add(total_neighbors_ct, ones_pt)
+    # ⚠️ total_neighbors_ct 는 이웃 수(정수값, 범위: 1~N)로 연속값이므로
+    #    refresh_via_sign 대신 Core.py 의 fhe_heaviside_lifted 로 처리됨.
+    #    여기서는 레벨만 체크 후 다음 단계(identify_core_points_fhe_converted)로 넘김.
+    #    → 별도 refresh 없이 바로 core 판별 함수로 전달.
 
-    # 1. 코어 포인트 판별 (FHE 부호 다항식)
-    core_ct = identify_core_points_fhe_converted(engine, total_neighbors_ct, min_pts, N, keypack)
+    # ── adj_ct_pairs 구성 ────────────────────────────────────
+    adj_ct_pairs: List[Tuple[int, object]] = []
+    for k_global, ct in sorted(adj_accum.items()):
+        engine.to_cuda(ct)
+        ct = refresh(engine, ct, keypack)   # adj_ct: 0~1 이진 → scale=1.0
+        adj_ct_pairs.append((k_global, ct))
 
-    # 2. 라벨 전파 (Max Propagation)
-    cluster_id_pt = [(i + 1) / float(N + 1) for i in range(N)]
-    final_norm_ct = fhe_max_propagation_fhe(engine, keypack, adjacency_ct_list, core_ct, cluster_id_pt, N, max_iter=5)
+    print(f"[Server] adj_ct_pairs: {len(adj_ct_pairs)}개 고유 k_global")
 
-    # 3. 결과 역정규화 스케일링
-    scale_back_pt = engine.encode([float(N + 1) for _ in range(N)])
-    final_ct = engine.multiply(final_norm_ct, scale_back_pt)
-    
-    return _refresh(engine, final_ct, keypack)
+    # ── Core Point 판별 ──────────────────────────────────────
+    core_ct = identify_core_points_fhe_converted(
+        engine, total_neighbors_ct, min_pts, N_batch, keypack
+    )
+
+    # ── 초기 클러스터 ID ─────────────────────────────────────
+    cluster_id_pt = [(i + 1) / float(N_batch + 1) for i in range(N_batch)]
+
+    # ── Label Propagation ────────────────────────────────────
+    print("[Server] Label Propagation 시작...")
+    final_norm_ct = fhe_max_propagation_fhe(
+        engine        = engine,
+        keypack       = keypack,
+        adj_ct_pairs  = adj_ct_pairs,
+        core_ct       = core_ct,
+        cluster_id_pt = cluster_id_pt,
+        numpoints     = N_batch,
+        maxiter       = 5,
+    )
+
+    scale_back = engine.encode([float(N_batch + 1)] * N_batch)
+    final_ct   = engine.multiply(final_norm_ct, scale_back)
+    return refresh(engine, final_ct, keypack, scale=float(N_batch + 1))

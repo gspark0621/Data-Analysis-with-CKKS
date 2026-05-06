@@ -2,7 +2,7 @@ import math
 from desilofhe import Engine, Ciphertext
 from util.keypack import KeyPack
 
-#TODO: 현재방식과 최적화된 합성 미니맥스(Minimax) 다항식(5-3. Optimization of Homomorphic Comparison... 논문 참고)
+
 def identify_core_points_fhe_converted(
     engine: Engine, 
     neighbor_count_ct: Ciphertext, 
