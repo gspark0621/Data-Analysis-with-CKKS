@@ -1,8 +1,0 @@
-phase0_sec: 0.001277
-phase2_sec: 0.006391
-phase3_step1_neighbor_sec: 0.042471
-phase3_step2_core_sec: 0.000013
-phase3_step3_propagation_sec: 0.154228
-phase3_total_sec: 0.196981
-phase4_sec: 0.000248
-total_sec: 0.204979

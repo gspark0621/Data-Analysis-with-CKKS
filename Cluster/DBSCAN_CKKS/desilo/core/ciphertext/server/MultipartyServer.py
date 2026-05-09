@@ -204,8 +204,10 @@ def run_multiparty_point_dbscan(
     for k_global, ct in sorted(adj_accum.items()):
         engine.to_cuda(ct)
         ct = refresh(engine, ct, keypack)   # adj_ct: 0~1 이진 -> scale=1.0
+        engine.to_cpu(ct)
         adj_ct_pairs.append((k_global, ct))
-
+    del adj_accum
+    
     print(f"[Server] adj_ct_pairs: {len(adj_ct_pairs)}개 고유 k_global")
 
     # ── Core Point 판별 ──────────────────────────────────────

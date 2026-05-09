@@ -10,4 +10,4 @@ class KeyPack:
     rotation_key:        desilofhe.RotationKey
     relinearization_key: desilofhe.RelinearizationKey
     conjugation_key:     desilofhe.ConjugationKey
-    bootstrap_key:       desilofhe.BootstrapKey  # sign_bootstrap_key 제거, bootstrap_key만 사용
+    sign_bootstrap_key:  desilofhe.LossyBootstrapKey 
