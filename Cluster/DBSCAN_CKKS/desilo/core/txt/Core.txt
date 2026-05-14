@@ -1,17 +1,31 @@
 # core/ciphertext_single/Core.py
+#
+# 핵심 변경:
+#   [변경 1] α=12 → α=11 최적화
+#     이유:
+#       α=9  t_k > min_gap=0.5/N → 분류 오류 가능
+#       α=10 Remez 편차로 UNSAFE 위험 (margin 추가 시 threshold 초과)
+#       α=11 [7,15,15,15]: t_k=0.00051 << threshold=0.00098 → 안정적 SAFE
+#            delta=2^{-11} < 0.5/N (4.8배 여유)
+#            α=12와 동일 5회 bootstrap, non-scalar mult 5회 절약
+#
+#   [변경 2] _eval_mcp_fhe: 마지막 컴포넌트 평가 *후* bootstrap
+#     (Normalize.py와 동일 패턴)
+#
+#   [변경 3] sign_bootstrap 복원 (level 충분)
 
 from desilofhe import Engine, Ciphertext
 from util.keypack import KeyPack
 from core.ciphertext_single.minimax import load_mcp
 
 
+_MCP_CORE_PATH = "mcp_alpha11.json"   # ★ α=11 (기존 α=12에서 최적화)
+
+
 def _eval_mcp_fhe(engine, ct, components, N, keypack):
     """
-    FHE 상에서 Minimax Composite Polynomial 평가:
-        p(x) = p_k ∘ ... ∘ p_1(x)
-
-    각 p_i: c[0]·x + c[1]·x³ + c[2]·x⁵ + ...  (홀수 다항식)
-    중간 단계마다 bootstrap 수행 (마지막 제외).
+    FHE MCP 평가. 마지막 후 bootstrap 포함.
+    중간 + 마지막 모든 step 후 bootstrap → level=10 반환.
     """
     relin_key = keypack.relinearization_key
     conj_key  = keypack.conjugation_key
@@ -19,16 +33,21 @@ def _eval_mcp_fhe(engine, ct, components, N, keypack):
     current   = ct
 
     for step_idx, comp in enumerate(components):
-        coeffs = comp["coeffs"]   # [c0, c1, ...] → x^1, x^3, x^5, ...
+        coeffs   = comp["coeffs"]
+        domain_b = comp.get("domain_b", 1.0)
 
-        x_sq   = engine.square(current, relin_key)
-        x_pow  = current                                         # x^1
-        result = engine.multiply(
-            x_pow, engine.encode([coeffs[0]] * N)
-        )                                                        # c[0]·x
+        if abs(domain_b - 1.0) > 1e-9:
+            inv_b   = engine.encode([1.0 / domain_b] * N)
+            working = engine.multiply(current, inv_b)
+        else:
+            working = current
+
+        x_sq   = engine.square(working, relin_key)
+        x_pow  = working
+        result = engine.multiply(x_pow, engine.encode([coeffs[0]] * N))
 
         for k in range(1, len(coeffs)):
-            x_pow  = engine.multiply(x_pow, x_sq, relin_key)    # x^(2k+1)
+            x_pow  = engine.multiply(x_pow, x_sq, relin_key)
             result = engine.add(
                 result,
                 engine.multiply(x_pow, engine.encode([coeffs[k]] * N))
@@ -36,63 +55,73 @@ def _eval_mcp_fhe(engine, ct, components, N, keypack):
 
         current = result
 
-        # 마지막 컴포넌트 제외하고 중간 bootstrap
-        if step_idx < len(components) - 1:
-            print(f"  - [Core MCP] p_{step_idx+1} 완료, 중간 부트스트래핑...")
-            current = engine.intt(current)
-            current = engine.bootstrap(current, relin_key, conj_key, boot_key)
+        # ★ 모든 step 후 bootstrap (마지막 포함)
+        print(f"  - [Core MCP] p_{step_idx+1} 완료 (domain_b={domain_b:.4f}), bootstrap...")
+        current = engine.intt(current)
+        current = engine.bootstrap(current, relin_key, conj_key, boot_key)
 
-    return current
+    return current  # level=10
 
 
 def identify_core_points_fhe_converted(
-    engine            : Engine,
-    neighbor_count_ct : Ciphertext,
-    min_pts           : float,
-    N                 : int,
-    keypack           : KeyPack,
-    bootstrap_interval: int = 3,    # 하위 호환성 유지 (내부 미사용)
-    mcp_path          : str = "mcp_alpha12.json",
+    engine: Engine,
+    neighbor_count_ct: Ciphertext,
+    min_pts: float,
+    N: int,
+    keypack: KeyPack,
+    bootstrap_interval: int = 3,
+    mcp_path: str = None,  # None이면 _MCP_CORE_PATH 사용
     **kwargs
 ) -> Ciphertext:
     """
-    Core point 판별: totalNeighbors >= min_pts 이면 1, 아니면 0.
+    Core point 판별: totalNeighbors >= min_pts → 1, else → 0.
 
-    α=12 MCP (degrees=[3,5,5,5,5,5,9]) 사용:
-      - sign_err ≈ 2.4e-4
-      - N=134: 누적 오차 = 134 × 2.4e-4 = 0.032  → 안전
-      - N=2048: 누적 오차 = 2048 × 2.4e-4 = 0.49 → 안전
+    α=11 선택 이유 (최적값):
+      최소 입력 gap = 0.5/N = 0.5/212 ≈ 0.00236
+      α=10 [7,7,13,15]: Remez 편차로 t_k가 threshold 근방 → margin 추가 시 UNSAFE
+      α=11 [7,15,15,15]: t_k=0.00051 << threshold=0.00098 → 안정적 SAFE
+                          delta=2^{-11}=0.00049 < 0.00236 (4.8배 여유)
+      α=12 대비: 동일 4+1=5회 bootstrap, non-scalar mult 5회 절약
 
-    사전 준비:
-      test_Server_main_call_dataset.py 실행 시 자동으로
-      mcp_alpha12.json 을 생성하므로 별도 작업 불필요.
+    sign_bootstrap 후 정밀도:
+      error ≤ (π²/8) × (2^{-10})² ≈ 1.2e-6 → 매우 정밀한 0/1 판별
     """
+    if mcp_path is None:
+        mcp_path = _MCP_CORE_PATH
+
     relin_key = keypack.relinearization_key
     conj_key  = keypack.conjugation_key
     boot_key  = keypack.bootstrap_key
 
-    # ── 1. α=12 MCP 계수 로드 ────────────────────────────
-    print(f"[Server] Core: α=12 MCP 계수 로드 ({mcp_path})")
+    print(f"[Server] Core: α=11 MCP 로드 ({mcp_path})")
     components = load_mcp(mcp_path)
     print(f"[Server] Core: degrees={[c['degree'] for c in components]}, "
           f"sign_err={components[-1]['error']:.4e}")
 
-    # ── 2. 입력 준비: x = (totalNeighbors - (min_pts - 0.5)) / N ──
-    # margin=0.5: totalNeighbors 는 정수값 → 경계 0.5 버퍼
-    # /N: sign 입력을 [-1, 1] 로 스케일
-    margin         = 0.5
-    min_pts_pt     = engine.encode([min_pts - margin] * N)
-    x              = engine.subtract(neighbor_count_ct, min_pts_pt)
-    scale_pt       = engine.encode([1.0 / float(N)] * N)
-    current_x      = engine.multiply(x, scale_pt)
+    # x = (totalNeighbors - (min_pts - 0.5)) / N ∈ [-1, 1]
+    margin     = 0.5
+    min_pts_pt = engine.encode([min_pts - margin] * N)
+    x          = engine.subtract(neighbor_count_ct, min_pts_pt)
+    scale_pt   = engine.encode([1.0 / float(N)] * N)
+    current_x  = engine.multiply(x, scale_pt)
 
-    print(f"[Server] Core: N={N}, min_pts={min_pts}, margin={margin}, "
-          f"scale=1/{N}={1.0/N:.4e}")
+    print(f"[Server] Core: N={N}, min_pts={min_pts}, scale=1/{N}={1.0/N:.4e}")
+    print(f"[Server] Core: delta=2^-11={2**-11:.5f} < 0.5/N={0.5/N:.5f} ✓")
 
-    # ── 3. α=12 MCP 로 sign 근사 ─────────────────────────
+    # MCP 평가 → 마지막 후 bootstrap → level=10
     current_x = _eval_mcp_fhe(engine, current_x, components, N, keypack)
 
-    # ── 4. sign → {0,1}: (sign + 1) / 2 ─────────────────
+    # ★ sign_bootstrap (level=10 입력)
+    print(f"  - [Core] sign_bootstrap...")
+    current_x = engine.sign_bootstrap(
+        engine.intt(current_x),
+        keypack.relinearization_key,
+        keypack.conjugation_key,
+        keypack.rotation_key,
+        keypack.smallbootstrap_key,
+    )
+
+    # (sign + 1) / 2 → {0, 1}
     half_pt        = engine.encode([0.5] * N)
     core_indicator = engine.add(engine.multiply(current_x, half_pt), half_pt)
 

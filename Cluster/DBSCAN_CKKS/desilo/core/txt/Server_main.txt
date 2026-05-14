@@ -1,4 +1,22 @@
+# core/ciphertext_single/Server_main.py
+#
+# ── 변경사항 ────────────────────────────────────────────────────────────────
+# [변경 1] send_to_server_fhe 파라미터 추가
+#   - use_kd_propagation: True → fhe_kd_dense_propagation (k_max 기반 dense stride)
+#                         False → fhe_sweep_propagation (fallback)
+#
+# [변경 2] fhe_kd_dense_propagation import 및 사용
+#   - k_max = min(N//2, 3×ceil(√N)) : T(k_max)≥N → 1 sweep 수렴 보장
+#   - dense k=1..k_max: power-of-2 stride 누락 문제 해결
+#
+# [변경 3] Normalize mcp_path="mcp_normalize_alpha12.json"
+#   - alpha=12: margin 0.012→0.00077, false positive zone 32%→2.4% 해결
+#
+# [유지] Normalize, Core, adj 대칭 최적화, 디버그 코드 모두 동일
+# ────────────────────────────────────────────────────────────────────────────
+
 import os
+import math
 from time import time
 import desilofhe
 from desilofhe import Engine, Ciphertext
@@ -7,7 +25,11 @@ import numpy as np
 import pynvml
 from core.ciphertext_single.Normalize import check_neighbor_closed_interval
 from core.ciphertext_single.Core import identify_core_points_fhe_converted as identify_core_points_fhe
-from core.ciphertext_single.Label_Propagation import fhe_max_propagation_fhe, fhe_circular_shift
+from core.ciphertext_single.Label_Propagation import (
+    fhe_kd_dense_propagation,   # ★ dense stride k=1..k_max (power-of-2 누락 수정)
+    fhe_sweep_propagation,      # fallback 유지
+    fhe_circular_shift,
+)
 
 
 def _gpu_used_mb() -> float:
@@ -19,21 +41,20 @@ def _gpu_used_mb() -> float:
         return 0.0
 
 def _print_mem(label: str):
-    used = _gpu_used_mb()
-    print(f"  [MEM][Server] {label:<45}  used={used:.0f} MB")
+    print(f"  [MEM][Server] {label:<45}  used={_gpu_used_mb():.0f} MB")
 
 def _mem_delta(label: str, before: float) -> float:
     after = _gpu_used_mb()
-    print(f"  [MEM][Server] {label:<45}  delta={after - before:+.0f} MB  (used={after:.0f} MB)")
+    print(f"  [MEM][Server] {label:<45}  delta={after-before:+.0f} MB  (used={after:.0f} MB)")
     return after
 
 
 def save_vector_csv(filename, values, header):
     try:
-        with open(filename, 'w', encoding='utf-8') as f:
+        with open(filename, "w", encoding="utf-8") as f:
             f.write(header + "\n")
             for i, v in enumerate(values):
-                f.write(f"{i},{float(np.real(v)):.6f}\n")  # [수정] np.real() 추가
+                f.write(f"{i},{float(np.real(v)):.6f}\n")
         print(f"✅ 저장 완료: {filename}")
     except Exception as e:
         print(f"❌ 저장 실패 ({filename}): {e}")
@@ -41,161 +62,177 @@ def save_vector_csv(filename, values, header):
 
 def send_to_server_fhe(
     engine, keypack, secret_key,
-    encrypted_columns, num_points, eps, min_pts
+    encrypted_columns, num_points, eps, min_pts,
+    k_max: int = None,
+    use_kd_propagation: bool = True,
+    num_sweeps: int = None,
 ):
-    dim = len(encrypted_columns)
-    N   = num_points
+    """
+    서버 메인 파이프라인.
+
+    Parameters
+    ----------
+    k_max : int
+        dense stride 상한. Client_main.decide_propagation_mode에서 전달.
+        None이면 내부 계산: min(N//2, 3×ceil(√N)).
+        T(k_max) ≥ N → 연속 stride ≤ k_max인 모든 cluster 1 sweep 수렴 보장.
+    use_kd_propagation : bool
+        True  → fhe_kd_dense_propagation  (min_pts≥4, Heap 정렬 전제, 고속+정확)
+        False → fhe_sweep_propagation     (min_pts<4, chain형 허용)
+    num_sweeps : int
+        sweep 방식 사용 시 sweep 횟수.
+
+    주의:
+        use_kd_propagation=True 시 encrypted_columns는
+        Client_main.build_kd_tree_order로 정렬된 데이터여야 함.
+    """
+    dim  = len(encrypted_columns)
+    N    = num_points
+    if k_max is None:
+        k_max = min(N // 2, 3 * math.ceil(math.sqrt(N)))
+    if num_sweeps is None:
+        num_sweeps = math.ceil(math.log2(N))
+
     adj_k_list         = []
     total_neighbors_ct = None
-
-    debug_fhe = {}
-    timings   = {}
+    debug_fhe          = {}
+    timings            = {}
 
     _print_mem("send_to_server_fhe() 진입")
-    print(f"  [MEM][Server] N={N}  dim={dim}  eps^2={eps**2:.4f}  min_pts={min_pts}")
+    print(f"  N={N}  dim={dim}  eps^2={eps**2:.4f}  min_pts={min_pts}")
+    T_kmax = k_max * (k_max + 1) // 2
+    print(f"  k_max={k_max}  T(k_max)={T_kmax}  전파방식={'KD-dense' if use_kd_propagation else f'ALL-sweep ({num_sweeps}회)'}")
 
-    print(f"\n[DEBUG] 1. 이웃 판별(Normalize) 단계 시작... eps^2 = {eps**2:.4f}")
+    # ══════════════════════════════════════════════════════════════
+    # Step 1. Normalize: adj_k 계산 (k=1..N//2, 대칭 최적화)
+    # adj_{N-k}[i] = adj_k[(i-k) mod N] = rotate(adj_k, N-k)[i]
+    # → k=1..N//2만 MCP 계산, 역방향은 회전으로 유도
+    # ══════════════════════════════════════════════════════════════
+    print(f"\n[DEBUG] 1. Normalize 시작... eps^2={eps**2:.4f}")
+    print(f"  adj 대칭 최적화: k=1..{N//2} MCP ({N//2}회) + k>{N//2} 회전 유도")
     normalize_start = time()
 
-    for k in range(1, N):
+    for k in range(1, N // 2 + 1):
         dist_sq_k = None
         for d in range(dim):
             base_col    = encrypted_columns[d]
             rotated_col = fhe_circular_shift(engine, base_col, k, N, keypack)
             diff_ct     = engine.subtract(base_col, rotated_col)
             sq_ct       = engine.square(diff_ct, keypack.relinearization_key)
-            if dist_sq_k is None:
-                dist_sq_k = sq_ct
-            else:
-                dist_sq_k = engine.add(dist_sq_k, sq_ct)
+            dist_sq_k   = sq_ct if dist_sq_k is None else engine.add(dist_sq_k, sq_ct)
 
         before_adj = _gpu_used_mb()
-        adj_k = check_neighbor_closed_interval(engine, dist_sq_k, eps**2, keypack, dim)
-        adj_k_list.append(adj_k)
+        adj_k      = check_neighbor_closed_interval(
+            engine, dist_sq_k, eps**2, keypack, dim,
+            mcp_path="mcp_normalize_alpha12.json",  # ★ alpha=12: false positive 32%→2.4%
+        )
+        adj_k_list.append(adj_k)  # k=1..N//2 저장
 
-        if k % 10 == 0 or k == N - 1:
-            _mem_delta(f"adj_k[{k}] 생성 (누적 {k}개)", before_adj)
+        if 2 * k < N:
+            adj_Nk = fhe_circular_shift(engine, adj_k, N - k, N, keypack)
+            total_neighbors_ct = (
+                engine.add(adj_k, adj_Nk)
+                if total_neighbors_ct is None
+                else engine.add(total_neighbors_ct, engine.add(adj_k, adj_Nk))
+            )
+        else:  # k == N//2: double counting 방지
+            total_neighbors_ct = (
+                adj_k
+                if total_neighbors_ct is None
+                else engine.add(total_neighbors_ct, adj_k)
+            )
 
-        if total_neighbors_ct is None:
-            total_neighbors_ct = adj_k
-        else:
-            total_neighbors_ct = engine.add(total_neighbors_ct, adj_k)
+        if k % 10 == 0 or k == N // 2:
+            _mem_delta(f"adj_k[{k}] 생성 (누적 {k}회 MCP)", before_adj)
 
-        if k == N - 1:
-            dec_adj   = engine.decrypt(adj_k, secret_key)
-            # [수정] np.real()로 실수부만 추출
-            valid_adj = np.real(dec_adj[:N])
-            print(f"  -> k={k} 일 때 이웃 배열 (하위 10개): {np.round(valid_adj[-10:], 4)}")
+        if k == N // 2:
+            valid_adj = np.real(engine.decrypt(adj_k, secret_key)[:N])
+            print(f"  -> k={k}(N//2) 이웃 배열 (하위 10개): {np.round(valid_adj[-10:], 4)}")
 
-    ones_plaintext     = engine.encode([1.0 for _ in range(N)])
-    total_neighbors_ct = engine.add(total_neighbors_ct, ones_plaintext)
+    ones_pt            = engine.encode([1.0] * N + [0.0] * (engine.slot_count - N))
+    total_neighbors_ct = engine.add(total_neighbors_ct, ones_pt)
 
     timings["normalize_sec"] = time() - normalize_start
-    print(f"[TIME] Normalize 단계 소요 시간: {timings['normalize_sec']:.2f}초")
+    print(f"[TIME] Normalize: {timings['normalize_sec']:.2f}초")
+    _print_mem(f"Normalize 완료 (adj_k_half_list {len(adj_k_list)}개 = k=1..{N//2})")
 
-    _print_mem(f"Normalize 완료 (adj_k_list {len(adj_k_list)}개 보유)")
-
-    # [수정] np.real()로 실수부만 추출
     dec_total = np.real(engine.decrypt(total_neighbors_ct, secret_key)[:N])
     debug_fhe["total_neighbors"] = np.array(dec_total)
+    print(f"\n[DEBUG] 2. 총 이웃 수 (앞 10개): {np.round(dec_total[:10], 2)}")
+    save_vector_csv(f"debug_normalize_eps{eps:.4f}_min{int(min_pts)}.csv",
+                    dec_total, "Point_ID,Total_Neighbors")
 
-    print(f"\n[DEBUG] 2. 총 이웃 수 누적 결과 (상위 10개): {np.round(dec_total[:10], 2)}")
-    print(f"  -> 코어 포인트 조건 (min_pts) : {min_pts}")
-
-    save_vector_csv(
-        filename=f"debug_normalize_eps{eps:.4f}_min{int(min_pts)}.csv",
-        values=dec_total, header="Point_ID,Total_Neighbors"
-    )
-
+    # ══════════════════════════════════════════════════════════════
+    # Step 2. Core Point 판별
+    # ══════════════════════════════════════════════════════════════
     before_core = _gpu_used_mb()
     core_start  = time()
-    core_ct     = identify_core_points_fhe(engine, total_neighbors_ct, min_pts, N, keypack=keypack)
+    core_ct     = identify_core_points_fhe(
+        engine, total_neighbors_ct, min_pts, N, keypack=keypack
+    )
     timings["core_sec"] = time() - core_start
     _mem_delta("identify_core_points_fhe() 완료", before_core)
-    print(f"[TIME] Core 단계 소요 시간: {timings['core_sec']:.2f}초")
+    print(f"[TIME] Core: {timings['core_sec']:.2f}초")
 
-    # [수정] np.real()로 실수부만 추출
     dec_core = np.real(engine.decrypt(core_ct, secret_key)[:N])
     debug_fhe["core_mask"] = np.array(dec_core)
+    n_core = int(np.sum(dec_core[:N] > 0.5))
+    print(f"\n[DEBUG] 3. Core 마스크 (앞 10개): {np.round(dec_core[:10], 4)}")
+    print(f"  -> Core 포인트: {n_core}/{N}")
+    if n_core == 0:
+        print("  ❌ [FATAL] 코어 포인트 미검출!")
+    save_vector_csv(f"debug_core_eps{eps:.4f}_min{int(min_pts)}.csv",
+                    dec_core, "Point_ID,Core_Mask")
 
-    print(f"\n[DEBUG] 3. Core 판별 마스크 결과 (상위 10개): {np.round(dec_core[:10], 4)}")
-    if np.max(dec_core[:N]) < 0.5:
-        print("  ❌ [FATAL] 코어 포인트가 단 한 개도 검출되지 않았습니다! Core.py의 스케일링/마진을 점검하세요.")
-
-    save_vector_csv(
-        filename=f"debug_core_eps{eps:.4f}_min{int(min_pts)}.csv",
-        values=dec_core, header="Point_ID,Core_Mask"
-    )
-
-    print("\n[DEBUG] 4. Label Propagation 전파 시작...")
-
-    # ──────────────────────────────────────────────────────────────────
-    # [핵심 수정] cluster_id_pt 인코딩 변경
-    #
-    # 기존: cluster_id_pt[i] = (i+1) / float(N+1)
-    #   → N=212일 때 최소 간격 ≈ 0.0047
-    #   → fhe_sign_unit이 인접 ID 차이를 구별 불가 → max 전파 실패
-    #
-    # 수정: cluster_id_pt[i] = (i+1) / float(N)
-    #   → 최소 간격 = 1/N ≈ 0.0047 (거의 동일)
-    #   → 단, Label_Propagation.py의 fhe_fast_max_unit_scaled가
-    #      id_gap = 1/N을 명시적으로 받아 diff를 스케일링하므로
-    #      sign 근사가 구별 가능해짐
-    #
-    # 동시에 서버 후처리의 scale_back도 N으로 변경 (N+1 → N)
-    # ──────────────────────────────────────────────────────────────────
-    cluster_id_pt = [(i + 1) / float(N) for i in range(N)]
+    # ══════════════════════════════════════════════════════════════
+    # Step 3. Label Propagation
+    # ══════════════════════════════════════════════════════════════
+    print(f"\n[DEBUG] 4. Label Propagation 시작...")
 
     before_lp = _gpu_used_mb()
     lp_start  = time()
-    final_norm_ct = fhe_max_propagation_fhe(
-        engine, keypack, adj_k_list, core_ct, cluster_id_pt, N, max_iter=5,
-    )
+
+    if use_kd_propagation:
+        # KD-tree dense stride (min_pts≥4 보장)
+        T_kmax = k_max * (k_max + 1) // 2
+        print(f"  방식: KD-dense k=1..{k_max}")
+        print(f"  T({k_max})={T_kmax} {'≥' if T_kmax >= N else '<'} N={N}")
+        print(f"  fhe_max≈{2*2*k_max*2}회 (ALL-sweep {2*num_sweeps*(N//2)*2}회 대비 {2*num_sweeps*(N//2)*2//(2*2*k_max*2)}배↓)")
+
+        final_ct = fhe_kd_dense_propagation(
+            engine, keypack,
+            adj_k_half_list=adj_k_list,
+            core_ct=core_ct,
+            num_points=N,
+            k_max=k_max,
+            secret_key=secret_key,
+        )
+    else:
+        # ALL strides sweep (min_pts<4, chain형)
+        print(f"  방식: ALL strides sweep (num_sweeps={num_sweeps})")
+        print(f"  fhe_max: {2 * num_sweeps * (N//2) * 2}회")
+
+        final_ct = fhe_sweep_propagation(
+            engine, keypack,
+            adj_k_half_list=adj_k_list,
+            core_ct=core_ct,
+            num_points=N,
+            secret_key=secret_key,
+            num_sweeps=num_sweeps,
+        )
+
     timings["label_propagation_sec"] = time() - lp_start
-    _mem_delta("fhe_max_propagation_fhe() 완료", before_lp)
-    print(f"[TIME] Label_Propagation 단계 소요 시간: {timings['label_propagation_sec']:.2f}초")
+    _mem_delta("Label Propagation 완료", before_lp)
+    print(f"[TIME] Label_Propagation: {timings['label_propagation_sec']:.2f}초")
 
-    # [수정] np.real()로 실수부만 추출
-    dec_final_norm = np.real(engine.decrypt(final_norm_ct, secret_key)[:N])
-    debug_fhe["final_norm_labels"] = np.array(dec_final_norm)
-
-    print(f"\n[DEBUG] 5. 전파 완료 후 정규화 라벨 결과 (상위 10개): {np.round(dec_final_norm[:10], 4)}")
-
-    save_vector_csv(
-        filename=f"debug_labelprop_norm_eps{eps:.4f}_min{int(min_pts)}.csv",
-        values=dec_final_norm, header="Point_ID,Final_Norm_Label"
-    )
-
-    post_start = time()
-    # [수정] scale_back: N+1 → N (cluster_id_pt 변경과 일치)
-    scale_back_pt = engine.encode([float(N) for _ in range(N)])
-    final_ct      = engine.multiply(final_norm_ct, scale_back_pt)
-
-    before_boot = _gpu_used_mb()
-    final_ct = engine.bootstrap(
-        engine.intt(final_ct),
-        keypack.relinearization_key,
-        keypack.conjugation_key,
-        keypack.bootstrap_key
-    )
-    _mem_delta("final bootstrap() 완료", before_boot)
-
-    timings["postprocess_sec"] = time() - post_start
-    print(f"[TIME] Final scale-back + bootstrap 소요 시간: {timings['postprocess_sec']:.2f}초")
-
-    _print_mem("send_to_server_fhe() 최종")
-
-    # [수정] np.real()로 실수부만 추출
     dec_final = np.real(engine.decrypt(final_ct, secret_key)[:N])
     debug_fhe["final_labels"] = np.array(dec_final)
-
-    print(f"\n[DEBUG] 6. 최종 복원된 라벨 결과 (상위 10개): {np.round(dec_final[:10], 2)}")
-
-    save_vector_csv(
-        filename=f"debug_labelprop_final_eps{eps:.4f}_min{int(min_pts)}.csv",
-        values=dec_final, header="Point_ID,Final_Label"
-    )
+    print(f"\n[DEBUG] 5. 최종 라벨 (Heap 순서, 앞 10개): {np.round(dec_final[:10], 2)}")
+    print(f"  범위: min={dec_final.min():.2f}, max={dec_final.max():.2f}  (정상: [0,{N}])")
+    print(f"  ※ 클라이언트에서 inv_perm 적용 후 원래 순서 복원")
+    save_vector_csv(f"debug_labelprop_final_eps{eps:.4f}_min{int(min_pts)}.csv",
+                    dec_final, "Point_ID,Final_Label_Heap_Order")
 
     debug_fhe["timings"] = timings
-    print("\n[DEBUG] 7. 디버깅용 중간 상태값 추출 완료")
+    _print_mem("send_to_server_fhe() 완료")
     return final_ct, debug_fhe

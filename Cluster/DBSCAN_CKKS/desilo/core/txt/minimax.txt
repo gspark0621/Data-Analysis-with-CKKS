@@ -1,20 +1,37 @@
 # core/sign_approx/minimax.py
 """
 Minimax Composite Polynomial (MCP) for Sign Function Approximation
-(순수 Python / NumPy — FHE 의존성 없음)
 
 논문: Lee et al., "Minimax Approximation of Sign Function by Composite
       Polynomial for Homomorphic Comparison", IEEE TDSC 2022
 
-FHE-DBSCAN 적용 목표
-  1) Normalize.py  → eps 이웃 판별 (Heaviside step)
-  2) Core.py       → min_pts 코어 판별 (indicator step)
-  3) Label_Propagation.py → cluster-ID max 연산 (sign)
+sign_bootstrap 활용 (Hong et al., DesiloFHE):
+  MCP 출력(≈±1) 후 sign_bootstrap → 정밀도 ≈ (π²/8)×τ² 수준으로 향상
+  단, sign_bootstrap은 입력이 ±1 근방(τ 작을 것)이어야 함 → MCP의 delta 조건이 선행
 
-워크플로우
-  1단계(오프라인): compute_mcp() 로 계수 계산  →  save_mcp() 로 JSON 저장
-  2단계(온라인)  : load_mcp() 로 로드 →  평문: eval_mcp_np()
-                                        →  FHE : fhe_sign.eval_mcp_fhe()
+─────────────────────────────────────────────────────────────────────────
+α 최소값 결정 규칙 (N=212 DBSCAN 기준):
+
+  사용처           최소 |입력 gap|    최소 α    minimize_depth degrees
+  ─────────────────────────────────────────────────────────────────────
+  fhe_sgn (LP)    1/N = 0.00472    α=8       [7, 15, 15]     3 comp
+  Normalize (adj) margin/bound     α=8       [7, 15, 15]     3 comp
+                  ≈ 0.00394
+  Core            0.5/N = 0.00236  α=10      [7, 7, 13, 15]  4 comp
+                                   (α=12는 동일 4 comp, 비효율)
+
+DesiloFHE lazy-rescaling 영향:
+  dep(d) × 2 = 실제 레벨 소비
+  dep(15)=4 → 8레벨 소비, bootstrap(level=10) 후 10-8=2 남음
+  → sign_bootstrap 최소 레벨 3 불충족 → 에러 원인
+  → 해결: 마지막 컴포넌트 평가 *후* regular bootstrap → level=10
+          → sign_bootstrap 입력 level=10 ≥ 3 → 성공
+
+sign_bootstrap 출력 정밀도 (Theorem 1, τ=2^{-α}):
+  error ≤ (π²/8)×τ²,  fhe_max error ≤ N×error/2
+  α=8: fhe_max error ≤ 0.002 (round 임계 0.5 대비 251배 여유)
+  α=10: fhe_max error ≤ 0.0001 (4009배 여유)
+─────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
@@ -23,148 +40,76 @@ import numpy as np
 from typing import List, Tuple
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 내부 유틸
-# ─────────────────────────────────────────────────────────────────────────────
-
 def _poly_np(coeffs: np.ndarray, x: np.ndarray) -> np.ndarray:
-    """
-    홀수 다항식  p(x) = c[0]·x + c[1]·x³ + c[2]·x⁵ + …  평가.
-    coeffs[k] = x^(2k+1) 의 계수.
-    """
     x    = np.asarray(x, dtype=np.float64)
     val  = np.zeros_like(x)
-    xpow = x.copy()        # x^1
-    xsq  = x * x           # x²  (재사용)
+    xpow = x.copy()
+    xsq  = x * x
     for c in coeffs:
         val  += c * xpow
-        xpow  = xpow * xsq  # 다음 홀수 거듭제곱
+        xpow  = xpow * xsq
     return val
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 1. Remez 알고리즘 (단일 컴포넌트 계수 계산)
-# ─────────────────────────────────────────────────────────────────────────────
-
 def remez_odd_sign(
-    degree   : int,
-    a        : float,
-    b        : float,
-    n_iter   : int   = 400,
-    tol      : float = 1e-13,
-    n_sample : int   = 30_000,
+    degree: int, a: float, b: float,
+    n_iter: int = 400, tol: float = 1e-13, n_sample: int = 30_000,
 ) -> Tuple[np.ndarray, float]:
-    """
-    [a, b] ⊂ (0, ∞) 위에서 sgn(x) = 1 을 근사하는
-    홀수 다항식의 minimax 계수를 Remez 알고리즘으로 계산한다.
-
-    도메인 [-b,-a] ∪ [a,b] 의 홀수 대칭에 의해,
-    [a, b] 위에서 상수 1 에 대한 minimax 근사와 동치.
-
-    Parameters
-    ----------
-    degree   : 홀수 정수 (3, 5, 7, 9, 13, 15, …)
-    a, b     : 0 < a < b  (근사 도메인)
-    n_iter   : 최대 Remez 반복 횟수
-    tol      : (max_err − |E|)/|E| < tol 이면 수렴 종료
-    n_sample : 오차 함수 샘플링 밀도
-
-    Returns
-    -------
-    coeffs   : shape = ((degree+1)//2,)
-               coeffs[k] = x^(2k+1) 의 minimax 계수
-    error    : float  max_{x ∈ [a,b]} |p(x) − 1|  (≥ 0)
-
-    알고리즘 개요
-    -------------
-    equioscillation 조건 (Chebyshev 교대 정리):
-      p(xᵢ) − 1 = (−1)ⁱ · E,  i = 0, …, m   (m = (d+1)/2 개 기저)
-    ↓ 선형 시스템 풀기  →  새 참조점 탐색  →  반복
-    """
     if degree % 2 != 1:
         raise ValueError(f"degree 는 홀수여야 합니다: {degree}")
     if not (0.0 < a < b):
         raise ValueError(f"0 < a < b 조건 위반: a={a}, b={b}")
 
-    m     = (degree + 1) // 2   # 기저 수: x, x³, …, x^d
-    n_ref = m + 1                # equioscillation 점 수 = m+1
-
-    # ── Chebyshev 노드로 초기화 ──────────────────────────────────────
-    k_idx  = np.arange(n_ref)
-    theta  = (2*k_idx + 1) * np.pi / (2*n_ref)
-    nodes  = 0.5*(a+b) + 0.5*(b-a)*np.cos(theta[::-1])
+    m = (degree + 1) // 2
+    n_ref = m + 1
+    k_idx = np.arange(n_ref)
+    theta = (2*k_idx + 1) * np.pi / (2*n_ref)
+    nodes = 0.5*(a+b) + 0.5*(b-a)*np.cos(theta[::-1])
     eps_bd = 1e-10 * (b - a)
-    nodes  = np.sort(np.clip(nodes, a + eps_bd, b - eps_bd))
-
+    nodes = np.sort(np.clip(nodes, a + eps_bd, b - eps_bd))
     x_dense = np.linspace(a, b, n_sample)
-    coeffs  = None
-    E_abs   = 0.0
+    coeffs = None
+    E_abs = 0.0
 
     for _it in range(n_iter):
-
-        # ── equioscillation 선형 시스템 구성 ────────────────────────
-        # ∑_k c[k]·xᵢ^(2k+1)  −  (−1)ⁱ·E = 1
-        A   = np.zeros((n_ref, m + 1))
+        A = np.zeros((n_ref, m + 1))
         rhs = np.ones(n_ref)
         for i, xi in enumerate(nodes):
             xi_pow = xi
             for k in range(m):
                 A[i, k] = xi_pow
-                xi_pow  *= xi * xi          # x^(2k+3)
-            A[i, m] = -((-1.0) ** i)        # E 의 계수
-
+                xi_pow *= xi * xi
+            A[i, m] = -((-1.0) ** i)
         try:
             sol = np.linalg.solve(A, rhs)
         except np.linalg.LinAlgError:
             break
-
         coeffs = sol[:m]
-        E      = float(sol[m])
-        E_abs  = abs(E)
-
-        # ── 오차 함수 평가 ───────────────────────────────────────────
-        err = _poly_np(coeffs, x_dense) - 1.0      # sgn=1 이므로
-
-        # ── 수렴 판정 ────────────────────────────────────────────────
+        E = float(sol[m])
+        E_abs = abs(E)
+        err = _poly_np(coeffs, x_dense) - 1.0
         max_abs = float(np.max(np.abs(err)))
         if E_abs > 1e-30 and abs(max_abs - E_abs) / E_abs < tol:
             break
-
-        # ── 극점(극값) 수집 ──────────────────────────────────────────
-        ext_x = [a]
-        ext_e = [float(err[0])]
+        ext_x = [a]; ext_e = [float(err[0])]
         for i in range(1, n_sample - 1):
-            # 부호 변화 또는 방향 전환
-            if err[i-1] * err[i+1] <= 0.0 or (
-               (err[i] - err[i-1]) * (err[i+1] - err[i]) <= 0.0
-               and abs(err[i]) > 0.0
+            if err[i-1]*err[i+1] <= 0.0 or (
+                (err[i]-err[i-1])*(err[i+1]-err[i]) <= 0.0 and abs(err[i]) > 0.0
             ):
-                ext_x.append(float(x_dense[i]))
-                ext_e.append(float(err[i]))
-        ext_x.append(b)
-        ext_e.append(float(err[-1]))
-
-        # ── 동부호 연속 극점 병합 (더 큰 |오차| 보존) ───────────────
-        mx = [ext_x[0]]
-        me = [ext_e[0]]
+                ext_x.append(float(x_dense[i])); ext_e.append(float(err[i]))
+        ext_x.append(b); ext_e.append(float(err[-1]))
+        mx = [ext_x[0]]; me = [ext_e[0]]
         for i in range(1, len(ext_x)):
-            s_new  = np.sign(ext_e[i])
-            s_prev = np.sign(me[-1])
-            if s_new == s_prev or me[-1] == 0.0:
+            if np.sign(ext_e[i]) == np.sign(me[-1]) or me[-1] == 0.0:
                 if abs(ext_e[i]) >= abs(me[-1]):
-                    mx[-1] = ext_x[i]
-                    me[-1] = ext_e[i]
+                    mx[-1] = ext_x[i]; me[-1] = ext_e[i]
             else:
-                mx.append(ext_x[i])
-                me.append(ext_e[i])
-
+                mx.append(ext_x[i]); me.append(ext_e[i])
         if len(mx) < n_ref:
-            continue   # 극점 부족 → 노드 유지
-
-        # ── n_ref 개 연속 교차 극점 중 |오차| 합 최대 구간 선택 ──────
+            continue
         best, best_s = -1.0, 0
         for s in range(len(mx) - n_ref + 1):
-            sc = sum(abs(me[s + j]) for j in range(n_ref))
+            sc = sum(abs(me[s+j]) for j in range(n_ref))
             if sc > best:
                 best, best_s = sc, s
         nodes = np.array(mx[best_s: best_s + n_ref])
@@ -172,142 +117,185 @@ def remez_odd_sign(
     return (coeffs if coeffs is not None else np.zeros(m)), E_abs
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 2. Minimax Composite Polynomial 구성
-# ─────────────────────────────────────────────────────────────────────────────
-
-def compute_mcp(
-    degrees : List[int],
-    delta   : float,
-    verbose : bool = True,
-) -> List[dict]:
-    """
-    Minimax Composite Polynomial  p = pₖ ∘ … ∘ p₁  계산.
-
-    · p₁ : 도메인 [delta, 1]    위에서 sgn 근사
-    · pᵢ : 도메인 [1−tᵢ₋₁, 1+tᵢ₋₁]  위에서 sgn 근사   (tᵢ₋₁ = 이전 단계 오차)
-
-    Parameters
-    ----------
-    degrees : 홀수 정수 리스트  [d₁, d₂, …, dₖ]
-              논문 Table 2 기준값:
-                a=4  minimize mults  → [3, 3, 5]
-                a=6  minimize mults  → [3, 5, 5, 5]
-                a=8  minimize mults  → [7, 15, 15]   ← 논문 권장 (runtime 최소)
-                a=8  minimize depth  → [7, 15, 15]
-    delta   : |x|의 입력 하한 (sign 을 정의하는 gap)
-
-    Returns
-    -------
-    components : dict 리스트, 각 원소:
-      'index'    : 컴포넌트 번호 (1-indexed)
-      'degree'   : 다항식 차수
-      'coeffs'   : List[float]  — x^1, x^3, …, x^d 의 계수
-      'domain_a' : 도메인 하한
-      'domain_b' : 도메인 상한
-      'error'    : minimax 근사 오차
-    """
+def compute_mcp(degrees: List[int], delta: float, verbose: bool = True) -> List[dict]:
     a, b = delta, 1.0
     comps = []
     if verbose:
-        print(f"\n[MCP] 계수 계산 시작  degrees={degrees}  delta={delta:.6f}")
-
+        print(f"\n[MCP] degrees={degrees}  delta={delta:.6f}")
     for i, deg in enumerate(degrees):
         if verbose:
-            print(f"  p_{i+1} (deg={deg:2d})  [{a:.8f}, {b:.8f}]  ... ", end="", flush=True)
-
+            print(f"  p_{i+1} (deg={deg})  [{a:.8f}, {b:.8f}]  ...", end="", flush=True)
         coeffs, err = remez_odd_sign(deg, a, b)
-        comps.append({
-            "index"    : i + 1,
-            "degree"   : int(deg),
-            "coeffs"   : coeffs.tolist(),
-            "domain_a" : float(a),
-            "domain_b" : float(b),
-            "error"    : float(err),
-        })
-        if verbose:
-            print(f"오차 = {err:.4e}")
-
-        a, b = 1.0 - err, 1.0 + err   # 다음 컴포넌트 도메인
-
-    if verbose:
-        print(f"[MCP] 완료  최종 합성 오차 ≈ {comps[-1]['error']:.4e}")
+        comps.append({"index": i+1, "degree": int(deg), "coeffs": coeffs.tolist(),
+                      "domain_a": float(a), "domain_b": float(b), "error": float(err)})
+        if verbose: print(f"  err={err:.4e}")
+        a, b = 1.0 - err, 1.0 + err
     return comps
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 3. 평문(NumPy) 평가
-# ─────────────────────────────────────────────────────────────────────────────
+def _suggest_margin(degrees: List[int], delta: float, alpha: int) -> float:
+    a, b = delta, 1.0
+    last_err = 0.0
+    for deg in degrees:
+        _, err = remez_odd_sign(deg, a, b)
+        last_err = err
+        a, b = 1.0 - err, 1.0 + err
+    return max(last_err / 4.0, 2.0 ** (-(alpha + 2)))
+
+
+def compute_mcp_with_margin(
+    degrees: List[int], delta: float,
+    margin: float = None, alpha: int = 8, verbose: bool = True,
+) -> List[dict]:
+    """domain_b 필드 포함 MCP. FHE 평가 시 x/domain_b 정규화 필수."""
+    if margin is None:
+        margin = _suggest_margin(degrees, delta, alpha)
+        if verbose:
+            print(f"[MCP-margin] margin 자동: η={margin:.6e}")
+
+    a, b = delta, 1.0
+    comps = []
+    if verbose:
+        safety = 2.0 ** -(alpha - 1)
+        print(f"\n[MCP-margin] degrees={degrees}, δ={delta:.6e}, η={margin:.6e}")
+        print(f"             안전 임계값 t_k ≤ {safety:.4e}")
+
+    for i, deg in enumerate(degrees):
+        if verbose:
+            print(f"  p_{i+1} (deg={deg})  [{a:.8f}, {b:.8f}]  ...", end="", flush=True)
+        coeffs, err = remez_odd_sign(deg, a, b)
+        t_i = err + margin
+        comps.append({
+            "index": i+1, "degree": int(deg), "coeffs": coeffs.tolist(),
+            "domain_a": float(a), "domain_b": float(b),
+            "error": float(err), "margin": float(margin), "t_i": float(t_i),
+        })
+        if verbose: print(f"  err={err:.4e}, t_i={t_i:.4e}")
+        a, b = 1.0 - t_i, 1.0 + t_i
+
+    final_t = comps[-1]["t_i"]
+    if verbose:
+        safety = 2.0 ** -(alpha - 1)
+        print(f"\n[MCP-margin] 완료  t_k={final_t:.4e}  "
+              f"{'✓ SAFE' if final_t <= safety else '✗ UNSAFE'} (≤{safety:.4e})")
+    return comps
+
 
 def eval_mcp_np(x, components: List[dict]) -> np.ndarray:
-    """p_k ∘ … ∘ p_1(x)  — 반환값 ∈ [−1, 1]  (sgn 근사)."""
+    """domain_b 정규화 포함 평문 평가."""
     val = np.asarray(x, dtype=np.float64).copy()
     for comp in components:
-        val = _poly_np(np.array(comp["coeffs"]), val)
+        domain_b = comp.get("domain_b", 1.0)
+        val = _poly_np(np.array(comp["coeffs"]), val / domain_b)
     return val
 
 
-def heaviside_mcp(x, components: List[dict]) -> np.ndarray:
-    """
-    H(x) = (1 − sgn(x)) / 2  ≈ 1 if x < 0,  0 if x > 0.
-
-    Normalize.py 용:
-      x = dist_sq_scaled − eps_sq_scaled
-      → H(x) = 1 if neighbor, 0 otherwise
-    """
-    return (1.0 - eval_mcp_np(x, components)) / 2.0
-
-
-def indicator_mcp(x, components: List[dict]) -> np.ndarray:
-    """
-    I(x) = (sgn(x) + 1) / 2  ≈ 1 if x > 0,  0 if x < 0.
-
-    Core.py 용:
-      x = (neighbor_count − (min_pts − 0.5)) / N
-      → I(x) = 1 if core point
-    """
-    return (eval_mcp_np(x, components) + 1.0) / 2.0
-
-
-def max_mcp(a_arr, b_arr, components: List[dict]) -> np.ndarray:
-    """
-    max(a, b) = ((a+b) + (a−b)·sgn(a−b)) / 2  — Label_Propagation.py 용.
-    """
-    diff = np.asarray(a_arr) - np.asarray(b_arr)
-    return (np.asarray(a_arr) + np.asarray(b_arr) + diff * eval_mcp_np(diff, components)) / 2.0
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 4. 계수 저장 / 로드
-# ─────────────────────────────────────────────────────────────────────────────
-
 def save_mcp(components: List[dict], filepath: str):
-    """MCP 계수를 JSON 으로 저장."""
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump({"components": components}, f, indent=2)
     print(f"[MCP] 저장: {filepath}")
 
 
 def load_mcp(filepath: str) -> List[dict]:
-    """JSON 에서 MCP 계수 로드."""
     with open(filepath, "r", encoding="utf-8") as f:
         return json.load(f)["components"]
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# 5. 비교 기준 — 현재 코드의 cubic 반복 방식
-# ─────────────────────────────────────────────────────────────────────────────
+# ── 논문 Table 2 (minimize depth) degree 시퀀스 ───────────────────────────────
+# DesiloFHE lazy-rescaling 기준 실제 레벨 소비 = dep(d) × 2
+#
+#  α  | degrees              | 컴포넌트수 | 총 bootstrap (mid/post + sign_boot)
+# ─────┼──────────────────────┼──────────┼────────────────────────────────────
+#  8  | [7, 15, 15]          | 3        | 3 + 1 = 4회
+#  9  | [7, 7, 7, 13]        | 4        | 4 + 1 = 5회
+#  10 | [7, 7, 13, 15]       | 4        | 4 + 1 = 5회  ← Core 최적 (α=12 대비 효율적)
+#  11 | [7, 15, 15, 15]      | 4        | 4 + 1 = 5회
+#  12 | [15, 15, 15, 15]     | 4        | 4 + 1 = 5회  ← α=10과 동일 횟수, 비효율
+_MINIMIZE_DEPTH_DEGREES = {
+    8:  [7, 15, 15],
+    9:  [7, 7, 7, 13],
+    10: [7, 7, 13, 15],
+    11: [7, 15, 15, 15],
+    12: [15, 15, 15, 15],
+}
 
-def cubic_sign_iter(x, depth: int) -> np.ndarray:
-    """
-    현재 Core.py / Normalize.py 에서 사용하는 cubic 반복 sign 근사.
-    f(x) = 1.5x − 0.5x³  를 depth 회 반복 합성.
 
-    수렴 분석:
-      · 입력 |x| ≥ δ 에 대해 fᵈᵉᵖᵗʰ(x) → sgn(x)
-      · 그러나 |x| ≪ 1 (≈ 0.5/N) 인 Core.py 입력에서는 수렴 매우 느림
+def compute_mcp_for_normalize(alpha: int = 8, verbose: bool = True) -> List[dict]:
     """
-    val = np.asarray(x, dtype=np.float64).copy()
-    for _ in range(depth):
-        val = 1.5 * val - 0.5 * val ** 3
-    return val
+    Normalize용 (mcp_alpha8.json).
+    α=8 최소값: delta=2^{-8}=0.00391 < margin/bound≈0.00394 ✓
+    degrees=[7,15,15], bootstrap 3+1=4회 (mid 2회 + post 1회 + sign_boot 1회)
+    """
+    degrees = _MINIMIZE_DEPTH_DEGREES.get(alpha, [7, 15, 15])
+    delta   = 2.0 ** (-alpha)
+    margin  = 2.0 ** (-(alpha + 2))
+    if verbose:
+        print(f"\n[MCP-Normalize] α={alpha}, degrees={degrees}, δ={delta:.6e}, η={margin:.6e}")
+    return compute_mcp_with_margin(degrees=degrees, delta=delta, margin=margin, alpha=alpha, verbose=verbose)
+
+
+def compute_mcp_for_core(alpha: int = 11, verbose: bool = True) -> List[dict]:
+    """
+    Core용 (mcp_alpha11.json). ★ α=11 최적값
+
+    α 선택 근거 (N=212):
+      최소 delta < 0.5/N = 0.00236 필요
+
+      α=9  [7,7,7,13]:   t_k=0.00258 > min_gap=0.00236 → NOT OK (분류 오류 가능)
+      α=10 [7,7,13,15]:  t_k 0.00172~0.00197 (Remez 편차) + margin → UNSAFE 가능
+      α=11 [7,15,15,15]: t_k=0.00051 << threshold=0.00098 → SAFE ✓ (안정적)
+                          delta=2^{{-11}}=0.00049 < 0.00236 (4.8배 여유)
+
+    α=12 대비:
+      bootstrap 횟수: 동일 4+1=5회
+      non-scalar mult: 27회 vs 32회 (5회 절약)
+    """
+    degrees = _MINIMIZE_DEPTH_DEGREES.get(alpha, [7, 15, 15, 15])
+    delta   = 2.0 ** (-alpha)
+    margin  = 2.0 ** (-(alpha + 2))
+    if verbose:
+        N_ref = 212
+        print(f"\n[MCP-Core] α={alpha}, degrees={degrees}, δ={delta:.6e}, η={margin:.6e}")
+        print(f"  delta={delta:.5f} < 0.5/N={0.5/N_ref:.5f} ✓ (안전 마진 {(0.5/N_ref)/delta:.1f}배)")
+    return compute_mcp_with_margin(degrees=degrees, delta=delta, margin=margin, alpha=alpha, verbose=verbose)
+
+
+def compute_mcp_for_label_prop(
+    num_points: int, safety_factor: float = 1.2, verbose: bool = True,
+) -> List[dict]:
+    """
+    Label Propagation 전용 (mcp_label_prop.json).
+
+    safety_factor=1.2 선택 이유:
+      최소 입력 gap = 1/N (label_scale=N 사용 시)
+      delta = 1/(N × safety_factor) < 1/N 이어야 함 → safety_factor > 1 필요
+
+      safety_factor=1.2: delta = 1/(N×1.2) = 0.00393 for N=212
+        2^{-8} = 0.00391 < 0.00393 → alpha_equiv=8 → [7,15,15]
+        → bootstrap 3+1=4회/sgn (safety_factor=3.0의 [7,7,13,15] 5회 대비 1회 절약)
+
+      safety_factor=3.0 (기존): delta=0.001572, alpha_equiv=10 → [7,7,13,15]
+        → 동일 정밀도 대비 불필요하게 많은 bootstrap 사용
+
+    alpha cap:
+      alpha_equiv ≤ 12 cap → N < 4096 이면 안전
+      더 큰 N 사용 시: cap 제거 + 적절한 degrees 설정 필요
+    """
+    delta_label = 1.0 / (num_points * safety_factor)
+    alpha_equiv = int(np.log2(1.0 / delta_label)) + 1
+
+    degrees = _MINIMIZE_DEPTH_DEGREES.get(
+        min(alpha_equiv, 12), [15, 15, 15, 15]
+    )
+
+    if verbose:
+        print(f"\n[MCP-Label] N={num_points}, safety_factor={safety_factor}")
+        print(f"  delta=1/(N×{safety_factor})={delta_label:.6f}, alpha_equiv={alpha_equiv}")
+        print(f"  degrees={degrees} (논문 Table 2 minimize depth for α={min(alpha_equiv,12)})")
+        n_boots = len(degrees) + 1  # mid/post bootstraps + sign_bootstrap
+        print(f"  bootstrap/sgn: {len(degrees)}회 (mid+post) + 1회 sign_boot = {n_boots}회")
+        print(f"  safe N < {int(1.0/delta_label):,} (alpha cap=12 기준: N < 4,096)")
+
+    return compute_mcp_with_margin(
+        degrees=degrees, delta=delta_label, margin=0.0, alpha=alpha_equiv, verbose=verbose,
+    )

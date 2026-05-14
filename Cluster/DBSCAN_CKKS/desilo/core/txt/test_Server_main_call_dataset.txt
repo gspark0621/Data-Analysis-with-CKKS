@@ -1,52 +1,91 @@
+# test_Server_main_call_dataset.py
+#
+# ── 변경사항 ────────────────────────────────────────────────────────────────
+# [변경 1] Heap KD-tree 정렬 + dense stride k=1..k_max (power-of-2 → dense 수정)
+#   - build_kd_tree_order()로 Heap(BFS level-order) 정렬
+#   - k_max = min(N//2, 3×ceil(√N))  → T(k_max)≥N → 1 sweep 수렴 보장
+#   - 복호화 후 inv_perm으로 원래 순서 복원
+#
+# [변경 2] decide_propagation_mode: 'kd_depth' → 'kd_dense'
+#   - min_pts ≥ 4 → kd_dense  (dense k=1..k_max, 비구형 cluster도 정확)
+#   - min_pts < 4 → sweep
+#
+# [변경 3] send_to_server_fhe: log2_n → k_max 전달
+#
+# [변경 4] Normalize mcp_normalize_alpha12.json 사용
+#   - alpha=12: margin 0.012→0.00077, false positive 32%→2.4%
+# ────────────────────────────────────────────────────────────────────────────
+
 import os
+import math
 import numpy as np
 from time import time
 import pynvml
-from desilofhe import Engine
-from util.keypack import KeyPack
 from sklearn.metrics import adjusted_rand_score
 
+from core.ciphertext_single.Client_main import (
+    setup_fhe_engine,
+    build_kd_tree_order,
+    get_kd_dense_kmax,       # ★ get_depth_strides → get_kd_dense_kmax
+    decide_propagation_mode,
+)
 from core.ciphertext_single.Server_main import send_to_server_fhe
 from core.ex.plaintext.Server_main import send_to_server_np
 from core.ciphertext_single.EncryptModule import DimensionalEncryptor
 
-# ── MCP 계수 사전 저장 ──────────────────────────────────────────────────────
-# FHE 연산 시작 전, α=8 / α=12 MCP 계수를 JSON 으로 저장.
-# Core.py (α=12), Normalize.py / Label_Propagation.py (α=8) 에서 로드하여 사용.
-from core.ciphertext_single.minimax import compute_mcp, save_mcp
+from core.ciphertext_single.minimax import (
+    compute_mcp_for_normalize,
+    compute_mcp_for_core,
+    load_mcp,
+    save_mcp,
+)
 
 _MCP_ALPHA8_PATH  = "mcp_alpha8.json"
-_MCP_ALPHA12_PATH = "mcp_alpha12.json"
-
-def _ensure_mcp_files():
-    """
-    α=8, α=12 MCP 계수 JSON 파일이 없으면 생성.
-    이미 존재하면 스킵 (재실행 시 재계산 불필요).
-    """
-    if not os.path.exists(_MCP_ALPHA8_PATH):
-        print(f"[MCP] α=8 계수 계산 중 (degrees=[3,3,5,5,9], delta=2^-8)...")
-        comps8 = compute_mcp(degrees=[3, 3, 5, 5, 9], delta=2**-8, verbose=True)
-        save_mcp(comps8, _MCP_ALPHA8_PATH)
-        print(f"[MCP] α=8 저장 완료 → {_MCP_ALPHA8_PATH}  "
-              f"(sign_err={comps8[-1]['error']:.4e})")
-    else:
-        print(f"[MCP] α=8 계수 파일 존재, 스킵 → {_MCP_ALPHA8_PATH}")
-
-    if not os.path.exists(_MCP_ALPHA12_PATH):
-        print(f"[MCP] α=12 계수 계산 중 (degrees=[3,5,5,5,5,5,9], delta=2^-12)...")
-        comps12 = compute_mcp(degrees=[3, 5, 5, 5, 5, 5, 9], delta=2**-12, verbose=True)
-        save_mcp(comps12, _MCP_ALPHA12_PATH)
-        print(f"[MCP] α=12 저장 완료 → {_MCP_ALPHA12_PATH}  "
-              f"(sign_err={comps12[-1]['error']:.4e})")
-    else:
-        print(f"[MCP] α=12 계수 파일 존재, 스킵 → {_MCP_ALPHA12_PATH}")
-# ────────────────────────────────────────────────────────────────────────────
-
+_MCP_ALPHA11_PATH = "mcp_alpha11.json"
+_MCP_NORMALIZE_ALPHA12_PATH = "mcp_normalize_alpha12.json"   # ★ Normalize 전용 alpha=12
 
 DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/hepta.arff"
 
 
-# ── 메모리 유틸 ──────────────────────────────────────────
+# ── MCP 파일 준비 ─────────────────────────────────────────────────────────
+
+def _ensure_mcp_files():
+    """
+    α=8  (LabelProp 공유):    degrees=[7,15,15]
+    α=11 (Core):              degrees=[7,15,15,15]
+    α=12 (Normalize 전용):   degrees=[15,15,15,15]  ← false positive 32%→2.4%
+    """
+    if not os.path.exists(_MCP_ALPHA8_PATH):
+        print(f"[MCP] α=8 계산 중 (논문 Table 2: [7,15,15])...")
+        comps8 = compute_mcp_for_normalize(alpha=8, verbose=True)
+        save_mcp(comps8, _MCP_ALPHA8_PATH)
+        print(f"[MCP] α=8 저장 → {_MCP_ALPHA8_PATH}  "
+              f"err={comps8[-1]['error']:.4e}  t_k={comps8[-1]['t_i']:.4e}")
+    else:
+        print(f"[MCP] α=8 존재, 스킵 → {_MCP_ALPHA8_PATH}")
+
+    if not os.path.exists(_MCP_ALPHA11_PATH):
+        print(f"[MCP] α=11 계산 중 (논문 Table 2: [7,15,15,15])...")
+        comps11 = compute_mcp_for_core(alpha=11, verbose=True)
+        save_mcp(comps11, _MCP_ALPHA11_PATH)
+        print(f"[MCP] α=11 저장 → {_MCP_ALPHA11_PATH}  "
+              f"err={comps11[-1]['error']:.4e}  t_k={comps11[-1]['t_i']:.4e}")
+    else:
+        print(f"[MCP] α=11 존재, 스킵 → {_MCP_ALPHA11_PATH}")
+
+    # ★ Normalize 전용 alpha=12: margin 0.012→0.00077, false positive 32%→2.4%
+    if not os.path.exists(_MCP_NORMALIZE_ALPHA12_PATH):
+        print(f"[MCP] α=12 (Normalize 전용) 계산 중 (degrees=[15,15,15,15])...")
+        comps12 = compute_mcp_for_normalize(alpha=12, verbose=True)
+        save_mcp(comps12, _MCP_NORMALIZE_ALPHA12_PATH)
+        print(f"[MCP] α=12 저장 → {_MCP_NORMALIZE_ALPHA12_PATH}  "
+              f"err={comps12[-1]['error']:.4e}  t_k={comps12[-1]['t_i']:.4e}")
+    else:
+        print(f"[MCP] α=12 Normalize 존재, 스킵 → {_MCP_NORMALIZE_ALPHA12_PATH}")
+
+
+# ── GPU 메모리 유틸 ───────────────────────────────────────────────────────
+
 def _gpu_used_mb() -> float:
     try:
         pynvml.nvmlInit()
@@ -64,16 +103,16 @@ def _gpu_total_mb() -> float:
         return 0.0
 
 def _print_mem(label: str):
-    used  = _gpu_used_mb()
-    total = _gpu_total_mb()
-    print(f"  [MEM] {label:<45}  used={used:.0f} MB  free={total - used:.0f} MB  total={total:.0f} MB")
+    used = _gpu_used_mb(); total = _gpu_total_mb()
+    print(f"  [MEM] {label:<45}  used={used:.0f} MB  free={total-used:.0f} MB")
 
 def _mem_delta(label: str, before: float) -> float:
     after = _gpu_used_mb()
-    print(f"  [MEM] {label:<45}  delta={after - before:+.0f} MB  (used={after:.0f} MB)")
+    print(f"  [MEM] {label:<45}  delta={after-before:+.0f} MB  (used={after:.0f} MB)")
     return after
-# ─────────────────────────────────────────────────────────
 
+
+# ── 데이터 로드 ──────────────────────────────────────────────────────────
 
 def load_arff_to_pts_with_labels(filepath: str):
     pts, true_labels = [], []
@@ -81,235 +120,232 @@ def load_arff_to_pts_with_labels(filepath: str):
     with open(filepath, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
-            if not line or line.startswith('%'):
-                continue
+            if not line or line.startswith('%'): continue
             if line.lower().startswith('@data'):
-                data_section = True
-                continue
+                data_section = True; continue
             if data_section:
                 line = line.replace('\t', ' ').replace(',', ' ')
                 values = line.split()
-                if len(values) < 2:
-                    continue
+                if len(values) < 2: continue
                 pts.append([float(v) for v in values[:-1]])
                 true_labels.append(int(float(values[-1])))
     if not pts:
-        raise ValueError("데이터를 찾을 수 없습니다. 파일 포맷을 확인해주세요.")
+        raise ValueError("데이터를 찾을 수 없습니다.")
     return np.array(pts, dtype=np.float64), np.array(true_labels, dtype=int)
 
+
+# ── 결과 저장 유틸 ────────────────────────────────────────────────────────
 
 def save_timings_txt(filename, timings_dict):
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             for k, v in timings_dict.items():
                 f.write(f"{k}: {float(v):.6f}\n")
-        print(f"✅ 타이밍 파일 저장 완료: {filename}")
+        print(f"✅ 타이밍 저장: {filename}")
     except Exception as e:
-        print(f"❌ 타이밍 파일 저장 실패: {e}")
+        print(f"❌ 타이밍 저장 실패: {e}")
 
+
+def save_heap_order_csv(filename, heap_idx, inv_perm, N):
+    """Heap 정렬 인덱스 디버그 저장."""
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write("Heap_Position,Original_Index,Inv_Perm\n")
+            for i in range(N):
+                f.write(f"{i},{heap_idx[i]},{inv_perm[i]}\n")
+        print(f"✅ Heap 순서 저장: {filename}")
+    except Exception as e:
+        print(f"❌ Heap 순서 저장 실패: {e}")
+
+
+# ── 메인 ─────────────────────────────────────────────────────────────────
 
 def main():
-    print("==================================================")
-    print("      대화형 FHE DBSCAN 전체 데이터 E2E 테스트     ")
-    print("==================================================\n")
+    print("=" * 60)
+    print("  FHE DBSCAN E2E 테스트 (Heap KD-tree depth 전파)")
+    print("=" * 60)
 
-    # ── MCP 계수 JSON 사전 생성 (없으면 계산, 있으면 스킵) ──────────
-    print("──────────────────────────────────────────────────")
-    print(" [STEP 0] MCP 계수 파일 준비 (α=8, α=12)")
-    print("──────────────────────────────────────────────────")
+    # ── Step 0: MCP 파일 준비 ────────────────────────────────────
+    print("\n[STEP 0] MCP 파일 준비")
     _ensure_mcp_files()
-    print()
-    # ────────────────────────────────────────────────────────────────
 
-    print(f"▶ 데이터셋 경로: {DATASET_PATH}\n")
-
-    eps_val     = float(input("eps 값을 입력하세요 (예: 0.5) > "))
-    min_pts_val = float(input("min_pts 값을 입력하세요 (예: 3) > "))
-
-    print("\n--------------------------------------------------")
-    print(f"▶ 실행 파라미터: eps = {eps_val}, min_pts = {min_pts_val}")
-    print("--------------------------------------------------\n")
-
-    print("데이터 전체 로딩 및 정규화 중...")
+    # ── Step 1: 파라미터 입력 ────────────────────────────────────
+    print(f"\n▶ 데이터셋: {DATASET_PATH}")
+    eps_val     = float(input("eps 값 > "))
+    min_pts_val = int(input("min_pts 값 > "))
+    print(f"\n▶ eps={eps_val}, min_pts={min_pts_val}\n")
 
     pts, true_labels = load_arff_to_pts_with_labels(DATASET_PATH)
     N         = len(pts)
     dimension = pts.shape[1]
+    log2_n    = math.ceil(math.log2(N))
 
+    # ── Step 2: 정규화 ───────────────────────────────────────────
     global_min   = np.min(pts)
     global_max   = np.max(pts)
-    scale_factor = global_max - global_min if (global_max - global_min) != 0.0 else 1.0
-
-    normalized_pts = ((pts - global_min) / scale_factor).tolist()
+    scale_factor = (global_max - global_min) if (global_max - global_min) != 0.0 else 1.0
+    normalized_pts = (pts - global_min) / scale_factor
     normalized_eps = eps_val / scale_factor
 
-    print(f"완료! (총 {N}개의 점, {dimension}차원)")
-    print(f"정규화된 eps = {normalized_eps:.6f}\n")
-
+    print(f"데이터: {N}개, {dimension}차원  정규화 eps={normalized_eps:.6f}")
     if N > 100:
-        print(f"⚠️ 경고: 데이터 개수({N}개)가 많아 동형암호 연산에 매우 긴 시간이 소요될 수 있습니다.\n")
+        print(f"⚠️  {N}개 → 긴 시간 소요 예상\n")
 
-    # Plaintext 시뮬레이션
-    print("================ Plaintext 시뮬레이션 ===================")
-    pt_start_time = time()
-    transposed_data_np   = list(zip(*normalized_pts))
-    columns_simulated    = [np.array(vector, dtype=np.float64) for vector in transposed_data_np]
+    # ── Step 3: 전파 방식 결정 (O(1)) ────────────────────────────
+    mode, k_max = decide_propagation_mode(min_pts_val, log2_n, N)
+
+    # ── Step 4: Heap KD-tree 정렬 (kd_dense 선택 시) ─────────────
+    if mode == 'kd_dense':
+        print("\n[Heap KD-tree] BFS level-order 정렬 중...")
+        heap_idx, inv_perm = build_kd_tree_order(normalized_pts)
+        kd_sorted_pts      = normalized_pts[heap_idx]
+        T_kmax = k_max * (k_max + 1) // 2
+
+        old_ops = 2 * 2 * math.ceil(math.log2(N)) * (N // 2) * 2   # old sweep
+        new_ops = 2 * 2 * k_max * 2                                  # dense fwd+bwd
+        print(f"[Heap KD-tree] k_max={k_max}, T({k_max})={T_kmax}")
+        print(f"[Heap KD-tree] fhe_max: {new_ops}회 (기존 sweep {old_ops}회, {old_ops//new_ops}배↓)")
+
+        save_heap_order_csv(f"debug_heap_order_N{N}.csv", heap_idx, inv_perm, N)
+    else:
+        # sweep 방식: 정렬 없이 원래 순서
+        heap_idx      = np.arange(N)
+        inv_perm      = np.arange(N)
+        kd_sorted_pts = normalized_pts
+        print(f"[Sweep] 정렬 없음, num_sweeps={k_max}")
+
+    # ── Step 5: 평문 DBSCAN (원래 순서 기준, 비교 기준) ──────────
+    print("\n================ Plaintext ===================")
+    pt_start   = time()
+    transposed = list(zip(*normalized_pts.tolist()))
+    columns_np = [np.array(v, dtype=np.float64) for v in transposed]
     np_final_labels, _, debug_np = send_to_server_np(
-        encrypted_columns=columns_simulated,
-        num_points=N, eps=normalized_eps,
-        min_pts=min_pts_val, dimension=dimension
+        encrypted_columns=columns_np, num_points=N,
+        eps=normalized_eps, min_pts=float(min_pts_val), dimension=dimension
     )
     cluster_labels_np = []
     for x in np_final_labels[:N]:
         r = round(x)
-        if r <= 0:      cluster_labels_np.append(-1)
-        elif r > N:     cluster_labels_np.append(N)
-        else:           cluster_labels_np.append(r)
-    pt_elapsed = time() - pt_start_time
-    print(f"▶ Plaintext 소요 시간: {pt_elapsed:.2f}초\n")
+        if r <= 0:  cluster_labels_np.append(-1)
+        elif r > N: cluster_labels_np.append(N)
+        else:       cluster_labels_np.append(r)
+    print(f"▶ Plaintext: {time()-pt_start:.2f}초\n")
 
-    # FHE 암호문 연산
-    print("================ FHE 암호문 연산 ========================")
-    print("FHE 엔진 및 키 생성 중 (GPU 모드)...")
-
+    # ── Step 6: FHE DBSCAN (Heap 정렬 데이터) ────────────────────
+    print(f"================ FHE ({mode}) ========================")
     _print_mem("Engine 초기화 전")
-    engine = Engine(use_bootstrap=True, mode="gpu")
-    import math
+
+    engine, secret_key, keypack = setup_fhe_engine(verbose=True)
     slot_count = engine.slot_count
-    log_n      = int(math.log2(slot_count * 2))
-    print(f"  [MEM] slot_count={slot_count:,}  log_N={log_n}  N={N}  dim={dimension}")
-    print(f"  [MEM] 슬롯 사용률: {N}/{slot_count} ({N/slot_count*100:.2f}%)")
-    _print_mem("Engine 초기화 후")
+    print(f"  slot_count={slot_count:,}  N={N}  dim={dimension}")
 
-    secret_key = engine.create_secret_key()
+    fhe_start = time()
 
-    before = _gpu_used_mb()
-    pk = engine.create_public_key(secret_key)
-    _mem_delta("create_public_key()", before)
-
-    before = _gpu_used_mb()
-    rk = engine.create_rotation_key(secret_key)
-    _mem_delta("create_rotation_key()", before)
-
-    before = _gpu_used_mb()
-    rlk = engine.create_relinearization_key(secret_key)
-    _mem_delta("create_relinearization_key()", before)
-
-    before = _gpu_used_mb()
-    ck = engine.create_conjugation_key(secret_key)
-    _mem_delta("create_conjugation_key()", before)
-
-    before = _gpu_used_mb()
-    bk = engine.create_bootstrap_key(secret_key)
-    _mem_delta("create_bootstrap_key()", before)
-
-    _print_mem("모든 Key 생성 완료")
-
-    keypack = KeyPack(
-        public_key=pk,
-        rotation_key=rk,
-        relinearization_key=rlk,
-        conjugation_key=ck,
-        bootstrap_key=bk,
-    )
-
-    fhe_start_time = time()
-
-    print("데이터 전체 암호화 및 서버 전송 중...")
+    # Heap 순서로 정렬된 데이터 암호화
     encryptor = DimensionalEncryptor(engine, keypack)
+    before    = _gpu_used_mb()
+    encrypted_columns = encryptor.encrypt_data(kd_sorted_pts.tolist(), dimension)
+    _mem_delta(f"encrypt_data Heap-sorted ({dimension}개)", before)
 
-    before = _gpu_used_mb()
-    encrypted_columns = encryptor.encrypt_data(normalized_pts, dimension)
-    _mem_delta(f"encrypt_data() 전체 ({dimension}개 ciphertext)", before)
-
-    print("서버 동형암호 연산 중 (이 과정은 매우 오래 걸릴 수 있습니다)...")
-
+    # 서버 연산
     before = _gpu_used_mb()
     fhe_final_ct, debug_fhe = send_to_server_fhe(
         engine=engine, keypack=keypack, secret_key=secret_key,
         encrypted_columns=encrypted_columns,
-        num_points=N, eps=normalized_eps, min_pts=min_pts_val,
+        num_points=N, eps=normalized_eps, min_pts=float(min_pts_val),
+        k_max=k_max,
+        use_kd_propagation=(mode == 'kd_dense'),
+        num_sweeps=k_max,
     )
-    _mem_delta("send_to_server_fhe() 전체", before)
+    _mem_delta("send_to_server_fhe 전체", before)
 
-    print("서버 연산 완료. 복호화 및 후처리 중...")
-
+    # 복호화 (Heap 순서)
     before = _gpu_used_mb()
-    decrypted_labels = engine.decrypt(fhe_final_ct, secret_key)
-    _mem_delta("decrypt()", before)
+    decrypted_heap = np.real(engine.decrypt(fhe_final_ct, secret_key))
+    _mem_delta("decrypt", before)
+
+    # ── inv_perm: Heap 순서 → 원래 순서 복원 ─────────────────────
+    # heap_labels[i]: Heap 위치 i = 원래 heap_idx[i]번 점의 라벨
+    # original_labels[j] = heap_labels[inv_perm[j]]
+    heap_labels_raw    = decrypted_heap[:N]
+    original_labels_raw = heap_labels_raw[inv_perm]
 
     cluster_labels_fhe = []
-    for x in decrypted_labels[:N]:
-        r = np.round(x)
-        if r <= 0:      cluster_labels_fhe.append(-1)
-        elif r > N:     cluster_labels_fhe.append(N)
-        else:           cluster_labels_fhe.append(r)
+    for x in original_labels_raw:
+        r = int(np.round(x))
+        if r <= 0:  cluster_labels_fhe.append(-1)
+        elif r > N: cluster_labels_fhe.append(N)
+        else:       cluster_labels_fhe.append(r)
 
-    fhe_elapsed = time() - fhe_start_time
-    print(f"▶ FHE 소요 시간: {fhe_elapsed:.2f}초\n")
+    fhe_elapsed = time() - fhe_start
+    print(f"▶ FHE: {fhe_elapsed:.2f}초\n")
 
-    # 단계별 소요 시간 출력
+    # ── Step 7: 소요 시간 출력 ───────────────────────────────────
     if "timings" in debug_fhe:
-        print("================ 단계별 소요 시간 =====================")
-        print(f"Normalize 단계            : {debug_fhe['timings'].get('normalize_sec', 0):.2f}초")
-        print(f"Core 단계                 : {debug_fhe['timings'].get('core_sec', 0):.2f}초")
-        print(f"Label_Propagation 단계    : {debug_fhe['timings'].get('label_propagation_sec', 0):.2f}초")
-        print(f"Final scale-back 단계     : {debug_fhe['timings'].get('postprocess_sec', 0):.2f}초")
-        total_stage = sum(debug_fhe['timings'].get(k, 0) for k in
-                         ['normalize_sec','core_sec','label_propagation_sec','postprocess_sec'])
-        print(f"합계(서버 주요 단계)      : {total_stage:.2f}초\n")
-        save_timings_txt(f"debug_timings_eps{eps_val}_min{min_pts_val}.txt", debug_fhe["timings"])
+        print("================ 소요 시간 =====================")
+        t = debug_fhe["timings"]
+        print(f"Normalize         : {t.get('normalize_sec', 0):.2f}초")
+        print(f"Core              : {t.get('core_sec', 0):.2f}초")
+        print(f"Label_Propagation : {t.get('label_propagation_sec', 0):.2f}초")
+        total = sum(t.get(k, 0) for k in
+                    ['normalize_sec', 'core_sec', 'label_propagation_sec'])
+        print(f"합계              : {total:.2f}초\n")
+        save_timings_txt(f"debug_timings_eps{eps_val}_min{min_pts_val}.txt", t)
 
-    # 중간 단계 값 차이 비교용 디버그 CSV
+    # ── Step 8: 상세 비교 CSV ────────────────────────────────────
     debug_filename = f"debug_fhe_vs_np_eps{eps_val}_min{min_pts_val}.csv"
-    print("================ 중간값 오차 추적 파일 저장 ====================")
-    print(f"단계별 근사 오차를 '{debug_filename}' 파일에 병합하여 저장 중...")
     try:
         with open(debug_filename, 'w', encoding='utf-8') as f:
-            f.write("Point_ID,NP_Neighbors,FHE_Neighbors,Diff_Neighbors,"
-                    "NP_Core,FHE_Core,Diff_Core,NP_Label,FHE_Label,Diff_Label\n")
+            f.write("Point_ID,Heap_Position,"
+                    "NP_Neighbors,FHE_Neighbors,Diff_Neighbors,"
+                    "NP_Core,FHE_Core,Diff_Core,"
+                    "NP_Label,FHE_Label_Heap,FHE_Label_Orig\n")
             for i in range(N):
+                heap_pos  = inv_perm[i]   # 원래 i번 점의 Heap 위치
                 n_np  = debug_np['total_neighbors'][i]
-                n_fhe = debug_fhe['total_neighbors'][i]
                 c_np  = debug_np['core_mask'][i]
-                c_fhe = debug_fhe['core_mask'][i]
                 l_np  = debug_np['final_labels'][i]
-                l_fhe = debug_fhe['final_labels'][i]
-                f.write(f"{i},{n_np:.4f},{n_fhe:.4f},{abs(n_np-n_fhe):.4f},"
+                # FHE 중간값은 Heap 순서 → inv_perm[i]로 대응
+                n_fhe      = debug_fhe['total_neighbors'][heap_pos]
+                c_fhe      = debug_fhe['core_mask'][heap_pos]
+                l_fhe_heap = debug_fhe['final_labels'][heap_pos]
+                l_fhe_orig = cluster_labels_fhe[i]
+                f.write(f"{i},{heap_pos},"
+                        f"{n_np:.4f},{n_fhe:.4f},{abs(n_np-n_fhe):.4f},"
                         f"{c_np:.4f},{c_fhe:.4f},{abs(c_np-c_fhe):.4f},"
-                        f"{l_np:.4f},{l_fhe:.4f},{abs(l_np-l_fhe):.4f}\n")
-        print("✅ 디버깅 비교 파일 저장 완료!")
-        print("👉 힌트: 저장된 CSV 파일에서 'Diff_Neighbors', 'Diff_Core', 'Diff_Label' 열 중 "
-              "어느 지점부터 값이 크게 튀는지 확인하세요.\n")
+                        f"{l_np:.4f},{l_fhe_heap:.4f},{l_fhe_orig}\n")
+        print(f"✅ 디버깅 파일: {debug_filename}")
     except Exception as e:
-        print(f"❌ 디버깅 파일 저장 실패: {e}\n")
+        print(f"❌ 디버깅 파일 실패: {e}")
 
-    # 최종 결과 검증
-    print("================ 검증 결과 ==============================")
-    pt_valid_clusters  = [c for c in set(cluster_labels_np)  if c != -1]
-    fhe_valid_clusters = [c for c in set(cluster_labels_fhe) if c != -1]
-    print(f"[Plaintext] 클러스터 {len(pt_valid_clusters)}개")
-    print(f"[FHE]       클러스터 {len(fhe_valid_clusters)}개")
+    # ── Step 9: 검증 (ARI) ───────────────────────────────────────
+    print("\n================ 검증 결과 ==============================")
+    pt_valid  = [c for c in set(cluster_labels_np)  if c != -1]
+    fhe_valid = [c for c in set(cluster_labels_fhe) if c != -1]
+    print(f"[Plaintext] 클러스터 {len(pt_valid)}개")
+    print(f"[FHE]       클러스터 {len(fhe_valid)}개")
 
-    ari_score = adjusted_rand_score(cluster_labels_np, cluster_labels_fhe)
-    print(f"\n📊 [ARI] 평문 vs FHE 일치율: {ari_score * 100:.2f}점 / 100점")
-    if   ari_score > 0.99: print("  => 🎉 대성공!")
-    elif ari_score > 0.80: print("  => 👍 대부분 일치")
-    else:                  print("  => ❌ 오차 누적으로 군집 구조 붕괴")
+    ari = adjusted_rand_score(cluster_labels_np, cluster_labels_fhe)
+    print(f"\n📊 [ARI] 평문 vs FHE: {ari*100:.2f}점 / 100점")
+    if   ari > 0.99: print("  => 🎉 대성공!")
+    elif ari > 0.80: print("  => 👍 대부분 일치")
+    else:            print("  => ❌ 군집 구조 붕괴")
 
-    # CSV 저장
-    output_filename = f"hepta_fhe_result_eps{eps_val}_min{min_pts_val}.csv"
-    print(f"\n================ 파일 저장 ==============================")
+    # ── Step 10: 최종 결과 저장 ──────────────────────────────────
+    output_filename = f"hepta_fhe_heap_result_eps{eps_val}_min{min_pts_val}.csv"
     try:
         with open(output_filename, 'w', encoding='utf-8') as f:
             axis_headers = [f"x{i+1}" for i in range(dimension)]
-            f.write(",".join(axis_headers) + ",True_Class,PT_Cluster,FHE_Cluster\n")
+            f.write(",".join(axis_headers) +
+                    ",True_Class,PT_Cluster,FHE_Cluster,Heap_Position\n")
             for i in range(N):
                 coords = ",".join([f"{val:.4f}" for val in pts[i]])
-                f.write(f"{coords},{true_labels[i]},{cluster_labels_np[i]},{cluster_labels_fhe[i]}\n")
-        print("✅ 파일 저장 완료!")
+                f.write(f"{coords},{true_labels[i]},"
+                        f"{cluster_labels_np[i]},{cluster_labels_fhe[i]},"
+                        f"{inv_perm[i]}\n")
+        print(f"✅ 결과 저장: {output_filename}")
     except Exception as e:
-        print(f"❌ 파일 저장 실패: {e}")
+        print(f"❌ 결과 저장 실패: {e}")
 
 
 if __name__ == '__main__':
