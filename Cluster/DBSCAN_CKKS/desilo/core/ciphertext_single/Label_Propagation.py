@@ -24,7 +24,7 @@ from desilofhe import Engine, Ciphertext
 from util.keypack import KeyPack
 from core.ciphertext_single.minimax import load_mcp
 
-_MCP_LABEL_PATH       = "mcp_alpha8.json"
+_MCP_LABEL_PATH     = "mcp_alpha11.json"
 _mcp_label_components = None
 
 def _get_mcp_label():

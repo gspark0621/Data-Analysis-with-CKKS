@@ -120,7 +120,7 @@ def get_kd_dense_kmax(N: int) -> int:
 
     N=212: k_max=45, T(45)=1035 >> 212
     """
-    return min(N // 2, 3 * math.ceil(math.sqrt(N)))
+    return max(N // 2, 3 * math.ceil(math.sqrt(N)))
 
 
 # ── 전파 방식 결정 (O(1), BallTree 불필요) ──────────────────────────────

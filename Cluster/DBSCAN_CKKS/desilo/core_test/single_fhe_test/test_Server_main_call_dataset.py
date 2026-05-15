@@ -40,7 +40,6 @@ from core.ciphertext_single.minimax import (
     save_mcp,
 )
 
-_MCP_ALPHA8_PATH  = "mcp_alpha8.json"
 _MCP_ALPHA11_PATH = "mcp_alpha11.json"
 _MCP_NORMALIZE_ALPHA12_PATH = "mcp_normalize_alpha12.json"   # ★ Normalize 전용 alpha=12
 
@@ -51,18 +50,9 @@ DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS
 
 def _ensure_mcp_files():
     """
-    α=8  (LabelProp 공유):    degrees=[7,15,15]
-    α=11 (Core):              degrees=[7,15,15,15]
+    α=11 (Core, LabelProp): degrees=[7,15,15,15]
     α=12 (Normalize 전용):   degrees=[15,15,15,15]  ← false positive 32%→2.4%
     """
-    if not os.path.exists(_MCP_ALPHA8_PATH):
-        print(f"[MCP] α=8 계산 중 (논문 Table 2: [7,15,15])...")
-        comps8 = compute_mcp_for_normalize(alpha=8, verbose=True)
-        save_mcp(comps8, _MCP_ALPHA8_PATH)
-        print(f"[MCP] α=8 저장 → {_MCP_ALPHA8_PATH}  "
-              f"err={comps8[-1]['error']:.4e}  t_k={comps8[-1]['t_i']:.4e}")
-    else:
-        print(f"[MCP] α=8 존재, 스킵 → {_MCP_ALPHA8_PATH}")
 
     if not os.path.exists(_MCP_ALPHA11_PATH):
         print(f"[MCP] α=11 계산 중 (논문 Table 2: [7,15,15,15])...")

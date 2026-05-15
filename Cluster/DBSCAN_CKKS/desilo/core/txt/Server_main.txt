@@ -89,7 +89,7 @@ def send_to_server_fhe(
     dim  = len(encrypted_columns)
     N    = num_points
     if k_max is None:
-        k_max = min(N // 2, 3 * math.ceil(math.sqrt(N)))
+        k_max = max(N // 2, 3 * math.ceil(math.sqrt(N)))
     if num_sweeps is None:
         num_sweeps = math.ceil(math.log2(N))
 

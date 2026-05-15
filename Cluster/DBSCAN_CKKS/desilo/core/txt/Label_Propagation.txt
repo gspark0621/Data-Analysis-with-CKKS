@@ -314,7 +314,7 @@ def fhe_kd_dense_propagation(
         ("backward", list(range(k_max, 0, -1))),
     ]
     for pass_idx, (pass_name, k_order) in enumerate(passes):
-        print(f"[KD-LP] Phase1 Pass{pass_idx+1}/2 ({pass_name}): k=1..{k_max}")
+        print(f"[KD-LP] Phase1: Core-Core Pass{pass_idx+1}/2 ({pass_name}): k=1..{k_max}")
         for k in k_order:
             core_labels_ct = _propagate_one_stride_core(
                 engine, keypack, adj_k_half_list,
@@ -330,7 +330,7 @@ def fhe_kd_dense_propagation(
         engine.multiply(engine.encode([0.0] * slot_count), non_core_ct), keypack)
 
     for pass_idx, (pass_name, k_order) in enumerate(passes):
-        print(f"[KD-LP] Phase2 Pass{pass_idx+1}/2 ({pass_name}): k=1..{k_max}")
+        print(f"[KD-LP] Phase2: Core→Border Pass{pass_idx+1}/2 ({pass_name}): k=1..{k_max}")
         for k in k_order:
             border_labels_ct = _propagate_one_stride_border(
                 engine, keypack, adj_k_half_list,
