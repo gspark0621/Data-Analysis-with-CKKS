@@ -1,19 +1,16 @@
 # test_Server_main_call_dataset.py
 #
 # ── 변경사항 ────────────────────────────────────────────────────────────────
-# [변경 1] Heap KD-tree 정렬 + dense stride k=1..k_max (power-of-2 → dense 수정)
-#   - build_kd_tree_order()로 Heap(BFS level-order) 정렬
-#   - k_max = min(N//2, 3×ceil(√N))  → T(k_max)≥N → 1 sweep 수렴 보장
-#   - 복호화 후 inv_perm으로 원래 순서 복원
+# [변경 1] KD-tree → Ball Tree 교체
+#   - build_ball_tree_order: 구면 분할로 eps-이웃이 인접 heap 위치에 집중
+#   - compute_kmax_from_data: eps-이웃 쌍의 실제 최대 heap gap 측정
+#   - KD-tree k_max=N//2 → Ball Tree k_max=실측값 (예상 20~40)
 #
-# [변경 2] decide_propagation_mode: 'kd_depth' → 'kd_dense'
-#   - min_pts ≥ 4 → kd_dense  (dense k=1..k_max, 비구형 cluster도 정확)
-#   - min_pts < 4 → sweep
+# [변경 2] prepare_client_ordering: Ball Tree + k_max 통합 인터페이스
+#   - (mode, k_max, heap_idx, inv_perm) 반환
+#   - decide_propagation_mode + build_kd_tree_order 를 1 호출로 대체
 #
-# [변경 3] send_to_server_fhe: log2_n → k_max 전달
-#
-# [변경 4] Normalize mcp_normalize_alpha12.json 사용
-#   - alpha=12: margin 0.012→0.00077, false positive 32%→2.4%
+# [변경 3] Normalize mcp_normalize_alpha12.json 사용 (false positive 2.4%)
 # ────────────────────────────────────────────────────────────────────────────
 
 import os
@@ -25,9 +22,9 @@ from sklearn.metrics import adjusted_rand_score
 
 from core.ciphertext_single.Client_main import (
     setup_fhe_engine,
-    build_kd_tree_order,
-    get_kd_dense_kmax,       # ★ get_depth_strides → get_kd_dense_kmax
-    decide_propagation_mode,
+    prepare_client_ordering,   # ★ Ball Tree + k_max 통합
+    build_ball_tree_order,     # 개별 접근 (디버그용)
+    compute_kmax_from_data,    # 개별 접근 (디버그용)
 )
 from core.ciphertext_single.Server_main import send_to_server_fhe
 from core.ex.plaintext.Server_main import send_to_server_np
@@ -181,28 +178,19 @@ def main():
     if N > 100:
         print(f"⚠️  {N}개 → 긴 시간 소요 예상\n")
 
-    # ── Step 3: 전파 방식 결정 (O(1)) ────────────────────────────
-    mode, k_max = decide_propagation_mode(min_pts_val, log2_n, N)
+    # ── Step 3+4: Ball Tree 정렬 + k_max 측정 (통합) ──────────────
+    print("\n[Ball Tree] BFS level-order 정렬 + k_max 측정...")
+    mode, k_max, heap_idx, inv_perm = prepare_client_ordering(
+        normalized_pts, normalized_eps, int(min_pts_val), N
+    )
 
-    # ── Step 4: Heap KD-tree 정렬 (kd_dense 선택 시) ─────────────
     if mode == 'kd_dense':
-        print("\n[Heap KD-tree] BFS level-order 정렬 중...")
-        heap_idx, inv_perm = build_kd_tree_order(normalized_pts)
-        kd_sorted_pts      = normalized_pts[heap_idx]
-        T_kmax = k_max * (k_max + 1) // 2
-
-        old_ops = 2 * 2 * math.ceil(math.log2(N)) * (N // 2) * 2   # old sweep
-        new_ops = 2 * 2 * k_max * 2                                  # dense fwd+bwd
-        print(f"[Heap KD-tree] k_max={k_max}, T({k_max})={T_kmax}")
-        print(f"[Heap KD-tree] fhe_max: {new_ops}회 (기존 sweep {old_ops}회, {old_ops//new_ops}배↓)")
-
+        kd_sorted_pts = normalized_pts[heap_idx]
         save_heap_order_csv(f"debug_heap_order_N{N}.csv", heap_idx, inv_perm, N)
     else:
-        # sweep 방식: 정렬 없이 원래 순서
-        heap_idx      = np.arange(N)
-        inv_perm      = np.arange(N)
         kd_sorted_pts = normalized_pts
         print(f"[Sweep] 정렬 없음, num_sweeps={k_max}")
+
 
     # ── Step 5: 평문 DBSCAN (원래 순서 기준, 비교 기준) ──────────
     print("\n================ Plaintext ===================")
