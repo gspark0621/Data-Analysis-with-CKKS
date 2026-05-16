@@ -1,20 +1,13 @@
 # core/ciphertext_single/Label_Propagation.py
 #
 # ── 변경사항 ────────────────────────────────────────────────────────────────
-# [변경 1] fhe_kd_depth_propagation() 추가
-#   Heap(BFS level-order) 레이아웃 전제:
-#     depth d cross-boundary stride = 2^(d-1)
-#     → depth_strides = [1, 2, 4, 8, ..., min(2^(log₂N-1), N//2)]
-#   2-pass (bottom-up + top-down):
-#     Pass1: strides 오름차순 [1,2,4,...] → 로컬 연결 먼저 해결
-#     Pass2: strides 내림차순 [...,4,2,1] → transitive update 보완
-#   연산량: 2ph × 2pass × log₂N = 4×log₂N fhe_max (N=212: ~64회)
-#   기존 fhe_sweep_propagation: 2ph × num_sweeps × N//2 (N=212: ~1696회+)
-#
-# [변경 2] _propagate_one_stride_core / _propagate_one_stride_border 헬퍼 추가
-#   코드 중복 제거, 두 전파 함수가 공유
-#
-# [유지] fhe_sweep_propagation (fallback, min_pts<4 or 하위호환)
+# [변경 1] fhe_kd_depth_propagation() 추가 (기존)
+# [변경 2] _propagate_one_stride_core / _propagate_one_stride_border 헬퍼 (기존)
+# [변경 3] _eval_one_component → bsgs_poly.eval_mcp_component 로 교체
+#   naive 문제: deg=27에서 ct×ct 14회 → 14 레벨 소비 → budget=10 초과
+#   BSGS 해결: dep(27)=5 (논문 Table 1) → 10 레벨 = budget 딱 맞음
+#   → degrees=[7,15,15,15,27] (논문 Table 2, α=15) 정상 동작
+# [유지] fhe_sweep_propagation (fallback)
 # ────────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
@@ -23,8 +16,11 @@ import numpy as np
 from desilofhe import Engine, Ciphertext
 from util.keypack import KeyPack
 from core.ciphertext_single.minimax import load_mcp
+from core.ciphertext_single.bsgs_poly import eval_mcp_full   # ★ BSGS 공용 모듈
 
-_MCP_LABEL_PATH     = "mcp_alpha11.json"
+_MCP_LABEL_PATH     = "mcp_alpha15_lp.json"
+# α=15: τ=2^{-15}, drift=840×30×τ/2≈0.39 < 1.0 ✓ (α=11: drift≈6.15 ✗)
+# degrees=[7,15,15,15,27] (논문 Table 2) — BSGS로 dep=5 내 정상 동작
 _mcp_label_components = None
 
 def _get_mcp_label():
@@ -54,51 +50,15 @@ def _refresh(engine: Engine, ct: Ciphertext, keypack: KeyPack) -> Ciphertext:
     )
 
 
-def _eval_one_component(engine, ct, comp, slot_count, keypack, relin_key):
-    """단일 MCP 컴포넌트 평가. domain_b 정규화 포함."""
-    coeffs   = comp["coeffs"]
-    domain_b = comp.get("domain_b", 1.0)
-
-    if abs(domain_b - 1.0) > 1e-9:
-        x_sc = engine.multiply(ct, engine.encode([1.0 / domain_b] * slot_count))
-    else:
-        x_sc = ct
-
-    x_sq  = engine.square(x_sc, relin_key)
-    x_pow = x_sc
-    result = engine.multiply(x_pow, engine.encode([coeffs[0]] * slot_count))
-
-    for k in range(1, len(coeffs)):
-        x_pow  = engine.multiply(x_pow, x_sq, relin_key)
-        result = engine.add(result,
-                            engine.multiply(x_pow, engine.encode([coeffs[k]] * slot_count)))
-    return result
-
-
-def _eval_mcp(engine, ct, components, slot_count, keypack):
-    """MCP 전체 합성. 모든 컴포넌트 후 bootstrap → level=10 반환."""
-    relin_key = keypack.relinearization_key
-    conj_key  = keypack.conjugation_key
-    boot_key  = keypack.bootstrap_key
-    current   = ct
-
-    for step_idx, comp in enumerate(components):
-        current = _eval_one_component(engine, current, comp, slot_count, keypack, relin_key)
-        current = engine.intt(current)
-        current = engine.bootstrap(current, relin_key, conj_key, boot_key)
-
-    return current  # level=10
-
-
 def fhe_sgn(
     engine: Engine, x_ct: Ciphertext, num_points: int, keypack: KeyPack,
     secret_key=None, tag: str = "",
 ) -> Ciphertext:
-    """MCP + sign_bootstrap으로 sgn(x) 근사."""
+    """MCP + sign_bootstrap으로 sgn(x) 근사. BSGS 기반."""
     slot_count = engine.slot_count
     components = _get_mcp_label()
 
-    result = _eval_mcp(engine, x_ct, components, slot_count, keypack)
+    result = eval_mcp_full(engine, x_ct, components, slot_count, keypack, tag="LP ")
     result = engine.sign_bootstrap(
         engine.intt(result),
         keypack.relinearization_key,

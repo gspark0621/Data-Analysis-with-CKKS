@@ -35,12 +35,14 @@ from core.ciphertext_single.EncryptModule import DimensionalEncryptor
 from core.ciphertext_single.minimax import (
     compute_mcp_for_normalize,
     compute_mcp_for_core,
+    compute_mcp_for_label_prop_fixed,
     load_mcp,
     save_mcp,
 )
 
-_MCP_ALPHA11_PATH = "mcp_alpha11.json"
-_MCP_NORMALIZE_ALPHA12_PATH = "mcp_normalize_alpha12.json"   # ★ Normalize 전용 alpha=12
+_MCP_ALPHA11_PATH        = "mcp_alpha11.json"
+_MCP_ALPHA15_LP_PATH     = "mcp_alpha15_lp.json"          # ★ LP 전용 α=15
+_MCP_NORMALIZE_ALPHA12_PATH = "mcp_normalize_alpha12.json"  # Normalize 전용 α=12
 
 DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/hepta.arff"
 
@@ -49,12 +51,13 @@ DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS
 
 def _ensure_mcp_files():
     """
-    α=11 (Core, LabelProp): degrees=[7,15,15,15]
-    α=12 (Normalize 전용):   degrees=[15,15,15,15]  ← false positive 32%→2.4%
+    α=11 (Core):             degrees=[7,15,15,15]       → mcp_alpha11.json
+    α=12 (Normalize 전용):  degrees=[15,15,15,15]      → mcp_normalize_alpha12.json
+    α=15 (LP 전용):          degrees=[7,15,15,15,27]   → mcp_alpha15_lp.json
+      LP α=15 선택 이유: 840회 fhe_max 누적 drift≈0.39 < threshold=0.5 ✓
     """
-
     if not os.path.exists(_MCP_ALPHA11_PATH):
-        print(f"[MCP] α=11 계산 중 (논문 Table 2: [7,15,15,15])...")
+        print(f"[MCP] α=11 (Core) 계산 중 (논문 Table 2: [7,15,15,15])...")
         comps11 = compute_mcp_for_core(alpha=11, verbose=True)
         save_mcp(comps11, _MCP_ALPHA11_PATH)
         print(f"[MCP] α=11 저장 → {_MCP_ALPHA11_PATH}  "
@@ -62,7 +65,6 @@ def _ensure_mcp_files():
     else:
         print(f"[MCP] α=11 존재, 스킵 → {_MCP_ALPHA11_PATH}")
 
-    # ★ Normalize 전용 alpha=12: margin 0.012→0.00077, false positive 32%→2.4%
     if not os.path.exists(_MCP_NORMALIZE_ALPHA12_PATH):
         print(f"[MCP] α=12 (Normalize 전용) 계산 중 (degrees=[15,15,15,15])...")
         comps12 = compute_mcp_for_normalize(alpha=12, verbose=True)
@@ -71,6 +73,18 @@ def _ensure_mcp_files():
               f"err={comps12[-1]['error']:.4e}  t_k={comps12[-1]['t_i']:.4e}")
     else:
         print(f"[MCP] α=12 Normalize 존재, 스킵 → {_MCP_NORMALIZE_ALPHA12_PATH}")
+
+    # ★ LP 전용 α=15: drift=0.39 < 0.5 보장 (α=11 drift=6.15에서 개선)
+    if not os.path.exists(_MCP_ALPHA15_LP_PATH):
+        print(f"[MCP] α=15 (LP 전용) 계산 중 (degrees=[7,15,15,15,27])...")
+        print(f"      이유: 840회 fhe_max 누적 drift = 840×30×τ/2")
+        print(f"      α=11: drift≈6.15>0.5 ✗  α=15: drift≈0.39<0.5 ✓")
+        comps15 = compute_mcp_for_label_prop_fixed(alpha=15, verbose=True)
+        save_mcp(comps15, _MCP_ALPHA15_LP_PATH)
+        print(f"[MCP] α=15 저장 → {_MCP_ALPHA15_LP_PATH}  "
+              f"err={comps15[-1]['error']:.4e}  t_k={comps15[-1]['t_i']:.4e}")
+    else:
+        print(f"[MCP] α=15 LP 존재, 스킵 → {_MCP_ALPHA15_LP_PATH}")
 
 
 # ── GPU 메모리 유틸 ───────────────────────────────────────────────────────

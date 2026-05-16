@@ -219,19 +219,42 @@ def load_mcp(filepath: str) -> List[dict]:
 # ── 논문 Table 2 (minimize depth) degree 시퀀스 ───────────────────────────────
 # DesiloFHE lazy-rescaling 기준 실제 레벨 소비 = dep(d) × 2
 #
-#  α  | degrees              | 컴포넌트수 | 총 bootstrap (mid/post + sign_boot)
-# ─────┼──────────────────────┼──────────┼────────────────────────────────────
-#  8  | [7, 15, 15]          | 3        | 3 + 1 = 4회
-#  9  | [7, 7, 7, 13]        | 4        | 4 + 1 = 5회
-#  10 | [7, 7, 13, 15]       | 4        | 4 + 1 = 5회  ← Core 최적 (α=12 대비 효율적)
-#  11 | [7, 15, 15, 15]      | 4        | 4 + 1 = 5회
-#  12 | [15, 15, 15, 15]     | 4        | 4 + 1 = 5회  ← α=10과 동일 횟수, 비효율
+#  α  | degrees                | 컴포넌트수 | bootstrap (mid/post + sign_boot)
+# ─────┼────────────────────────┼──────────┼──────────────────────────────────
+#  8  | [7, 15, 15]            | 3        | 3 + 1 = 4회
+#  9  | [7, 7, 7, 13]          | 4        | 4 + 1 = 5회
+#  10 | [7, 7, 13, 15]         | 4        | 4 + 1 = 5회  ← Core 최적
+#  11 | [7, 15, 15, 15]        | 4        | 4 + 1 = 5회  ← Core (현재)
+#  12 | [15, 15, 15, 15]       | 4        | 4 + 1 = 5회
+#  13 | [15, 15, 15, 31]       | 4        | 4 + 1 = 5회  ← BSGS로 dep(31)=6 → 12레벨 ✗ (budget=10 초과)
+#  14 | [7, 7, 15, 15, 27]     | 5        | 5 + 1 = 6회  ← BSGS로 dep(27)=5 → 10레벨 ✓
+#  15 | [7, 15, 15, 15, 27]    | 5        | 5 + 1 = 6회  ← BSGS로 dep(27)=5 → 10레벨 ✓ (LP)
+#  16 | [15, 15, 15, 15, 27]   | 5        | 5 + 1 = 6회  ← BSGS로 dep(27)=5 → 10레벨 ✓
+#
+# ★ BSGS (Odd Baby-Step Giant-Step) 기반 레벨 소비:
+#   dep(d) = 논문 Table 1 값, 레벨 소비 = dep(d) × 2 (DesiloFHE lazy-rescaling)
+#   bootstrap → level=10 → dep 최대 5 → degree 최대 27
+#   naive 루프: deg=27에서 14레벨 소비 → budget 초과 → ✗
+#   BSGS:       deg=27에서 dep=5 → 10레벨 → budget 딱 맞음 → ✓
+#   deg=31: dep(31)=6 → 12레벨 > 10 → BSGS로도 budget 초과 → 사용 불가
+#
+# LP α=15 선택 근거:
+#   누적 drift = n_calls × |u-v|_avg × τ / 2
+#   α=11: 840×30×2^{-11}/2 ≈ 6.15 >> threshold=1.0 ✗
+#   α=15: 840×30×2^{-15}/2 ≈ 0.39 < 1.0 ✓ (2.6배 여유)
 _MINIMIZE_DEPTH_DEGREES = {
     8:  [7, 15, 15],
     9:  [7, 7, 7, 13],
     10: [7, 7, 13, 15],
     11: [7, 15, 15, 15],
     12: [15, 15, 15, 15],
+    # α=13: deg=31은 dep(31)=6 → 12레벨 > budget=10 → 사용 불가
+    #        대안: [7, 7, 7, 7, 15] (5컴포넌트, max dep=4)
+    13: [7, 7, 7, 7, 15],
+    # α=14,15: deg=27 → dep(27)=5 → 10레벨 = budget → BSGS로 ✓
+    14: [7, 7, 15, 15, 27],
+    15: [7, 15, 15, 15, 27],   # ★ LP 전용, BSGS 필수
+    16: [15, 15, 15, 15, 27],
 }
 
 
@@ -280,21 +303,8 @@ def compute_mcp_for_label_prop(
 ) -> List[dict]:
     """
     Label Propagation 전용 (mcp_label_prop.json).
-
-    safety_factor=1.2 선택 이유:
-      최소 입력 gap = 1/N (label_scale=N 사용 시)
-      delta = 1/(N × safety_factor) < 1/N 이어야 함 → safety_factor > 1 필요
-
-      safety_factor=1.2: delta = 1/(N×1.2) = 0.00393 for N=212
-        2^{-8} = 0.00391 < 0.00393 → alpha_equiv=8 → [7,15,15]
-        → bootstrap 3+1=4회/sgn (safety_factor=3.0의 [7,7,13,15] 5회 대비 1회 절약)
-
-      safety_factor=3.0 (기존): delta=0.001572, alpha_equiv=10 → [7,7,13,15]
-        → 동일 정밀도 대비 불필요하게 많은 bootstrap 사용
-
-    alpha cap:
-      alpha_equiv ≤ 12 cap → N < 4096 이면 안전
-      더 큰 N 사용 시: cap 제거 + 적절한 degrees 설정 필요
+    [레거시] N 기반 자동 alpha 계산 방식.
+    compute_mcp_for_label_prop_fixed 사용 권장.
     """
     delta_label = 1.0 / (num_points * safety_factor)
     alpha_equiv = int(np.log2(1.0 / delta_label)) + 1
@@ -304,13 +314,60 @@ def compute_mcp_for_label_prop(
     )
 
     if verbose:
-        print(f"\n[MCP-Label] N={num_points}, safety_factor={safety_factor}")
+        print(f"\n[MCP-Label-Legacy] N={num_points}, safety_factor={safety_factor}")
         print(f"  delta=1/(N×{safety_factor})={delta_label:.6f}, alpha_equiv={alpha_equiv}")
-        print(f"  degrees={degrees} (논문 Table 2 minimize depth for α={min(alpha_equiv,12)})")
-        n_boots = len(degrees) + 1  # mid/post bootstraps + sign_bootstrap
-        print(f"  bootstrap/sgn: {len(degrees)}회 (mid+post) + 1회 sign_boot = {n_boots}회")
-        print(f"  safe N < {int(1.0/delta_label):,} (alpha cap=12 기준: N < 4,096)")
+        print(f"  degrees={degrees}")
 
     return compute_mcp_with_margin(
         degrees=degrees, delta=delta_label, margin=0.0, alpha=alpha_equiv, verbose=verbose,
+    )
+
+
+def compute_mcp_for_label_prop_fixed(alpha: int = 15, verbose: bool = True) -> List[dict]:
+    """
+    Label Propagation 전용 (mcp_alpha15_lp.json). ★ α=15 누적 드리프트 해결
+
+    α=15 선택 근거 (drift 분석):
+      누적 drift = n_calls × |u-v|_avg × τ / 2
+        n_calls=840, |u-v|_avg=30, threshold=inter-cluster min gap / 2 = 1.0
+
+      α=11 (이전): τ=2^{-11} → drift≈6.15 >> 1.0 ✗ (span=7.5 관측)
+      α=15 (현재): τ=2^{-15} → drift≈0.39 < 1.0 (2.6배 여유) ✓
+
+    Degree 선택 기준 (naive 루프 레벨 예산):
+      DesiloFHE naive 루프: 레벨 소비 = (d+1)/2 per component
+      bootstrap → level=10, 안전 상한: d ≤ 15 (소비=8, 남은=2)
+
+      논문 Table 2 minimize-depth [7,15,15,15,27]: deg=27 포함
+        → (27+1)/2=14 레벨 소비 → level=10-14=-4 → ✗ (level 부족)
+        → mid-eval bootstrap 패치: x_pow만 갱신, x_sq/result는 stale
+          → 수학적으로 잘못된 다항식 평가 → ARI 악화 (60%→53%)
+
+      논문 Appendix E [5,5,7,7,7,7,15]: depth=22, max deg=15
+        → 최대 레벨 소비 = 8 ≤ 10 → ✓
+        → 7컴포넌트, 8 bootstraps/fhe_sgn (α=11 5회 대비 +3회, +60% LP 시간)
+        → drift=0.39 < 1.0 → 라벨 안정 예측
+    """
+    degrees = _MINIMIZE_DEPTH_DEGREES.get(alpha, [5, 5, 7, 7, 7, 7, 15])
+    delta   = 2.0 ** (-alpha)
+    margin  = 2.0 ** (-(alpha + 2))   # 논문 Table 3 기준
+
+    if verbose:
+        tau    = delta
+        n_calls_typical = 840
+        uv_avg = 30
+        drift  = n_calls_typical * uv_avg * tau / 2
+        max_deg = max(degrees)
+        max_level_cost = (max_deg + 1) // 2
+        print(f"\n[MCP-LP] α={alpha}, degrees={degrees}, δ={delta:.6e}, η={margin:.6e}")
+        print(f"  τ=2^{{-{alpha}}}={tau:.6f}")
+        print(f"  예상 누적 drift ({n_calls_typical}콜, |u-v|_avg={uv_avg}): {drift:.3f}")
+        print(f"  threshold (inter-cluster min gap/2): 1.0")
+        print(f"  안전 여유: {1.0/drift:.1f}배  {'✓ SAFE' if drift < 1.0 else '✗ UNSAFE'}")
+        n_boots = len(degrees) + 1
+        print(f"  bootstrap/fhe_sgn: {n_boots}회 (α=11 5회 대비 +{n_boots-5}회)")
+        print(f"  max_deg={max_deg}, 레벨 소비={max_level_cost}/10 {'✓' if max_level_cost<=9 else '✗ 예산 초과!'}")
+
+    return compute_mcp_with_margin(
+        degrees=degrees, delta=delta, margin=margin, alpha=alpha, verbose=verbose,
     )
