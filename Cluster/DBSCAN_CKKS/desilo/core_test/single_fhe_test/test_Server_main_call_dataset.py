@@ -2,15 +2,17 @@
 #
 # ── 변경사항 ────────────────────────────────────────────────────────────────
 # [변경 1] KD-tree → Ball Tree 교체
-#   - build_ball_tree_order: 구면 분할로 eps-이웃이 인접 heap 위치에 집중
-#   - compute_kmax_from_data: eps-이웃 쌍의 실제 최대 heap gap 측정
-#   - KD-tree k_max=N//2 → Ball Tree k_max=실측값 (예상 20~40)
+#   - build_ball_tree_order: 구면 분할 → eps-이웃이 인접 heap 위치에 집중
+#   - compute_kmax_from_ball_structure: eps-이웃 조회 없이 k_max 상한 계산
 #
-# [변경 2] prepare_client_ordering: Ball Tree + k_max 통합 인터페이스
-#   - (mode, k_max, heap_idx, inv_perm) 반환
-#   - decide_propagation_mode + build_kd_tree_order 를 1 호출로 대체
+# [변경 2] prepare_client_ordering으로 통합
+#   - (mode, k_max, heap_idx, inv_perm) 한 번에 반환
 #
-# [변경 3] Normalize mcp_normalize_alpha12.json 사용 (false positive 2.4%)
+# [변경 3] 서버 k_max 자동 정밀화
+#   - Server_main이 enc_sum_k 계산 → debug_fhe["k_max_used"] 반환
+#   - client가 Ball Tree 구조 상한만 제공, 정확한 k_max는 서버 결정
+#
+# [변경 4] Normalize mcp_normalize_alpha12.json (false positive 2.4%)
 # ────────────────────────────────────────────────────────────────────────────
 
 import os
@@ -22,9 +24,9 @@ from sklearn.metrics import adjusted_rand_score
 
 from core.ciphertext_single.Client_main import (
     setup_fhe_engine,
-    prepare_client_ordering,   # ★ Ball Tree + k_max 통합
-    build_ball_tree_order,     # 개별 접근 (디버그용)
-    compute_kmax_from_data,    # 개별 접근 (디버그용)
+    prepare_client_ordering,     # ★ Ball Tree + k_max 구조 분석 통합
+    build_ball_tree_order,       # 개별 접근 (디버그용)
+    compute_kmax_from_ball_structure,  # 개별 접근 (디버그용)
 )
 from core.ciphertext_single.Server_main import send_to_server_fhe
 from core.ex.plaintext.Server_main import send_to_server_np
@@ -165,7 +167,7 @@ def main():
     pts, true_labels = load_arff_to_pts_with_labels(DATASET_PATH)
     N         = len(pts)
     dimension = pts.shape[1]
-    log2_n    = math.ceil(math.log2(N))
+
 
     # ── Step 2: 정규화 ───────────────────────────────────────────
     global_min   = np.min(pts)
@@ -178,18 +180,19 @@ def main():
     if N > 100:
         print(f"⚠️  {N}개 → 긴 시간 소요 예상\n")
 
-    # ── Step 3+4: Ball Tree 정렬 + k_max 측정 (통합) ──────────────
-    print("\n[Ball Tree] BFS level-order 정렬 + k_max 측정...")
+    # ── Step 3+4: Ball Tree 정렬 + k_max 구조 분석 (eps-이웃 조회 없음) ──
+    print("\n[Ball Tree] BFS level-order 정렬 + k_max 구조 분석...")
     mode, k_max, heap_idx, inv_perm = prepare_client_ordering(
         normalized_pts, normalized_eps, int(min_pts_val), N
     )
 
     if mode == 'kd_dense':
-        kd_sorted_pts = normalized_pts[heap_idx]
+        ball_sorted_pts = normalized_pts[heap_idx]
         save_heap_order_csv(f"debug_heap_order_N{N}.csv", heap_idx, inv_perm, N)
+        print(f"  → k_max 상한={k_max} (서버 enc_sum_k로 정밀화 예정)")
     else:
-        kd_sorted_pts = normalized_pts
-        print(f"[Sweep] 정렬 없음, num_sweeps={k_max}")
+        ball_sorted_pts = normalized_pts
+        print(f"  → sweep 방식 (num_sweeps={k_max})")
 
 
     # ── Step 5: 평문 DBSCAN (원래 순서 기준, 비교 기준) ──────────
@@ -222,20 +225,25 @@ def main():
     # Heap 순서로 정렬된 데이터 암호화
     encryptor = DimensionalEncryptor(engine, keypack)
     before    = _gpu_used_mb()
-    encrypted_columns = encryptor.encrypt_data(kd_sorted_pts.tolist(), dimension)
-    _mem_delta(f"encrypt_data Heap-sorted ({dimension}개)", before)
+    encrypted_columns = encryptor.encrypt_data(ball_sorted_pts.tolist(), dimension)
+    _mem_delta(f"encrypt_data Ball-sorted ({dimension}개)", before)
 
-    # 서버 연산
+    # 서버 연산 (Phase 1: Normalize+Core+enc_sum_k, Phase 2: Label Prop)
+    # 서버가 enc_sum_k 계산 후 k_max 자동 정밀화
     before = _gpu_used_mb()
     fhe_final_ct, debug_fhe = send_to_server_fhe(
         engine=engine, keypack=keypack, secret_key=secret_key,
         encrypted_columns=encrypted_columns,
         num_points=N, eps=normalized_eps, min_pts=float(min_pts_val),
-        k_max=k_max,
+        k_max=k_max,                          # 구조 분석 상한 (서버가 정밀화)
         use_kd_propagation=(mode == 'kd_dense'),
         num_sweeps=k_max,
     )
     _mem_delta("send_to_server_fhe 전체", before)
+
+    k_max_final = debug_fhe.get("k_max_used", k_max)
+    print(f"\n[k_max 결과] 구조 상한={k_max} → 서버 정밀화={k_max_final}"
+          f"  ({(k_max_final/k_max*100):.0f}% 활용)")
 
     # 복호화 (Heap 순서)
     before = _gpu_used_mb()
@@ -300,14 +308,23 @@ def main():
     print("\n================ 검증 결과 ==============================")
     pt_valid  = [c for c in set(cluster_labels_np)  if c != -1]
     fhe_valid = [c for c in set(cluster_labels_fhe) if c != -1]
+    print(f"[True]      클러스터 {len(set(true_labels))}개")
     print(f"[Plaintext] 클러스터 {len(pt_valid)}개")
     print(f"[FHE]       클러스터 {len(fhe_valid)}개")
 
-    ari = adjusted_rand_score(cluster_labels_np, cluster_labels_fhe)
-    print(f"\n📊 [ARI] 평문 vs FHE: {ari*100:.2f}점 / 100점")
-    if   ari > 0.99: print("  => 🎉 대성공!")
-    elif ari > 0.80: print("  => 👍 대부분 일치")
-    else:            print("  => ❌ 군집 구조 붕괴")
+    # 실제 정답 기반 ARI (절대적 정확도 — 핵심 지표)
+    ari_true_fhe = adjusted_rand_score(true_labels.tolist(), cluster_labels_fhe)
+    ari_true_np  = adjusted_rand_score(true_labels.tolist(), cluster_labels_np)
+    # 평문 vs FHE 상대 비교 (FHE 구현 충실도)
+    ari_np_fhe   = adjusted_rand_score(cluster_labels_np, cluster_labels_fhe)
+
+    print(f"\n📊 [ARI] 실제 정답 vs FHE:  {ari_true_fhe*100:.2f}점 / 100점  ← 핵심 지표")
+    print(f"📊 [ARI] 실제 정답 vs 평문: {ari_true_np*100:.2f}점 / 100점")
+    print(f"📊 [ARI] 평문 vs FHE:       {ari_np_fhe*100:.2f}점 / 100점")
+
+    if   ari_true_fhe > 0.99: print("  => 🎉 대성공!")
+    elif ari_true_fhe > 0.80: print("  => 👍 대부분 일치")
+    else:                     print("  => ❌ 군집 구조 붕괴")
 
     # ── Step 10: 최종 결과 저장 ──────────────────────────────────
     output_filename = f"hepta_fhe_heap_result_eps{eps_val}_min{min_pts_val}.csv"

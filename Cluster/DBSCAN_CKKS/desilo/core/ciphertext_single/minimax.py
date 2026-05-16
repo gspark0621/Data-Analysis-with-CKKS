@@ -53,8 +53,13 @@ def _poly_np(coeffs: np.ndarray, x: np.ndarray) -> np.ndarray:
 
 def remez_odd_sign(
     degree: int, a: float, b: float,
-    n_iter: int = 400, tol: float = 1e-13, n_sample: int = 30_000,
+    n_iter: int = 400, tol: float = 1e-9, n_sample: int = 30_000,
 ) -> Tuple[np.ndarray, float]:
+    """
+    tol=1e-9: 1e-13은 float64 정밀도 한계로 equioscillation 조건을 충족하지
+    못해 항상 400회 전부 반복됨 (결과는 올바름, 불필요한 연산 낭비).
+    1e-9로 완화하면 보통 수십~수백 회 내에 조기 종료됨.
+    """
     if degree % 2 != 1:
         raise ValueError(f"degree 는 홀수여야 합니다: {degree}")
     if not (0.0 < a < b):
@@ -70,6 +75,7 @@ def remez_odd_sign(
     x_dense = np.linspace(a, b, n_sample)
     coeffs = None
     E_abs = 0.0
+    converged = False
 
     for _it in range(n_iter):
         A = np.zeros((n_ref, m + 1))
@@ -90,6 +96,7 @@ def remez_odd_sign(
         err = _poly_np(coeffs, x_dense) - 1.0
         max_abs = float(np.max(np.abs(err)))
         if E_abs > 1e-30 and abs(max_abs - E_abs) / E_abs < tol:
+            converged = True
             break
         ext_x = [a]; ext_e = [float(err[0])]
         for i in range(1, n_sample - 1):
@@ -113,6 +120,14 @@ def remez_odd_sign(
             if sc > best:
                 best, best_s = sc, s
         nodes = np.array(mx[best_s: best_s + n_ref])
+
+    if not converged:
+        import warnings
+        warnings.warn(
+            f"[Remez] deg={degree} [{a:.6f},{b:.6f}]: {n_iter}회 내 미수렴 "
+            f"(E_abs={E_abs:.4e}, tol={tol}). 현재 최적값 사용.",
+            RuntimeWarning, stacklevel=2,
+        )
 
     return (coeffs if coeffs is not None else np.zeros(m)), E_abs
 

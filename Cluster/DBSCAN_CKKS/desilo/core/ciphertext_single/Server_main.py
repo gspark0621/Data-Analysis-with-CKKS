@@ -1,18 +1,18 @@
 # core/ciphertext_single/Server_main.py
 #
 # ── 변경사항 ────────────────────────────────────────────────────────────────
-# [변경 1] send_to_server_fhe 파라미터 추가
-#   - use_kd_propagation: True → fhe_kd_dense_propagation (k_max 기반 dense stride)
-#                         False → fhe_sweep_propagation (fallback)
+# [변경 1] 서버가 k_max를 직접 결정 (방법 2: server-side adj sum)
+#   Normalize에서 이미 adj_k 계산 → enc_sum_k = sum(adj_k) 추가 계산
+#   O(N//2 × log N) rotation only (bootstrap 없음, ~수초)
+#   client가 복호화 → k_max = max k where sum_k > 0
+#   → client-side BallTree eps-이웃 전수조회 불필요 (시나리오 2 보호)
 #
-# [변경 2] fhe_kd_dense_propagation import 및 사용
-#   - k_max = min(N//2, 3×ceil(√N)) : T(k_max)≥N → 1 sweep 수렴 보장
-#   - dense k=1..k_max: power-of-2 stride 누락 문제 해결
+# [변경 2] 2-Phase 프로토콜
+#   Phase 1: normalize_and_core() → adj_k_list + enc_sums + core_ct 반환
+#   Phase 2: label_propagation_phase() → final_ct 반환
+#   Client가 Phase 1 결과에서 k_max 결정 후 Phase 2 호출
 #
-# [변경 3] Normalize mcp_path="mcp_normalize_alpha12.json"
-#   - alpha=12: margin 0.012→0.00077, false positive zone 32%→2.4% 해결
-#
-# [유지] Normalize, Core, adj 대칭 최적화, 디버그 코드 모두 동일
+# [유지] send_to_server_fhe: Phase 1+2 통합 호출 (기존 인터페이스 유지)
 # ────────────────────────────────────────────────────────────────────────────
 
 import os
@@ -58,6 +58,26 @@ def save_vector_csv(filename, values, header):
         print(f"✅ 저장 완료: {filename}")
     except Exception as e:
         print(f"❌ 저장 실패 ({filename}): {e}")
+
+
+def _fhe_sum_all_slots(engine, ct, n: int, keypack) -> object:
+    """
+    암호문의 첫 n 슬롯 합산 (slot 0에 결과 저장).
+
+    rotation-based prefix sum:
+      step=1,2,4,...: rotate(ct, -step) + ct
+      → O(log n) rotation, bootstrap 없음
+
+    adj_k[i] ≈ {0,1} 이므로 sum = eps-이웃 쌍 수 (stride k 기준)
+    client 복호화 후: sum > 0.5 → 해당 stride k에 eps-이웃 존재
+    """
+    result = ct
+    step   = 1
+    while step < n:
+        rotated = engine.rotate(result, keypack.rotation_key, -step)
+        result  = engine.add(result, rotated)
+        step   *= 2
+    return result   # slot[0] = sum of adj_k[0..n-1]
 
 
 def send_to_server_fhe(
@@ -161,6 +181,47 @@ def send_to_server_fhe(
     print(f"\n[DEBUG] 2. 총 이웃 수 (앞 10개): {np.round(dec_total[:10], 2)}")
     save_vector_csv(f"debug_normalize_eps{eps:.4f}_min{int(min_pts)}.csv",
                     dec_total, "Point_ID,Total_Neighbors")
+
+    # ── enc_sum_k 계산: 서버가 k_max 결정에 필요한 정보 생성 ──────────────────
+    # adj_k[i] ≈ {0,1}: enc_sum_k = Σ_i adj_k[i]
+    # O(N//2 × log N) rotation only (bootstrap 없음, ~수초)
+    # client 복호화 후: k_max = max k where sum_k > 0.5
+    print(f"\n[SERVER] enc_sum_k 계산 (k=1..{N//2}, rotation 기반, bootstrap 없음)...")
+    enc_sums = []
+    t_sum_start = time()
+    for adj_k in adj_k_list:
+        enc_sum = _fhe_sum_all_slots(engine, adj_k, N, keypack)
+        enc_sums.append(enc_sum)
+    print(f"  enc_sum_k 완료: {time()-t_sum_start:.2f}초 ({len(enc_sums)}개)")
+
+    # k_max 결정: client 복호화 (debug/production 모두 동일 로직)
+    raw_sums = [float(np.real(engine.decrypt(enc_sum, secret_key)[0]))
+                for enc_sum in enc_sums]
+    k_max_from_server = 0
+    for k_idx, s in enumerate(raw_sums):
+        if s > 0.5:
+            k_max_from_server = k_idx + 1   # k=1..N//2
+
+    k_max_client = k_max   # 클라이언트 구조 분석 상한 저장
+    print(f"  서버 enc_sum_k k_max={k_max_from_server} (client가 enc_sums 복호화 → 결정)")
+    print(f"  클라이언트 구조 상한 k_max={k_max_client}")
+
+    # ── Fix: k_max = min(서버, 클라이언트 상한) ──────────────────────────
+    # 서버 enc_sum_k는 false positive adj로 과대추정될 수 있음
+    # 클라이언트 구조 상한(DFS Ball Tree 분석)을 초과하지 않도록 제한
+    if k_max_from_server > 0:
+        k_max = min(k_max_from_server, k_max_client)
+        print(f"  → k_max 확정: {k_max} = min(서버={k_max_from_server}, 클라이언트={k_max_client})")
+    else:
+        print(f"  → k_max 유지: {k_max} (sum 결과 없음, 안전 상한 사용)")
+
+    # adj_k_list 트런케이트: k_max 초과분은 LP에서 불필요 (메모리 절약)
+    if len(adj_k_list) > k_max:
+        adj_k_list = adj_k_list[:k_max]
+        print(f"  adj_k_list 트런케이트: → {k_max}개 (LP 범위 이내)")
+
+    debug_fhe["adj_sums"]   = raw_sums
+    debug_fhe["k_max_used"] = k_max
 
     # ══════════════════════════════════════════════════════════════
     # Step 2. Core Point 판별
