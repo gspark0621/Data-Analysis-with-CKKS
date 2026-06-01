@@ -34,8 +34,12 @@ from core.ciphertext_single.Server_main import send_to_server_fhe as send_to_ser
 from util.keypack import KeyPack
 
 # 전파 방식 임계값: 상단 정의로 모든 함수에서 참조 가능
-_KD_DENSE_MIN_PTS_THRESHOLD = 4
-
+def _kd_dense_threshold(dim: int) -> int:
+    """
+    Sander et al. (1998) 권장 min_pts = 2 × dim.
+    dim차원 공간에서 밀집 구조를 신뢰할 수 있는 최소 이웃 수.
+    """
+    return 2 * dim
 
 def _gpu_used_mb() -> float:
     try:
@@ -199,53 +203,53 @@ def prepare_client_ordering(
     eps_norm: float,
     min_pts: int,
     N: int,
+    dim: int,       # ← 인자 추가
 ) -> tuple:
-    """
-    Ball Tree DFS in-order 정렬 + 구조 분석 k_max 상한 계산.
+    # ★ [2026-05c] kd_dense 통일.
+    #   이전: min_pts >= 2×dim 이면 kd_dense, 아니면 sweep.
+    #   문제: all-sweep은 mask damping이 누적 곱셈으로 라벨을 0으로 소멸시켜
+    #         iris 등에서 -1 완전 붕괴. hepta도 dim=3,min_pts=4 → 2×dim=6 미만이라
+    #         의도치 않게 sweep으로 빠짐 (관측된 버그).
+    #   결정: 작업 A(mask=1.0) + 작업 B(log₂N round)로 kd_dense가 모든 경우 커버.
+    #         sweep 폐기. mode는 항상 'kd_dense'.
+    #         (min_pts < 2×dim 인 희소 데이터도 kd_dense + 적응적 round로 처리;
+    #          작업 C 검증에서 min_pts=4 데이터들이 kd_dense로 수렴 확인.)
+    threshold = _kd_dense_threshold(dim)  # 2 × dim (참고용 로그만)
 
-    k_max 결정 순서:
-      1. [Client, 이 함수] DFS Ball Tree 구조 분석
-         → k_max 상한 (eps-이웃 조회 없음, 시나리오 2 보호)
-      2. [Server] enc_sum_k 계산 → client 복호화 → k_max 정밀화
-         단, 서버 k_max ≤ 클라이언트 상한 (false positive 과대추정 방지)
+    t0 = time()
+    order, inv_perm = build_ball_tree_order(norm_pts)
+    print(f"[Client] Ball Tree DFS 구축: {time()-t0:.3f}초")
 
-    Returns (mode, k_max, order, inv_perm)
-    """
-    if min_pts >= _KD_DENSE_MIN_PTS_THRESHOLD:
-        t0 = time()
-        order, inv_perm = build_ball_tree_order(norm_pts)
-        print(f"[Client] Ball Tree DFS 구축: {time()-t0:.3f}초")
-
-        t1 = time()
-        k_max = compute_kmax_from_ball_structure(norm_pts, order, eps_norm, N)
-        print(f"[Client] k_max 구조 분석 (DFS): {time()-t1:.3f}초 (eps-이웃 조회 없음)")
-        print(f"[Client] k_max 상한={k_max} (서버 enc_sum_k로 정밀화 예정)")
-        print(f"         T({k_max})={k_max*(k_max+1)//2}  안전값={N//2}")
-        return 'kd_dense', k_max, order, inv_perm
+    t1 = time()
+    k_max = compute_kmax_from_ball_structure(norm_pts, order, eps_norm, N)
+    print(f"[Client] k_max 구조 분석 (DFS): {time()-t1:.3f}초 (eps-이웃 조회 없음)")
+    print(f"[Client] k_max 상한={k_max}")
+    print(f"         T({k_max})={k_max*(k_max+1)//2}  안전값={N//2}")
+    if min_pts >= threshold:
+        print(f"[Client] 전파 방식: KD-dense "
+              f"(min_pts={min_pts} ≥ 2×dim={threshold}, Sander et al. 1998)")
     else:
-        num_sweeps = max(math.ceil(N / max(min_pts, 1) / 2), math.ceil(math.log2(N)))
-        print(f"[Client] sweep (num_sweeps={num_sweeps})")
-        return 'sweep', num_sweeps, np.arange(N), np.arange(N)
+        print(f"[Client] 전파 방식: KD-dense (통일) "
+              f"— min_pts={min_pts} < 2×dim={threshold} 이지만 sweep 폐기, "
+              f"작업 A+B로 kd_dense가 희소 데이터도 커버")
+    return 'kd_dense', k_max, order, inv_perm
 
 
 # ── 전파 방식 결정 ─────────────────────────────────────────────────────────
 
-def decide_propagation_mode(min_pts: int, log2_n: int, N: int) -> tuple:
+def decide_propagation_mode(min_pts: int, log2_n: int, N: int, dim: int) -> tuple:
     """
-    O(1): min_pts만으로 전파 방식 결정.
-    prepare_client_ordering 사용 권장 (DFS Ball Tree + 구조 분석 k_max 포함).
+    [DEPRECATED + 2026-05c kd_dense 통일]
+      현재 어디서도 호출되지 않음 (prepare_client_ordering이 통합 담당).
+      sweep 폐기에 맞춰 항상 'kd_dense' 반환하도록 정리.
+      향후 완전 제거 예정.
     """
-    if min_pts >= _KD_DENSE_MIN_PTS_THRESHOLD:
-        k_max  = get_kd_dense_kmax(N)
-        T_kmax = k_max * (k_max + 1) // 2
-        print(f"[Client] min_pts={min_pts} ≥ {_KD_DENSE_MIN_PTS_THRESHOLD} "
-              f"→ KD-dense  k_max={k_max}, T({k_max})={T_kmax}")
-        return 'kd_dense', k_max
-    else:
-        num_sweeps = max(math.ceil(N / max(min_pts, 1) / 2), math.ceil(math.log2(N)))
-        print(f"[Client] min_pts={min_pts} < {_KD_DENSE_MIN_PTS_THRESHOLD} "
-              f"→ ALL-sweep (num_sweeps={num_sweeps}, chain형 허용)")
-        return 'sweep', num_sweeps
+    threshold = _kd_dense_threshold(dim)  # 2 × dim (참고용)
+    k_max  = get_kd_dense_kmax(N)
+    T_kmax = k_max * (k_max + 1) // 2
+    print(f"[Client][deprecated] kd_dense 통일 → k_max={k_max}, T({k_max})={T_kmax} "
+          f"(min_pts={min_pts}, 2×dim={threshold})")
+    return 'kd_dense', k_max
 
 
 # ── FHE 엔진 설정 ─────────────────────────────────────────────────────────
@@ -317,7 +321,7 @@ def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
     print(f"[Client] N={N}, dim={dim}, eps_norm={ne:.4f}")
 
     # 2. Ball Tree DFS 정렬 + k_max 구조 분석 (prepare_client_ordering 통합 사용)
-    mode, k_max, heap_idx, inv_perm = prepare_client_ordering(norm, ne, min_pts, N)
+    mode, k_max, heap_idx, inv_perm = prepare_client_ordering(norm, ne, min_pts, N, dim)
 
     if mode == 'kd_dense':
         data_for_enc = norm[heap_idx].tolist()
@@ -337,7 +341,8 @@ def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
         num_points=N, eps=ne, min_pts=min_pts,
         k_max=k_max,                           # 클라이언트 구조 분석 상한 전달
         use_kd_propagation=(mode == 'kd_dense'),
-        num_sweeps=k_max,
+        num_sweeps=k_max if mode == 'sweep' else None, # sweep일 때만 사용
+        n_rounds=math.ceil(math.log2(N)),      # ★ [2026-05c 작업 B] log₂N round
     )
 
     # 4. 복호화 + 역순열

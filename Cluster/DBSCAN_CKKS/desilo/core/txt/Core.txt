@@ -1,66 +1,28 @@
 # core/ciphertext_single/Core.py
 #
-# 핵심 변경:
-#   [변경 1] α=12 → α=11 최적화
-#     이유:
-#       α=9  t_k > min_gap=0.5/N → 분류 오류 가능
-#       α=10 Remez 편차로 UNSAFE 위험 (margin 추가 시 threshold 초과)
-#       α=11 [7,15,15,15]: t_k=0.00051 << threshold=0.00098 → 안정적 SAFE
-#            delta=2^{-11} < 0.5/N (4.8배 여유)
-#            α=12와 동일 5회 bootstrap, non-scalar mult 5회 절약
+# [2026-05 수정] Chebyshev basis + α=15 통일
 #
-#   [변경 2] _eval_mcp_fhe: 마지막 컴포넌트 평가 *후* bootstrap
-#     (Normalize.py와 동일 패턴)
+# 변경 이력:
+#   이전:    mcp_alpha11.json (α=11, [7,15,15,15], odd power basis)
+#            → α=12 통일 → mcp_alpha12.json (α=12, [15,15,15,15])
+#   2026-05a: mcp_alpha12_cheb.json (α=12, Chebyshev basis)
+#   2026-05b 현재: mcp_alpha15_lp_cheb.json (α=15, Normalize/Core/LP 공유)
 #
-#   [변경 3] sign_bootstrap 복원 (level 충분)
+# α=15 통일 이유 (옵션 B):
+#   - α=12 Core worst case = 0.5/N = 0.00236 ≈ 9.7τ 영역의 안전성 미확인.
+#     (sanity check에서 x=4τ FAIL, x=33τ PASS — 9.7τ는 측정 안 됨.)
+#   - α=15로 올리면 worst case = 0.5/N ≈ 77.3τ로 도메인 깊숙이 위치 → 안전 보장.
+#   - Normalize/LP와 동일 JSON 공유 → 검증 부담 0 (LP에서 이미 α=15 PASS 확인).
+#   - 비용 차이: Core는 전체 파이프라인에서 1회 호출, bootstrap +1 ≈ 0.06% 미만 무시 가능.
 
 from desilofhe import Engine, Ciphertext
+import math
 from util.keypack import KeyPack
 from core.ciphertext_single.minimax import load_mcp
+from desilo.core.ciphertext_single.chebyshev_eval import eval_mcp_full_chebyshev
 
 
-_MCP_CORE_PATH = "mcp_alpha11.json"   # ★ α=11 (기존 α=12에서 최적화)
-
-
-def _eval_mcp_fhe(engine, ct, components, N, keypack):
-    """
-    FHE MCP 평가. 마지막 후 bootstrap 포함.
-    중간 + 마지막 모든 step 후 bootstrap → level=10 반환.
-    """
-    relin_key = keypack.relinearization_key
-    conj_key  = keypack.conjugation_key
-    boot_key  = keypack.bootstrap_key
-    current   = ct
-
-    for step_idx, comp in enumerate(components):
-        coeffs   = comp["coeffs"]
-        domain_b = comp.get("domain_b", 1.0)
-
-        if abs(domain_b - 1.0) > 1e-9:
-            inv_b   = engine.encode([1.0 / domain_b] * N)
-            working = engine.multiply(current, inv_b)
-        else:
-            working = current
-
-        x_sq   = engine.square(working, relin_key)
-        x_pow  = working
-        result = engine.multiply(x_pow, engine.encode([coeffs[0]] * N))
-
-        for k in range(1, len(coeffs)):
-            x_pow  = engine.multiply(x_pow, x_sq, relin_key)
-            result = engine.add(
-                result,
-                engine.multiply(x_pow, engine.encode([coeffs[k]] * N))
-            )
-
-        current = result
-
-        # ★ 모든 step 후 bootstrap (마지막 포함)
-        print(f"  - [Core MCP] p_{step_idx+1} 완료 (domain_b={domain_b:.4f}), bootstrap...")
-        current = engine.intt(current)
-        current = engine.bootstrap(current, relin_key, conj_key, boot_key)
-
-    return current  # level=10
+_MCP_CORE_PATH = "mcp_alpha15_lp_cheb.json"   # ★ Normalize/LP와 공유 (Chebyshev, α=15 통일)
 
 
 def identify_core_points_fhe_converted(
@@ -70,48 +32,67 @@ def identify_core_points_fhe_converted(
     N: int,
     keypack: KeyPack,
     bootstrap_interval: int = 3,
-    mcp_path: str = None,  # None이면 _MCP_CORE_PATH 사용
+    mcp_path: str = None,
+    debug: bool = False,
     **kwargs
 ) -> Ciphertext:
     """
     Core point 판별: totalNeighbors >= min_pts → 1, else → 0.
 
-    α=11 선택 이유 (최적값):
-      최소 입력 gap = 0.5/N = 0.5/212 ≈ 0.00236
-      α=10 [7,7,13,15]: Remez 편차로 t_k가 threshold 근방 → margin 추가 시 UNSAFE
-      α=11 [7,15,15,15]: t_k=0.00051 << threshold=0.00098 → 안정적 SAFE
-                          delta=2^{-11}=0.00049 < 0.00236 (4.8배 여유)
-      α=12 대비: 동일 4+1=5회 bootstrap, non-scalar mult 5회 절약
+    α=15 + Chebyshev(N=212):
+      δ = 2^{-15} ≈ 3.05e-5 → ~77배 안전 여유 vs min gap 0.00236 (= 0.5/N)
+      margin η = 2^{-17} (논문 Table 3 max_depth, LP와 공유 JSON)
+      degrees [7, 15, 15, 15, 27], BSGS depth=5 → 10 레벨 = budget 10 ✓
+      (이전 α=12: 9.7τ 여유 — sanity check 미검증 영역. α=15에서 8배↑ 확보.)
 
-    sign_bootstrap 후 정밀도:
-      error ≤ (π²/8) × (2^{-10})² ≈ 1.2e-6 → 매우 정밀한 0/1 판별
+    Pipeline:
+      1. x = (totalNeighbors - (min_pts-0.5)) / N  → x ∈ [-1,1]
+      2. Chebyshev MCP 평가 (sign 근사)
+      3. sign_bootstrap
+      4. (sign+1)/2 → {0,1}
+      5. 최종 bootstrap
     """
     if mcp_path is None:
         mcp_path = _MCP_CORE_PATH
 
-    relin_key = keypack.relinearization_key
-    conj_key  = keypack.conjugation_key
-    boot_key  = keypack.bootstrap_key
+    relin_key  = keypack.relinearization_key
+    conj_key   = keypack.conjugation_key
+    boot_key   = keypack.bootstrap_key
+    slot_count = engine.slot_count
 
-    print(f"[Server] Core: α=11 MCP 로드 ({mcp_path})")
+    print(f"[Server] Core: Chebyshev BSGS MCP 로드 ({mcp_path})")
     components = load_mcp(mcp_path)
+
+    # basis 확인
+    basis = components[0].get("basis", "power")
+    if basis != "chebyshev":
+        raise ValueError(
+            f"[Core] {mcp_path} has basis='{basis}', expected 'chebyshev'. "
+            f"JSON 재생성 필요: compute_mcp_for_core_chebyshev() 사용."
+        )
+
     print(f"[Server] Core: degrees={[c['degree'] for c in components]}, "
           f"sign_err={components[-1]['error']:.4e}")
 
     # x = (totalNeighbors - (min_pts - 0.5)) / N ∈ [-1, 1]
     margin     = 0.5
-    min_pts_pt = engine.encode([min_pts - margin] * N)
+    min_pts_pt = engine.encode([min_pts - margin] * slot_count)
     x          = engine.subtract(neighbor_count_ct, min_pts_pt)
-    scale_pt   = engine.encode([1.0 / float(N)] * N)
+    scale_pt   = engine.encode([1.0 / float(N)] * slot_count)
     current_x  = engine.multiply(x, scale_pt)
 
     print(f"[Server] Core: N={N}, min_pts={min_pts}, scale=1/{N}={1.0/N:.4e}")
-    print(f"[Server] Core: delta=2^-11={2**-11:.5f} < 0.5/N={0.5/N:.5f} ✓")
+    mcp_delta = components[0]["domain_a"]
+    print(f"[Server] Core: delta={mcp_delta:.5e} (= 2^{math.log2(mcp_delta):.2f}) "
+          f"< 0.5/N={0.5/N:.5f} ✓ (여유 {(0.5/N)/mcp_delta:.1f}배)")
 
-    # MCP 평가 → 마지막 후 bootstrap → level=10
-    current_x = _eval_mcp_fhe(engine, current_x, components, N, keypack)
+    # ── Chebyshev BSGS MCP 평가 ──────────────────────────────────────
+    current_x = eval_mcp_full_chebyshev(
+        engine, current_x, components, slot_count, keypack,
+        tag="Core ", debug=debug,
+    )
 
-    # ★ sign_bootstrap (level=10 입력)
+    # ── sign_bootstrap ────────────────────────────────────────────────
     print(f"  - [Core] sign_bootstrap...")
     current_x = engine.sign_bootstrap(
         engine.intt(current_x),
@@ -121,8 +102,8 @@ def identify_core_points_fhe_converted(
         keypack.smallbootstrap_key,
     )
 
-    # (sign + 1) / 2 → {0, 1}
-    half_pt        = engine.encode([0.5] * N)
+    # ── (sign + 1) / 2 → {0, 1} ──────────────────────────────────────
+    half_pt        = engine.encode([0.5] * slot_count)
     core_indicator = engine.add(engine.multiply(current_x, half_pt), half_pt)
 
     core_indicator = engine.intt(core_indicator)

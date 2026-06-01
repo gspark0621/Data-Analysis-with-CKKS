@@ -1,21 +1,17 @@
 # core/ciphertext_single/Label_Propagation.py
 #
-# ── 변경사항 ────────────────────────────────────────────────────────────────
-# [변경 1] fhe_kd_depth_propagation() 추가
-#   Heap(BFS level-order) 레이아웃 전제:
-#     depth d cross-boundary stride = 2^(d-1)
-#     → depth_strides = [1, 2, 4, 8, ..., min(2^(log₂N-1), N//2)]
-#   2-pass (bottom-up + top-down):
-#     Pass1: strides 오름차순 [1,2,4,...] → 로컬 연결 먼저 해결
-#     Pass2: strides 내림차순 [...,4,2,1] → transitive update 보완
-#   연산량: 2ph × 2pass × log₂N = 4×log₂N fhe_max (N=212: ~64회)
-#   기존 fhe_sweep_propagation: 2ph × num_sweeps × N//2 (N=212: ~1696회+)
+# ── 변경사항 (2026-05) ────────────────────────────────────────────────────
+# [변경] fhe_sgn: bsgs_poly.eval_mcp_full → bsgs_chebyshev.eval_mcp_full_chebyshev
+#        MCP 파일: mcp_alpha15_lp.json → mcp_alpha15_lp_cheb.json
 #
-# [변경 2] _propagate_one_stride_core / _propagate_one_stride_border 헬퍼 추가
-#   코드 중복 제거, 두 전파 함수가 공유
+#   이유: Power basis는 deg=27에서 T_27 leading coefficient = 6.7×10^7 같은
+#         거대 계수 발생 → CKKS plaintext mult noise 폭발 → 라벨 drift 악화.
+#         Chebyshev basis로 평가하면 계수 폭발 회피, drift 감소 기대.
 #
-# [유지] fhe_sweep_propagation (fallback, min_pts<4 or 하위호환)
-# ────────────────────────────────────────────────────────────────────────────
+# [기존 변경사항 유지]
+# - fhe_kd_dense_propagation(), fhe_sweep_propagation()
+# - _propagate_one_stride_core / _propagate_one_stride_border 헬퍼
+# ─────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
 import math
@@ -23,15 +19,28 @@ import numpy as np
 from desilofhe import Engine, Ciphertext
 from util.keypack import KeyPack
 from core.ciphertext_single.minimax import load_mcp
+from desilo.core.ciphertext_single.chebyshev_eval import eval_mcp_full_chebyshev   # ★ Chebyshev
 
-_MCP_LABEL_PATH       = "mcp_alpha8.json"
+
+_MCP_LABEL_PATH = "mcp_alpha15_lp_cheb.json"   # ★ Chebyshev basis (이전: mcp_alpha15_lp.json)
+# α=15: τ=2^{-15}, drift=840×30×τ/2≈0.39 < 1.0 ✓
+# degrees=[7,15,15,15,27] (논문 Table 2)
+# Chebyshev BSGS dep(27)=5 → 10레벨 ≤ budget 10 ✓
 _mcp_label_components = None
+
 
 def _get_mcp_label():
     global _mcp_label_components
     if _mcp_label_components is None:
         print(f"  [LabelProp] MCP 로드: {_MCP_LABEL_PATH}")
         _mcp_label_components = load_mcp(_MCP_LABEL_PATH)
+        # basis 확인
+        basis = _mcp_label_components[0].get("basis", "power")
+        if basis != "chebyshev":
+            raise ValueError(
+                f"[LabelProp] {_MCP_LABEL_PATH} has basis='{basis}', expected 'chebyshev'. "
+                f"JSON 재생성 필요: compute_mcp_for_label_prop_chebyshev() 사용."
+            )
     return _mcp_label_components
 
 
@@ -54,51 +63,20 @@ def _refresh(engine: Engine, ct: Ciphertext, keypack: KeyPack) -> Ciphertext:
     )
 
 
-def _eval_one_component(engine, ct, comp, slot_count, keypack, relin_key):
-    """단일 MCP 컴포넌트 평가. domain_b 정규화 포함."""
-    coeffs   = comp["coeffs"]
-    domain_b = comp.get("domain_b", 1.0)
-
-    if abs(domain_b - 1.0) > 1e-9:
-        x_sc = engine.multiply(ct, engine.encode([1.0 / domain_b] * slot_count))
-    else:
-        x_sc = ct
-
-    x_sq  = engine.square(x_sc, relin_key)
-    x_pow = x_sc
-    result = engine.multiply(x_pow, engine.encode([coeffs[0]] * slot_count))
-
-    for k in range(1, len(coeffs)):
-        x_pow  = engine.multiply(x_pow, x_sq, relin_key)
-        result = engine.add(result,
-                            engine.multiply(x_pow, engine.encode([coeffs[k]] * slot_count)))
-    return result
-
-
-def _eval_mcp(engine, ct, components, slot_count, keypack):
-    """MCP 전체 합성. 모든 컴포넌트 후 bootstrap → level=10 반환."""
-    relin_key = keypack.relinearization_key
-    conj_key  = keypack.conjugation_key
-    boot_key  = keypack.bootstrap_key
-    current   = ct
-
-    for step_idx, comp in enumerate(components):
-        current = _eval_one_component(engine, current, comp, slot_count, keypack, relin_key)
-        current = engine.intt(current)
-        current = engine.bootstrap(current, relin_key, conj_key, boot_key)
-
-    return current  # level=10
-
-
 def fhe_sgn(
     engine: Engine, x_ct: Ciphertext, num_points: int, keypack: KeyPack,
     secret_key=None, tag: str = "",
 ) -> Ciphertext:
-    """MCP + sign_bootstrap으로 sgn(x) 근사."""
+    """
+    MCP + sign_bootstrap으로 sgn(x) 근사. Chebyshev BSGS 기반.
+    """
     slot_count = engine.slot_count
     components = _get_mcp_label()
 
-    result = _eval_mcp(engine, x_ct, components, slot_count, keypack)
+    # ★ Chebyshev BSGS 평가 (Bossuat Algorithm 1)
+    result = eval_mcp_full_chebyshev(
+        engine, x_ct, components, slot_count, keypack, tag="LP "
+    )
     result = engine.sign_bootstrap(
         engine.intt(result),
         keypack.relinearization_key,
@@ -161,10 +139,7 @@ def _propagate_one_stride_core(
     k, N, label_scale,
     secret_key=None,
 ):
-    """
-    Core-Core 전파: stride k에 대해 Forward + Backward 처리.
-    adj_{N-k} = rotate(adj_k, N-k) 대칭 활용.
-    """
+    """Core-Core 전파: stride k에 대해 Forward + Backward."""
     relin_key = keypack.relinearization_key
     adj_k     = adj_k_half_list[k - 1]
 
@@ -205,7 +180,7 @@ def _propagate_one_stride_border(
     k, N, label_scale,
     secret_key=None,
 ):
-    """Core→Border 전파: stride k에 대해 Forward + Backward 처리."""
+    """Core→Border 전파: stride k에 대해 Forward + Backward."""
     relin_key = keypack.relinearization_key
     adj_k     = adj_k_half_list[k - 1]
 
@@ -239,7 +214,7 @@ def _propagate_one_stride_border(
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# 신규: KD-tree Heap depth 기반 2-pass 전파
+# KD-tree dense stride 라벨 전파 (kd_dense, min_pts ≥ 4)
 # ══════════════════════════════════════════════════════════════════════════
 
 def fhe_kd_dense_propagation(
@@ -254,31 +229,10 @@ def fhe_kd_dense_propagation(
     """
     KD-tree ordering + dense stride k=1..k_max 라벨 전파.
 
-    ── 구 fhe_kd_depth_propagation 문제 ────────────────────────────────────
-      depth_strides = [1,2,4,8,...,64] (power-of-2만)
-      → stride=3,5,7,... 연결 영구 누락
-      → 비구형 클러스터: 멤버가 stride=3,5,...에 위치 → 전파 실패
-
-    ── 수정: dense k=1..k_max  (FHE sequential T(k_max) 정리) ──────────────
-      FHE sweep에서 k=1→2→...→k_max 순서로 처리,
-      각 k 처리 시 직전 k에서 업데이트된 label 사용 (체이닝):
-
-        After k=1: label[i] = max(label[i], label[i+1])
-        After k=2: label[i] = max(label[i], UPDATED label[i+2])
-                             = max(label[i..i+3])  ← 4개 커버
-        After k=j: T(j) = j(j+1)/2 위치까지 전파
-
-      k_max = min(N//2, 3×ceil(√N)):  N=212 → k_max=45, T(45)=1035 >> N
-      → 연속 stride ≤ k_max인 모든 클러스터를 1 forward sweep으로 수렴 ✓
-      → power-of-2가 아닌 stride=3,5,7,... 연결도 모두 커버 ✓
-
-    ── 연산량 (N=212, k_max=45) ─────────────────────────────────────────────
-      fhe_max: 2phases × 2passes × 45strides × 2방향 = 360회
-      (구 depth_strides 64회 대비 5.6배, ALL-sweep 3392회 대비 9.4배↓)
-
-    label_scale = N: 기존 Server_main 호환 (정수 라벨 1..N 반환)
+    Forward + backward 2 pass × Core-Core, Core→Border 2 phase.
+    fhe_max 횟수 = 2phases × 2passes × k_max × 2directions = 8 × k_max
     """
-    N = num_points
+    N     = num_points
     k_max = min(k_max, N // 2)
     T_kmax = k_max * (k_max + 1) // 2
 
@@ -288,10 +242,9 @@ def fhe_kd_dense_propagation(
     print(f"\n[KD-LP] ══════════════════════════════════════════")
     print(f"[KD-LP] KD-tree dense stride 전파 (k=1..{k_max})")
     print(f"[KD-LP] N={N}, k_max={k_max}")
-    print(f"[KD-LP] T({k_max})={T_kmax}  {'✓ ≥ N' if T_kmax >= N else '⚠ < N, cluster span 초과 시 추가 pass 필요'}")
+    print(f"[KD-LP] T({k_max})={T_kmax}  {'✓ ≥ N' if T_kmax >= N else '⚠ < N'}")
     fhe_max_cnt = 2 * 2 * k_max * 2
-    print(f"[KD-LP] fhe_max: {fhe_max_cnt}회 "
-          f"(depth-stride 64회 대비 {fhe_max_cnt/64:.1f}배, ALL-sweep 3392회 대비 {3392/fhe_max_cnt:.1f}배↓)")
+    print(f"[KD-LP] fhe_max: {fhe_max_cnt}회")
     print(f"[KD-LP] ══════════════════════════════════════════\n")
 
     # ── 초기화 ─────────────────────────────────────────────────
@@ -306,15 +259,14 @@ def fhe_kd_dense_propagation(
 
     _dbg(engine, secret_key, core_labels_ct, "초기 core_labels", N)
 
-    # ── Phase 1: Core-Core (forward sweep + backward sweep) ────
-    # forward (k=1..k_max): sequential T(k_max) 체이닝으로 우→좌 전파
-    # backward (k=k_max..1): 좌→우 전파 보완
     passes = [
         ("forward",  list(range(1, k_max + 1))),
         ("backward", list(range(k_max, 0, -1))),
     ]
+
+    # ── Phase 1: Core-Core ─────────────────────────────────────
     for pass_idx, (pass_name, k_order) in enumerate(passes):
-        print(f"[KD-LP] Phase1: Core-Core Pass{pass_idx+1}/2 ({pass_name}): k=1..{k_max}")
+        print(f"[KD-LP] Phase1: Core-Core Pass{pass_idx+1}/2 ({pass_name})")
         for k in k_order:
             core_labels_ct = _propagate_one_stride_core(
                 engine, keypack, adj_k_half_list,
@@ -323,14 +275,12 @@ def fhe_kd_dense_propagation(
             )
         _dbg(engine, secret_key, core_labels_ct, f"P1-{pass_name} 완료", N)
 
-    _dbg(engine, secret_key, core_labels_ct, "Phase1 완료 (Core-Core)", N)
-
-    # ── Phase 2: Core→Border (forward + backward) ──────────────
+    # ── Phase 2: Core→Border ───────────────────────────────────
     border_labels_ct = _refresh(engine,
         engine.multiply(engine.encode([0.0] * slot_count), non_core_ct), keypack)
 
     for pass_idx, (pass_name, k_order) in enumerate(passes):
-        print(f"[KD-LP] Phase2: Core→Border Pass{pass_idx+1}/2 ({pass_name}): k=1..{k_max}")
+        print(f"[KD-LP] Phase2: Core→Border Pass{pass_idx+1}/2 ({pass_name})")
         for k in k_order:
             border_labels_ct = _propagate_one_stride_border(
                 engine, keypack, adj_k_half_list,
@@ -339,16 +289,14 @@ def fhe_kd_dense_propagation(
             )
         _dbg(engine, secret_key, border_labels_ct, f"P2-{pass_name} 완료", N)
 
-    # ── 최종 합산 ─────────────────────────────────────────────
     final_ct = _refresh(engine,
         engine.add(core_labels_ct, border_labels_ct), keypack)
     _dbg(engine, secret_key, final_ct, f"최종 [0,{N}]", N)
     return final_ct
 
 
-
 # ══════════════════════════════════════════════════════════════════════════
-# 기존: ALL strides sweep (fallback, min_pts<4 시 사용)
+# ALL strides sweep (fallback, min_pts < 4)
 # ══════════════════════════════════════════════════════════════════════════
 
 def fhe_sweep_propagation(
@@ -360,14 +308,7 @@ def fhe_sweep_propagation(
     secret_key=None,
     num_sweeps: int = None,
 ) -> Ciphertext:
-    """
-    ALL strides sweep 기반 라벨 전파 (fallback).
-
-    사용 시점: min_pts < 4 (chain형 클러스터 허용 시)
-    num_sweeps: ceil(N / min_pts / 2) (decide_propagation_mode에서 계산)
-
-    정확성 보장: num_sweeps ≥ ceil(diameter/2)이면 무조건 수렴
-    """
+    """ALL strides sweep 기반 라벨 전파 (fallback)."""
     N = num_points
     if num_sweeps is None:
         num_sweeps = math.ceil(math.log2(N))
@@ -377,8 +318,6 @@ def fhe_sweep_propagation(
     slot_count  = engine.slot_count
 
     print(f"[LP-sweep] N={N}, N_half={N_half}, num_sweeps={num_sweeps}")
-    print(f"           총 fhe_max ≈ 2ph × {num_sweeps}sw × {N_half}str × 2방향 = "
-          f"{2 * num_sweeps * N_half * 2}회")
 
     core_mask_ct = _refresh(engine, core_ct, keypack)
     non_core_ct  = _refresh(engine,
@@ -391,7 +330,6 @@ def fhe_sweep_propagation(
 
     _dbg(engine, secret_key, core_labels_ct, "초기 core_labels", N)
 
-    # Phase 1: Core-Core
     for sweep in range(num_sweeps):
         print(f"[LP-sweep] P1 Sweep {sweep+1}/{num_sweeps}")
         for k in range(1, N_half + 1):
@@ -402,9 +340,6 @@ def fhe_sweep_propagation(
             )
         _dbg(engine, secret_key, core_labels_ct, f"P1 Sweep{sweep+1} 완료", N)
 
-    _dbg(engine, secret_key, core_labels_ct, "P1 완료", N)
-
-    # Phase 2: Core→Border
     border_labels_ct = _refresh(engine,
         engine.multiply(engine.encode([0.0] * slot_count), non_core_ct), keypack)
 

@@ -1,19 +1,27 @@
 # test_Server_main_call_dataset.py
 #
 # ── 변경사항 ────────────────────────────────────────────────────────────────
-# [변경 1] Heap KD-tree 정렬 + dense stride k=1..k_max (power-of-2 → dense 수정)
-#   - build_kd_tree_order()로 Heap(BFS level-order) 정렬
-#   - k_max = min(N//2, 3×ceil(√N))  → T(k_max)≥N → 1 sweep 수렴 보장
-#   - 복호화 후 inv_perm으로 원래 순서 복원
+# [변경 1] KD-tree → Ball Tree 교체 (유지)
 #
-# [변경 2] decide_propagation_mode: 'kd_depth' → 'kd_dense'
-#   - min_pts ≥ 4 → kd_dense  (dense k=1..k_max, 비구형 cluster도 정확)
-#   - min_pts < 4 → sweep
+# [변경 2] prepare_client_ordering으로 통합 (유지)
 #
-# [변경 3] send_to_server_fhe: log2_n → k_max 전달
+# [변경 3] k_max 결정 방식 단순화                          ← 수정
+#   기존: 서버 enc_sum_k 계산 → 클라이언트 복호화 → k_max 정밀화
+#   변경: 클라이언트 Ball Tree DFS 구조 분석 결과를 최종값으로 사용.
+#         서버는 수신한 k_max를 그대로 사용하며 재계산하지 않음.
 #
-# [변경 4] Normalize mcp_normalize_alpha12.json 사용
-#   - alpha=12: margin 0.012→0.00077, false positive 32%→2.4%
+# [변경 4] min_pts 분기 기준: 고정값 4 → 2×dim (Sander et al. 1998) ← 신규
+#   기존: min_pts >= 4 → kd_dense
+#   변경: min_pts >= 2×dim → kd_dense
+#   근거: d차원 공간에서 밀집 구조 신뢰를 위한 최소 이웃 수 = 2d
+# ─────────────────────────────────────────────────────────────────────────
+#
+# [변경 5, 2026-05b] 옵션 B: 전부 α=15 Chebyshev로 통일
+#   - mcp_alpha11.json / mcp_normalize_alpha12.json / mcp_alpha15_lp.json (power basis)
+#     3개 stale 파일 자동 생성 제거. 코드 어디서도 참조 안 됨.
+#   - 단일 파일 mcp_alpha15_lp_cheb.json 만 자동 생성 (Normalize/Core/LP 공유).
+#   - 이유: Core α=12 worst case 안전성 미확인 → α=15에서 77τ 마진 확보.
+#           Chebyshev basis는 high-deg coefficient 폭발 회피.
 # ────────────────────────────────────────────────────────────────────────────
 
 import os
@@ -25,24 +33,24 @@ from sklearn.metrics import adjusted_rand_score
 
 from core.ciphertext_single.Client_main import (
     setup_fhe_engine,
-    build_kd_tree_order,
-    get_kd_dense_kmax,       # ★ get_depth_strides → get_kd_dense_kmax
-    decide_propagation_mode,
+    prepare_client_ordering,     # ★ Ball Tree + k_max 구조 분석 통합
+    build_ball_tree_order,       # 개별 접근 (디버그용)
+    compute_kmax_from_ball_structure,  # 개별 접근 (디버그용)
 )
 from core.ciphertext_single.Server_main import send_to_server_fhe
 from core.ex.plaintext.Server_main import send_to_server_np
 from core.ciphertext_single.EncryptModule import DimensionalEncryptor
 
 from core.ciphertext_single.minimax import (
-    compute_mcp_for_normalize,
-    compute_mcp_for_core,
+    compute_mcp_for_label_prop_chebyshev,   # ★ Normalize/Core/LP 공유 α=15 Chebyshev
     load_mcp,
     save_mcp,
 )
 
-_MCP_ALPHA8_PATH  = "mcp_alpha8.json"
-_MCP_ALPHA11_PATH = "mcp_alpha11.json"
-_MCP_NORMALIZE_ALPHA12_PATH = "mcp_normalize_alpha12.json"   # ★ Normalize 전용 alpha=12
+# ─────────────────────────────────────────────────────────────────────────
+# MCP 파일 경로 (옵션 B: α=15 Chebyshev 단일 파일 공유)
+# ─────────────────────────────────────────────────────────────────────────
+_MCP_ALPHA15_CHEB_PATH = "mcp_alpha15_lp_cheb.json"   # Normalize/Core/LP 공유
 
 DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/hepta.arff"
 
@@ -51,37 +59,33 @@ DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS
 
 def _ensure_mcp_files():
     """
-    α=8  (LabelProp 공유):    degrees=[7,15,15]
-    α=11 (Core):              degrees=[7,15,15,15]
-    α=12 (Normalize 전용):   degrees=[15,15,15,15]  ← false positive 32%→2.4%
+    α=15 Chebyshev MCP (Normalize/Core/LP 공유) 자동 생성/확인.
+
+    옵션 B (2026-05b) 정리 결정사항:
+      - 이전: 3개 power basis MCP 자동 생성
+              mcp_alpha11.json            (Core용 α=11, [7,15,15,15])
+              mcp_normalize_alpha12.json  (Normalize용 α=12, [15,15,15,15])
+              mcp_alpha15_lp.json         (LP용 α=15, [7,15,15,15,27])
+      - 현재: Normalize/Core/LP 모두 mcp_alpha15_lp_cheb.json 단일 파일 공유.
+              위 3개 power basis 파일은 더 이상 어디서도 참조되지 않으므로
+              자동 생성 로직 제거. (디스크에 잔재 있어도 동작에 영향 없음.)
+
+    α=15 Chebyshev 검증 결과 (sanity_check_alpha15.py):
+      - Core worst case 77τ (= 0.5/N at N=212): PASS ✓ — 핵심 가정 검증.
+      - 일반 영역 (≥16τ): PASS ✓
+      - Normalize boundary (≈1τ): FAIL — 예상됨, false ±로 흡수.
+      - ±3τ FAIL: 안전 영역이 실측 ~16τ. hepta ARI 실측으로 영향도 판단.
     """
-    if not os.path.exists(_MCP_ALPHA8_PATH):
-        print(f"[MCP] α=8 계산 중 (논문 Table 2: [7,15,15])...")
-        comps8 = compute_mcp_for_normalize(alpha=8, verbose=True)
-        save_mcp(comps8, _MCP_ALPHA8_PATH)
-        print(f"[MCP] α=8 저장 → {_MCP_ALPHA8_PATH}  "
-              f"err={comps8[-1]['error']:.4e}  t_k={comps8[-1]['t_i']:.4e}")
+    if not os.path.exists(_MCP_ALPHA15_CHEB_PATH):
+        print(f"[MCP] α=15 Chebyshev MCP 생성 중 (Normalize/Core/LP 공유)")
+        print(f"      degrees=[7,15,15,15,27], BSGS depth=5, margin η=2^{{-17}}")
+        print(f"      δ=2^{{-15}}≈3.05e-5, drift(840콜)≈0.39 < 1.0 ✓")
+        comps = compute_mcp_for_label_prop_chebyshev(alpha=15, verbose=True)
+        save_mcp(comps, _MCP_ALPHA15_CHEB_PATH)
+        print(f"[MCP] 저장 → {_MCP_ALPHA15_CHEB_PATH}  "
+              f"err={comps[-1]['error']:.4e}  t_k={comps[-1]['t_i']:.4e}")
     else:
-        print(f"[MCP] α=8 존재, 스킵 → {_MCP_ALPHA8_PATH}")
-
-    if not os.path.exists(_MCP_ALPHA11_PATH):
-        print(f"[MCP] α=11 계산 중 (논문 Table 2: [7,15,15,15])...")
-        comps11 = compute_mcp_for_core(alpha=11, verbose=True)
-        save_mcp(comps11, _MCP_ALPHA11_PATH)
-        print(f"[MCP] α=11 저장 → {_MCP_ALPHA11_PATH}  "
-              f"err={comps11[-1]['error']:.4e}  t_k={comps11[-1]['t_i']:.4e}")
-    else:
-        print(f"[MCP] α=11 존재, 스킵 → {_MCP_ALPHA11_PATH}")
-
-    # ★ Normalize 전용 alpha=12: margin 0.012→0.00077, false positive 32%→2.4%
-    if not os.path.exists(_MCP_NORMALIZE_ALPHA12_PATH):
-        print(f"[MCP] α=12 (Normalize 전용) 계산 중 (degrees=[15,15,15,15])...")
-        comps12 = compute_mcp_for_normalize(alpha=12, verbose=True)
-        save_mcp(comps12, _MCP_NORMALIZE_ALPHA12_PATH)
-        print(f"[MCP] α=12 저장 → {_MCP_NORMALIZE_ALPHA12_PATH}  "
-              f"err={comps12[-1]['error']:.4e}  t_k={comps12[-1]['t_i']:.4e}")
-    else:
-        print(f"[MCP] α=12 Normalize 존재, 스킵 → {_MCP_NORMALIZE_ALPHA12_PATH}")
+        print(f"[MCP] {_MCP_ALPHA15_CHEB_PATH} 존재 → 스킵 (Normalize/Core/LP 공유)")
 
 
 # ── GPU 메모리 유틸 ───────────────────────────────────────────────────────
@@ -178,7 +182,7 @@ def main():
     pts, true_labels = load_arff_to_pts_with_labels(DATASET_PATH)
     N         = len(pts)
     dimension = pts.shape[1]
-    log2_n    = math.ceil(math.log2(N))
+
 
     # ── Step 2: 정규화 ───────────────────────────────────────────
     global_min   = np.min(pts)
@@ -191,28 +195,22 @@ def main():
     if N > 100:
         print(f"⚠️  {N}개 → 긴 시간 소요 예상\n")
 
-    # ── Step 3: 전파 방식 결정 (O(1)) ────────────────────────────
-    mode, k_max = decide_propagation_mode(min_pts_val, log2_n, N)
+    # ── Step 3+4: Ball Tree 정렬 + k_max 구조 분석 (eps-이웃 조회 없음) ──
+    print("\n[Ball Tree] BFS level-order 정렬 + k_max 구조 분석...")
+    mode, k_max, heap_idx, inv_perm = prepare_client_ordering(
+        normalized_pts, normalized_eps, int(min_pts_val), N, dimension  # ← dim 추가
+    )
 
-    # ── Step 4: Heap KD-tree 정렬 (kd_dense 선택 시) ─────────────
     if mode == 'kd_dense':
-        print("\n[Heap KD-tree] BFS level-order 정렬 중...")
-        heap_idx, inv_perm = build_kd_tree_order(normalized_pts)
-        kd_sorted_pts      = normalized_pts[heap_idx]
-        T_kmax = k_max * (k_max + 1) // 2
-
-        old_ops = 2 * 2 * math.ceil(math.log2(N)) * (N // 2) * 2   # old sweep
-        new_ops = 2 * 2 * k_max * 2                                  # dense fwd+bwd
-        print(f"[Heap KD-tree] k_max={k_max}, T({k_max})={T_kmax}")
-        print(f"[Heap KD-tree] fhe_max: {new_ops}회 (기존 sweep {old_ops}회, {old_ops//new_ops}배↓)")
-
+        ball_sorted_pts = normalized_pts[heap_idx]
         save_heap_order_csv(f"debug_heap_order_N{N}.csv", heap_idx, inv_perm, N)
+        T_kmax = k_max * (k_max + 1) // 2
+        print(f"  → k_max={k_max}  T({k_max})={T_kmax}  "
+            f"{'✓ ≥' if T_kmax >= N else '⚠ <'} N={N}")
     else:
-        # sweep 방식: 정렬 없이 원래 순서
-        heap_idx      = np.arange(N)
-        inv_perm      = np.arange(N)
-        kd_sorted_pts = normalized_pts
-        print(f"[Sweep] 정렬 없음, num_sweeps={k_max}")
+        ball_sorted_pts = normalized_pts
+        print(f"  → sweep 방식 (num_sweeps={k_max})")
+
 
     # ── Step 5: 평문 DBSCAN (원래 순서 기준, 비교 기준) ──────────
     print("\n================ Plaintext ===================")
@@ -244,20 +242,22 @@ def main():
     # Heap 순서로 정렬된 데이터 암호화
     encryptor = DimensionalEncryptor(engine, keypack)
     before    = _gpu_used_mb()
-    encrypted_columns = encryptor.encrypt_data(kd_sorted_pts.tolist(), dimension)
-    _mem_delta(f"encrypt_data Heap-sorted ({dimension}개)", before)
+    encrypted_columns = encryptor.encrypt_data(ball_sorted_pts.tolist(), dimension)
+    _mem_delta(f"encrypt_data Ball-sorted ({dimension}개)", before)
 
-    # 서버 연산
+    # 서버 연산 (Phase 1: Normalize+Core+enc_sum_k, Phase 2: Label Prop)
+    # 서버가 enc_sum_k 계산 후 k_max 자동 정밀화
     before = _gpu_used_mb()
     fhe_final_ct, debug_fhe = send_to_server_fhe(
         engine=engine, keypack=keypack, secret_key=secret_key,
         encrypted_columns=encrypted_columns,
         num_points=N, eps=normalized_eps, min_pts=float(min_pts_val),
-        k_max=k_max,
+        k_max=k_max,                                        # Ball Tree 구조 분석 최종값
         use_kd_propagation=(mode == 'kd_dense'),
-        num_sweeps=k_max,
+        num_sweeps=k_max if mode == 'sweep' else None,      # sweep일 때만 유효
     )
-    _mem_delta("send_to_server_fhe 전체", before)
+    
+    print(f"\n[k_max] {k_max}  (Ball Tree DFS 구조 분석 최종값, 서버 재계산 없음)")
 
     # 복호화 (Heap 순서)
     before = _gpu_used_mb()
@@ -322,14 +322,23 @@ def main():
     print("\n================ 검증 결과 ==============================")
     pt_valid  = [c for c in set(cluster_labels_np)  if c != -1]
     fhe_valid = [c for c in set(cluster_labels_fhe) if c != -1]
+    print(f"[True]      클러스터 {len(set(true_labels))}개")
     print(f"[Plaintext] 클러스터 {len(pt_valid)}개")
     print(f"[FHE]       클러스터 {len(fhe_valid)}개")
 
-    ari = adjusted_rand_score(cluster_labels_np, cluster_labels_fhe)
-    print(f"\n📊 [ARI] 평문 vs FHE: {ari*100:.2f}점 / 100점")
-    if   ari > 0.99: print("  => 🎉 대성공!")
-    elif ari > 0.80: print("  => 👍 대부분 일치")
-    else:            print("  => ❌ 군집 구조 붕괴")
+    # 실제 정답 기반 ARI (절대적 정확도 — 핵심 지표)
+    ari_true_fhe = adjusted_rand_score(true_labels.tolist(), cluster_labels_fhe)
+    ari_true_np  = adjusted_rand_score(true_labels.tolist(), cluster_labels_np)
+    # 평문 vs FHE 상대 비교 (FHE 구현 충실도)
+    ari_np_fhe   = adjusted_rand_score(cluster_labels_np, cluster_labels_fhe)
+
+    print(f"\n📊 [ARI] 실제 정답 vs FHE:  {ari_true_fhe*100:.2f}점 / 100점  ← 핵심 지표")
+    print(f"📊 [ARI] 실제 정답 vs 평문: {ari_true_np*100:.2f}점 / 100점")
+    print(f"📊 [ARI] 평문 vs FHE:       {ari_np_fhe*100:.2f}점 / 100점")
+
+    if   ari_true_fhe > 0.99: print("  => 🎉 대성공!")
+    elif ari_true_fhe > 0.80: print("  => 👍 대부분 일치")
+    else:                     print("  => ❌ 군집 구조 붕괴")
 
     # ── Step 10: 최종 결과 저장 ──────────────────────────────────
     output_filename = f"hepta_fhe_heap_result_eps{eps_val}_min{min_pts_val}.csv"

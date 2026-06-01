@@ -5,42 +5,63 @@ Minimax Composite Polynomial (MCP) for Sign Function Approximation
 논문: Lee et al., "Minimax Approximation of Sign Function by Composite
       Polynomial for Homomorphic Comparison", IEEE TDSC 2022
 
-sign_bootstrap 활용 (Hong et al., DesiloFHE):
-  MCP 출력(≈±1) 후 sign_bootstrap → 정밀도 ≈ (π²/8)×τ² 수준으로 향상
-  단, sign_bootstrap은 입력이 ±1 근방(τ 작을 것)이어야 함 → MCP의 delta 조건이 선행
+─────────────────────────────────────────────────────────────────────────
+[2026-05 수정 사항]
+
+1. tol: 1e-9 → 1e-13 (논문 Algorithm 1/2의 원래 기준)
+   - 이유: 클라이언트 측 1회 연산이라 시간 비용 < 정확도 가치
+   - float64 한계로 보통 n_iter 끝까지 돌지만, 그래도 더 정확한
+     minimax polynomial을 얻을 가능성. n_iter도 400 → 800으로 상향.
+
+2. margin η: _suggest_margin 자동 → 논문 Table 3 직접 매핑
+   - 이유: 논문이 HEAAN에서 실험적으로 검증한 값. 우리가 수식으로
+     재추정하는 것보다 안전.
+
+3. 단일 구간 Remez 처리 유지 (수학적 동등성 확인):
+   - sgn(x)가 홀함수이고 odd-basis만 사용하면 다항식도 홀함수 (Lemma 2)
+   - 따라서 D=[-b,-a]∪[a,b]에서 sgn 근사 = [a,b]에서 1 근사
+   - 양의 반구간 alternation → 음의 반구간 자동 대칭 alternation
+   - Multi-interval Algorithm 2와 결과 동일, 계산만 더 효율적.
+
+4. Chebyshev basis 추가 (Bossuat Algorithm 1 호환):
+   - 논문 5.2.1 권장 사항: power basis는 high-degree coefficient 폭발 가능
+     → CKKS plaintext mult noise 증가
+   - 새 함수: remez_odd_sign_chebyshev, eval_mcp_np_chebyshev,
+            compute_mcp_with_margin_chebyshev (cf. _chebyshev 접미사)
+   - JSON 출력 형식: comp["basis"] = "chebyshev" 또는 "power"
+     coeffs 의미: chebyshev → odd Chebyshev T_1, T_3, ... 계수
+                  power     → odd power x, x^3, ... 계수
+   - FHE 평가: bsgs_chebyshev.py 사용 (Bossuat Alg 1 BSGS)
+   - 기존 power basis 코드도 유지 (역호환, A/B 비교 용도)
 
 ─────────────────────────────────────────────────────────────────────────
-α 최소값 결정 규칙 (N=212 DBSCAN 기준):
+α 결정 (DBSCAN 기준, N=212):
 
-  사용처           최소 |입력 gap|    최소 α    minimize_depth degrees
+  사용처           최소 |입력 gap|     α    degrees            bootstraps
   ─────────────────────────────────────────────────────────────────────
-  fhe_sgn (LP)    1/N = 0.00472    α=8       [7, 15, 15]     3 comp
-  Normalize (adj) margin/bound     α=8       [7, 15, 15]     3 comp
-                  ≈ 0.00394
-  Core            0.5/N = 0.00236  α=10      [7, 7, 13, 15]  4 comp
-                                   (α=12는 동일 4 comp, 비효율)
+  Normalize (adj)  margin/bound        12    [15,15,15,15]      4+1=5
+                   ≈ 0.00078
+  Core             0.5/N = 0.00236     12    [15,15,15,15]      4+1=5
+  fhe_sgn (LP)     1/N = 0.00472       15    [7,15,15,15,27]    5+1=6
 
-DesiloFHE lazy-rescaling 영향:
-  dep(d) × 2 = 실제 레벨 소비
-  dep(15)=4 → 8레벨 소비, bootstrap(level=10) 후 10-8=2 남음
-  → sign_bootstrap 최소 레벨 3 불충족 → 에러 원인
-  → 해결: 마지막 컴포넌트 평가 *후* regular bootstrap → level=10
-          → sign_bootstrap 입력 level=10 ≥ 3 → 성공
-
-sign_bootstrap 출력 정밀도 (Theorem 1, τ=2^{-α}):
-  error ≤ (π²/8)×τ²,  fhe_max error ≤ N×error/2
-  α=8: fhe_max error ≤ 0.002 (round 임계 0.5 대비 251배 여유)
-  α=10: fhe_max error ≤ 0.0001 (4009배 여유)
+  Normalize 와 Core는 α=12로 통일:
+    - 논문 Table 3에 α∈{8,12,16,20}만 직접 매핑 가능
+    - α=12 선택 시 margin η를 보간 없이 직접 사용 (η=2^{-14})
+    - δ=2^{-12}=0.000244 < min gap 0.00236 (Core: 9.7배 여유)
+    - false positive 비율 ~2.4% (α=11 대비 절반)
+    - α=11 대비 mults +3회 (29 → 32, 9% 증가) — 합리적 trade-off
 ─────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
 import json
+import math
 import numpy as np
 from typing import List, Tuple
 
 
 def _poly_np(coeffs: np.ndarray, x: np.ndarray) -> np.ndarray:
+    """odd-power polynomial 평가: p(x) = Σ c_k × x^{2k+1}"""
     x    = np.asarray(x, dtype=np.float64)
     val  = np.zeros_like(x)
     xpow = x.copy()
@@ -51,33 +72,49 @@ def _poly_np(coeffs: np.ndarray, x: np.ndarray) -> np.ndarray:
     return val
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Remez 알고리즘 (단일 구간, odd-basis)
+# ═══════════════════════════════════════════════════════════════════════════
 def remez_odd_sign(
     degree: int, a: float, b: float,
-    n_iter: int = 400, tol: float = 1e-9, n_sample: int = 30_000,
+    n_iter: int = 800, tol: float = 1e-11, n_sample: int = 30_000,
 ) -> Tuple[np.ndarray, float]:
     """
-    tol=1e-9: 1e-13은 float64 정밀도 한계로 equioscillation 조건을 충족하지
-    못해 항상 400회 전부 반복됨 (결과는 올바름, 불필요한 연산 낭비).
-    1e-9로 완화하면 보통 수십~수백 회 내에 조기 종료됨.
+    sgn(x) 근사를 위한 odd-degree minimax 다항식 계수 결정.
+
+    수학적 동등성:
+      도메인 D=[-b,-a]∪[a,b]에서 sgn(x) 근사 (논문 Algorithm 2의 multi-interval)
+      = [a,b]에서 1 근사 (이 함수)
+      (sgn은 홀함수, odd-basis 다항식도 홀함수 → 음반구간 자동 대칭)
+
+    수렴 조건 (논문 Algorithm 1, line 7):
+      (max - min) / min < tol
+      tol=1e-11: float64 정밀도 한계에 가까워 보통 n_iter 끝까지 돌지만,
+                 그 사이 nodes 갱신 반복으로 더 정확한 minimax에 수렴.
     """
     if degree % 2 != 1:
         raise ValueError(f"degree 는 홀수여야 합니다: {degree}")
     if not (0.0 < a < b):
         raise ValueError(f"0 < a < b 조건 위반: a={a}, b={b}")
 
-    m = (degree + 1) // 2
-    n_ref = m + 1
+    m = (degree + 1) // 2   # odd term 수
+    n_ref = m + 1            # alternation point 수
+
+    # 초기 nodes: Chebyshev nodes (boundary 약간 안쪽으로 clip)
     k_idx = np.arange(n_ref)
     theta = (2*k_idx + 1) * np.pi / (2*n_ref)
     nodes = 0.5*(a+b) + 0.5*(b-a)*np.cos(theta[::-1])
     eps_bd = 1e-10 * (b - a)
     nodes = np.sort(np.clip(nodes, a + eps_bd, b - eps_bd))
-    x_dense = np.linspace(a, b, n_sample)
-    coeffs = None
-    E_abs = 0.0
+
+    x_dense   = np.linspace(a, b, n_sample)
+    coeffs    = None
+    E_abs     = 0.0
     converged = False
 
     for _it in range(n_iter):
+        # ── 선형 시스템 A · sol = rhs ────────────────────────────────────
+        # n_ref개 방정식: c_0·x_i + c_1·x_i^3 + ... + c_{m-1}·x_i^{2m-1} − (-1)^i E = 1
         A = np.zeros((n_ref, m + 1))
         rhs = np.ones(n_ref)
         for i, xi in enumerate(nodes):
@@ -86,25 +123,34 @@ def remez_odd_sign(
                 A[i, k] = xi_pow
                 xi_pow *= xi * xi
             A[i, m] = -((-1.0) ** i)
+
         try:
             sol = np.linalg.solve(A, rhs)
         except np.linalg.LinAlgError:
             break
+
         coeffs = sol[:m]
-        E = float(sol[m])
-        E_abs = abs(E)
-        err = _poly_np(coeffs, x_dense) - 1.0
+        E      = float(sol[m])
+        E_abs  = abs(E)
+
+        # ── 수렴 체크 (논문 line 7): (max - min) / min < tol ─────────────
+        err     = _poly_np(coeffs, x_dense) - 1.0
         max_abs = float(np.max(np.abs(err)))
         if E_abs > 1e-30 and abs(max_abs - E_abs) / E_abs < tol:
             converged = True
             break
+
+        # ── 극점 후보 수집 (논문 line 4-5: extreme points) ───────────────
         ext_x = [a]; ext_e = [float(err[0])]
         for i in range(1, n_sample - 1):
+            # 부호 변화 또는 미분 부호 변화
             if err[i-1]*err[i+1] <= 0.0 or (
                 (err[i]-err[i-1])*(err[i+1]-err[i]) <= 0.0 and abs(err[i]) > 0.0
             ):
                 ext_x.append(float(x_dense[i])); ext_e.append(float(err[i]))
         ext_x.append(b); ext_e.append(float(err[-1]))
+
+        # 같은 부호 연속 극점 병합 (큰 |err| 유지)
         mx = [ext_x[0]]; me = [ext_e[0]]
         for i in range(1, len(ext_x)):
             if np.sign(ext_e[i]) == np.sign(me[-1]) or me[-1] == 0.0:
@@ -112,8 +158,11 @@ def remez_odd_sign(
                     mx[-1] = ext_x[i]; me[-1] = ext_e[i]
             else:
                 mx.append(ext_x[i]); me.append(ext_e[i])
+
         if len(mx) < n_ref:
-            continue
+            continue   # alternation point 부족 → 다음 iter
+
+        # 절대값 합 최대 부분집합 선택 (논문 line 4: maximum absolute sum condition)
         best, best_s = -1.0, 0
         for s in range(len(mx) - n_ref + 1):
             sc = sum(abs(me[s+j]) for j in range(n_ref))
@@ -132,7 +181,89 @@ def remez_odd_sign(
     return (coeffs if coeffs is not None else np.zeros(m)), E_abs
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# Margin η — 논문 Table 3 직접 매핑
+# ═══════════════════════════════════════════════════════════════════════════
+
+# 논문 Table 3 (Lee et al. 2022, IEEE TDSC):
+#   key=α, value=(η_comparison_min_time, η_comparison_min_depth,
+#                  η_max_min_time, η_max_min_depth)
+# 모두 음의 지수(log2). 예: -12는 η=2^{-12}
+_TABLE3_LOG2_ETA = {
+    8:  (-12,    -12,   -9,    -10.5),
+    12: (-15,    -14,   -13,   -13),
+    16: (-18,    -17,   -16,   -17),
+    20: (-21,    -22,   -20.5, -20),
+}
+
+
+def get_paper_margin(alpha: int, mode: str = "comp_depth") -> float:
+    """
+    논문 Table 3에서 margin η 값을 직접 가져옴.
+
+    Parameters
+    ----------
+    alpha : int
+        precision parameter α (정수)
+    mode : str
+        "comp_time"  : comparison, minimize running time
+        "comp_depth" : comparison, minimize depth (기본값, 정확도 우선)
+        "max_time"   : max function, minimize running time
+        "max_depth"  : max function, minimize depth
+
+    Returns
+    -------
+    eta : float
+        margin η
+
+    Notes
+    -----
+    α ∈ {8, 12, 16, 20}만 직접 표에 있음.
+    그 외 α는 log scale 선형 보간 + **보수적 올림** (작은 η = 큰 안전 마진).
+    """
+    mode_idx = {"comp_time": 0, "comp_depth": 1,
+                "max_time":  2, "max_depth":  3}.get(mode)
+    if mode_idx is None:
+        raise ValueError(f"mode must be one of comp_time/comp_depth/max_time/max_depth, got '{mode}'")
+
+    table = _TABLE3_LOG2_ETA
+    keys  = sorted(table.keys())   # [8, 12, 16, 20]
+
+    # 정확히 표에 있는 경우
+    if alpha in table:
+        log_eta = table[alpha][mode_idx]
+        return 2.0 ** log_eta
+
+    # 범위 밖: 가장 가까운 끝값 사용
+    if alpha < keys[0]:
+        log_eta = table[keys[0]][mode_idx]
+        return 2.0 ** log_eta
+    if alpha > keys[-1]:
+        log_eta = table[keys[-1]][mode_idx]
+        return 2.0 ** log_eta
+
+    # 범위 내: log scale 선형 보간, 결과는 더 작은 η (보수적) 쪽으로 올림
+    for i in range(len(keys) - 1):
+        lo, hi = keys[i], keys[i + 1]
+        if lo < alpha < hi:
+            log_lo = table[lo][mode_idx]
+            log_hi = table[hi][mode_idx]
+            t      = (alpha - lo) / (hi - lo)
+            log_interp = log_lo + t * (log_hi - log_lo)
+            # 보수적 선택: 더 작은 η (= 더 음수인 log_eta = 더 큰 안전 마진)
+            log_eta = min(log_interp, log_lo, log_hi)
+            return 2.0 ** log_eta
+
+    # fallback (도달하지 말아야 함)
+    return 2.0 ** table[keys[-1]][mode_idx]
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# MCP 계산
+# ═══════════════════════════════════════════════════════════════════════════
+
 def compute_mcp(degrees: List[int], delta: float, verbose: bool = True) -> List[dict]:
+    """margin 없는 기본 MCP (역호환용)."""
     a, b = delta, 1.0
     comps = []
     if verbose:
@@ -148,31 +279,22 @@ def compute_mcp(degrees: List[int], delta: float, verbose: bool = True) -> List[
     return comps
 
 
-def _suggest_margin(degrees: List[int], delta: float, alpha: int) -> float:
-    a, b = delta, 1.0
-    last_err = 0.0
-    for deg in degrees:
-        _, err = remez_odd_sign(deg, a, b)
-        last_err = err
-        a, b = 1.0 - err, 1.0 + err
-    return max(last_err / 4.0, 2.0 ** (-(alpha + 2)))
-
-
 def compute_mcp_with_margin(
     degrees: List[int], delta: float,
-    margin: float = None, alpha: int = 8, verbose: bool = True,
+    margin: float, alpha: int, verbose: bool = True,
 ) -> List[dict]:
-    """domain_b 필드 포함 MCP. FHE 평가 시 x/domain_b 정규화 필수."""
-    if margin is None:
-        margin = _suggest_margin(degrees, delta, alpha)
-        if verbose:
-            print(f"[MCP-margin] margin 자동: η={margin:.6e}")
+    """
+    margin η를 적용한 MCP. domain_b 필드 포함 (FHE 평가 시 x/domain_b 정규화).
 
+    margin은 **반드시 명시적으로 전달**해야 함 (이전 _suggest_margin 자동 계산 제거).
+    호출 측에서 get_paper_margin(alpha, mode)로 Table 3 값을 가져와 전달할 것.
+    """
     a, b = delta, 1.0
     comps = []
+
+    safety = 2.0 ** -(alpha - 1)
     if verbose:
-        safety = 2.0 ** -(alpha - 1)
-        print(f"\n[MCP-margin] degrees={degrees}, δ={delta:.6e}, η={margin:.6e}")
+        print(f"\n[MCP-margin] degrees={degrees}, δ={delta:.6e}, η={margin:.6e} (= 2^{math.log2(margin):.2f})")
         print(f"             안전 임계값 t_k ≤ {safety:.4e}")
 
     for i, deg in enumerate(degrees):
@@ -190,7 +312,6 @@ def compute_mcp_with_margin(
 
     final_t = comps[-1]["t_i"]
     if verbose:
-        safety = 2.0 ** -(alpha - 1)
         print(f"\n[MCP-margin] 완료  t_k={final_t:.4e}  "
               f"{'✓ SAFE' if final_t <= safety else '✗ UNSAFE'} (≤{safety:.4e})")
     return comps
@@ -216,141 +337,125 @@ def load_mcp(filepath: str) -> List[dict]:
         return json.load(f)["components"]
 
 
-# ── 논문 Table 2 (minimize depth) degree 시퀀스 ───────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════
+# 논문 Table 2 (minimize depth) degree 시퀀스
+# ═══════════════════════════════════════════════════════════════════════════
 # DesiloFHE lazy-rescaling 기준 실제 레벨 소비 = dep(d) × 2
 #
 #  α  | degrees                | 컴포넌트수 | bootstrap (mid/post + sign_boot)
 # ─────┼────────────────────────┼──────────┼──────────────────────────────────
 #  8  | [7, 15, 15]            | 3        | 3 + 1 = 4회
-#  9  | [7, 7, 7, 13]          | 4        | 4 + 1 = 5회
-#  10 | [7, 7, 13, 15]         | 4        | 4 + 1 = 5회  ← Core 최적
-#  11 | [7, 15, 15, 15]        | 4        | 4 + 1 = 5회  ← Core (현재)
+#  10 | [7, 7, 13, 15]         | 4        | 4 + 1 = 5회
+#  11 | [7, 15, 15, 15]        | 4        | 4 + 1 = 5회  ← Normalize, Core (통일)
 #  12 | [15, 15, 15, 15]       | 4        | 4 + 1 = 5회
-#  13 | [15, 15, 15, 31]       | 4        | 4 + 1 = 5회  ← BSGS로 dep(31)=6 → 12레벨 ✗ (budget=10 초과)
-#  14 | [7, 7, 15, 15, 27]     | 5        | 5 + 1 = 6회  ← BSGS로 dep(27)=5 → 10레벨 ✓
-#  15 | [7, 15, 15, 15, 27]    | 5        | 5 + 1 = 6회  ← BSGS로 dep(27)=5 → 10레벨 ✓ (LP)
-#  16 | [15, 15, 15, 15, 27]   | 5        | 5 + 1 = 6회  ← BSGS로 dep(27)=5 → 10레벨 ✓
+#  14 | [7, 7, 15, 15, 27]     | 5        | 5 + 1 = 6회  ← BSGS dep(27)=5 ✓
+#  15 | [7, 15, 15, 15, 27]    | 5        | 5 + 1 = 6회  ← LP (BSGS 필수)
+#  16 | [15, 15, 15, 15, 27]   | 5        | 5 + 1 = 6회
 #
-# ★ BSGS (Odd Baby-Step Giant-Step) 기반 레벨 소비:
-#   dep(d) = 논문 Table 1 값, 레벨 소비 = dep(d) × 2 (DesiloFHE lazy-rescaling)
+# BSGS 기반 레벨 분석:
+#   dep(d) = 논문 Table 1, 레벨 소비 = dep(d) × 2
 #   bootstrap → level=10 → dep 최대 5 → degree 최대 27
-#   naive 루프: deg=27에서 14레벨 소비 → budget 초과 → ✗
-#   BSGS:       deg=27에서 dep=5 → 10레벨 → budget 딱 맞음 → ✓
-#   deg=31: dep(31)=6 → 12레벨 > 10 → BSGS로도 budget 초과 → 사용 불가
-#
-# LP α=15 선택 근거:
-#   누적 drift = n_calls × |u-v|_avg × τ / 2
-#   α=11: 840×30×2^{-11}/2 ≈ 6.15 >> threshold=1.0 ✗
-#   α=15: 840×30×2^{-15}/2 ≈ 0.39 < 1.0 ✓ (2.6배 여유)
+#   naive 루프: deg=27이면 14 레벨 → ✗ budget=10 초과
+#   BSGS: deg=27이면 dep=5 → 10 레벨 → ✓ budget 딱 맞음
 _MINIMIZE_DEPTH_DEGREES = {
     8:  [7, 15, 15],
     9:  [7, 7, 7, 13],
     10: [7, 7, 13, 15],
     11: [7, 15, 15, 15],
     12: [15, 15, 15, 15],
-    # α=13: deg=31은 dep(31)=6 → 12레벨 > budget=10 → 사용 불가
-    #        대안: [7, 7, 7, 7, 15] (5컴포넌트, max dep=4)
     13: [7, 7, 7, 7, 15],
-    # α=14,15: deg=27 → dep(27)=5 → 10레벨 = budget → BSGS로 ✓
     14: [7, 7, 15, 15, 27],
-    15: [7, 15, 15, 15, 27],   # ★ LP 전용, BSGS 필수
+    15: [7, 15, 15, 15, 27],
     16: [15, 15, 15, 15, 27],
 }
 
 
-def compute_mcp_for_normalize(alpha: int = 8, verbose: bool = True) -> List[dict]:
+# ═══════════════════════════════════════════════════════════════════════════
+# 사용처별 MCP 생성 함수
+# ═══════════════════════════════════════════════════════════════════════════
+
+def compute_mcp_for_normalize(alpha: int = 12, verbose: bool = True) -> List[dict]:
     """
-    Normalize용 (mcp_alpha8.json).
-    α=8 최소값: delta=2^{-8}=0.00391 < margin/bound≈0.00394 ✓
-    degrees=[7,15,15], bootstrap 3+1=4회 (mid 2회 + post 1회 + sign_boot 1회)
+    Normalize용 (mcp_alpha12.json). ★ Core와 α=12로 통일
+
+    α=12 선택 근거 (사용자 결정 사항):
+      - 논문 Table 3에 α∈{8,12,16,20}만 직접 매핑 가능
+      - α=11/15는 선형 보간 필요 → α=12로 통일하면 보간 없이 직접 사용
+      - degrees=[15,15,15,15]: 4컴포넌트 + bootstrap 5회 (α=11과 동일)
+      - δ=2^{-12}=0.000244 → 모든 use case에 안전한 margin 제공
+
+    Normalize 안전성 (N=212, dim=3):
+      dist² 비교에서 min |입력 gap| = margin_val / bound
+        margin_val = δ × bound = 0.000244 × 3.15 = 0.000770
+        normalized min |x_scaled| ≈ margin_val × scale = δ = 0.000244 ✓
+      → false positive 비율 약 2.4% (실측치, α=11일 경우 ~5%)
+
+    Margin η: 논문 Table 3, comparison minimize_depth 컬럼
+      α=12 → η = 2^{-14} (직접 매핑, 보간 없음)
     """
-    degrees = _MINIMIZE_DEPTH_DEGREES.get(alpha, [7, 15, 15])
+    degrees = _MINIMIZE_DEPTH_DEGREES.get(alpha, [15, 15, 15, 15])
     delta   = 2.0 ** (-alpha)
-    margin  = 2.0 ** (-(alpha + 2))
+    margin  = get_paper_margin(alpha, mode="comp_depth")
+
     if verbose:
-        print(f"\n[MCP-Normalize] α={alpha}, degrees={degrees}, δ={delta:.6e}, η={margin:.6e}")
-    return compute_mcp_with_margin(degrees=degrees, delta=delta, margin=margin, alpha=alpha, verbose=verbose)
+        print(f"\n[MCP-Normalize] α={alpha}, degrees={degrees}, δ={delta:.6e}")
+        print(f"                margin η = {margin:.6e} = 2^{math.log2(margin):.2f} (논문 Table 3, 직접 매핑)")
+    return compute_mcp_with_margin(degrees=degrees, delta=delta, margin=margin,
+                                   alpha=alpha, verbose=verbose)
 
 
-def compute_mcp_for_core(alpha: int = 11, verbose: bool = True) -> List[dict]:
+def compute_mcp_for_core(alpha: int = 12, verbose: bool = True) -> List[dict]:
     """
-    Core용 (mcp_alpha11.json). ★ α=11 최적값
+    Core용 (mcp_alpha12.json). ★ Normalize와 α=12로 통일
 
-    α 선택 근거 (N=212):
-      최소 delta < 0.5/N = 0.00236 필요
+    α=12 선택 근거 (N=212):
+      최소 입력 gap = 0.5/N = 0.00236
+      δ = 2^{-12} = 0.000244 < 0.00236 ✓ (9.7배 여유, α=11보다 2배 안전)
+      t_k = err + margin 누적 → 마지막 컴포넌트 t_k ≤ 2^{-11} ✓ SAFE
 
-      α=9  [7,7,7,13]:   t_k=0.00258 > min_gap=0.00236 → NOT OK (분류 오류 가능)
-      α=10 [7,7,13,15]:  t_k 0.00172~0.00197 (Remez 편차) + margin → UNSAFE 가능
-      α=11 [7,15,15,15]: t_k=0.00051 << threshold=0.00098 → SAFE ✓ (안정적)
-                          delta=2^{{-11}}=0.00049 < 0.00236 (4.8배 여유)
+    α=11 대비 비용:
+      degrees: [7,15,15,15] → [15,15,15,15]
+      non-scalar mults: 29 → 32 (3회 추가, ~9% 증가)
+      bootstrap: 5회 동일
+      → 코드 일관성과 Table 3 직접 매핑 가능을 위한 합리적 trade-off
 
-    α=12 대비:
-      bootstrap 횟수: 동일 4+1=5회
-      non-scalar mult: 27회 vs 32회 (5회 절약)
+    Margin η: 논문 Table 3, comparison minimize_depth 컬럼
+      α=12 → η = 2^{-14} (직접 매핑)
     """
-    degrees = _MINIMIZE_DEPTH_DEGREES.get(alpha, [7, 15, 15, 15])
+    degrees = _MINIMIZE_DEPTH_DEGREES.get(alpha, [15, 15, 15, 15])
     delta   = 2.0 ** (-alpha)
-    margin  = 2.0 ** (-(alpha + 2))
+    margin  = get_paper_margin(alpha, mode="comp_depth")
+
     if verbose:
         N_ref = 212
-        print(f"\n[MCP-Core] α={alpha}, degrees={degrees}, δ={delta:.6e}, η={margin:.6e}")
-        print(f"  delta={delta:.5f} < 0.5/N={0.5/N_ref:.5f} ✓ (안전 마진 {(0.5/N_ref)/delta:.1f}배)")
-    return compute_mcp_with_margin(degrees=degrees, delta=delta, margin=margin, alpha=alpha, verbose=verbose)
-
-
-def compute_mcp_for_label_prop(
-    num_points: int, safety_factor: float = 1.2, verbose: bool = True,
-) -> List[dict]:
-    """
-    Label Propagation 전용 (mcp_label_prop.json).
-    [레거시] N 기반 자동 alpha 계산 방식.
-    compute_mcp_for_label_prop_fixed 사용 권장.
-    """
-    delta_label = 1.0 / (num_points * safety_factor)
-    alpha_equiv = int(np.log2(1.0 / delta_label)) + 1
-
-    degrees = _MINIMIZE_DEPTH_DEGREES.get(
-        min(alpha_equiv, 12), [15, 15, 15, 15]
-    )
-
-    if verbose:
-        print(f"\n[MCP-Label-Legacy] N={num_points}, safety_factor={safety_factor}")
-        print(f"  delta=1/(N×{safety_factor})={delta_label:.6f}, alpha_equiv={alpha_equiv}")
-        print(f"  degrees={degrees}")
-
-    return compute_mcp_with_margin(
-        degrees=degrees, delta=delta_label, margin=0.0, alpha=alpha_equiv, verbose=verbose,
-    )
+        print(f"\n[MCP-Core] α={alpha}, degrees={degrees}, δ={delta:.6e}")
+        print(f"           min input gap = 0.5/N = {0.5/N_ref:.5f} (N={N_ref})")
+        print(f"           δ/min_gap = {delta/(0.5/N_ref):.2f} (작을수록 안전, < 1 권장)")
+        print(f"           margin η = {margin:.6e} = 2^{math.log2(margin):.2f} (논문 Table 3, 직접 매핑)")
+    return compute_mcp_with_margin(degrees=degrees, delta=delta, margin=margin,
+                                   alpha=alpha, verbose=verbose)
 
 
 def compute_mcp_for_label_prop_fixed(alpha: int = 15, verbose: bool = True) -> List[dict]:
     """
-    Label Propagation 전용 (mcp_alpha15_lp.json). ★ α=15 누적 드리프트 해결
+    Label Propagation 전용 (mcp_alpha15_lp.json). ★ α=15 유지
 
     α=15 선택 근거 (drift 분석):
       누적 drift = n_calls × |u-v|_avg × τ / 2
-        n_calls=840, |u-v|_avg=30, threshold=inter-cluster min gap / 2 = 1.0
+        n_calls=840, |u-v|_avg=30, threshold=1.0
+      α=15: τ=2^{-15} → drift≈0.39 < 1.0 ✓ (2.6배 여유)
+      α=11: τ=2^{-11} → drift≈6.15 ✗
 
-      α=11 (이전): τ=2^{-11} → drift≈6.15 >> 1.0 ✗ (span=7.5 관측)
-      α=15 (현재): τ=2^{-15} → drift≈0.39 < 1.0 (2.6배 여유) ✓
+    BSGS 필수 (deg=27 포함):
+      naive 루프: 14 레벨 소비 > budget 10 → ✗
+      BSGS:       dep(27)=5 → 10 레벨 = budget ✓
 
-    Degree 선택 기준 (naive 루프 레벨 예산):
-      DesiloFHE naive 루프: 레벨 소비 = (d+1)/2 per component
-      bootstrap → level=10, 안전 상한: d ≤ 15 (소비=8, 남은=2)
-
-      논문 Table 2 minimize-depth [7,15,15,15,27]: deg=27 포함
-        → (27+1)/2=14 레벨 소비 → level=10-14=-4 → ✗ (level 부족)
-        → mid-eval bootstrap 패치: x_pow만 갱신, x_sq/result는 stale
-          → 수학적으로 잘못된 다항식 평가 → ARI 악화 (60%→53%)
-
-      논문 Appendix E [5,5,7,7,7,7,15]: depth=22, max deg=15
-        → 최대 레벨 소비 = 8 ≤ 10 → ✓
-        → 7컴포넌트, 8 bootstraps/fhe_sgn (α=11 5회 대비 +3회, +60% LP 시간)
-        → drift=0.39 < 1.0 → 라벨 안정 예측
+    Margin η: 논문 Table 3 max minimize_depth 컬럼 (max 연산 형태이므로)
+      α=15 → α=16 값 사용 (보수적) = 2^{-17}
     """
-    degrees = _MINIMIZE_DEPTH_DEGREES.get(alpha, [5, 5, 7, 7, 7, 7, 15])
+    degrees = _MINIMIZE_DEPTH_DEGREES.get(alpha, [7, 15, 15, 15, 27])
     delta   = 2.0 ** (-alpha)
-    margin  = 2.0 ** (-(alpha + 2))   # 논문 Table 3 기준
+    margin  = get_paper_margin(alpha, mode="max_depth")   # ← max 컬럼 사용
 
     if verbose:
         tau    = delta
@@ -358,16 +463,334 @@ def compute_mcp_for_label_prop_fixed(alpha: int = 15, verbose: bool = True) -> L
         uv_avg = 30
         drift  = n_calls_typical * uv_avg * tau / 2
         max_deg = max(degrees)
-        max_level_cost = (max_deg + 1) // 2
-        print(f"\n[MCP-LP] α={alpha}, degrees={degrees}, δ={delta:.6e}, η={margin:.6e}")
-        print(f"  τ=2^{{-{alpha}}}={tau:.6f}")
-        print(f"  예상 누적 drift ({n_calls_typical}콜, |u-v|_avg={uv_avg}): {drift:.3f}")
-        print(f"  threshold (inter-cluster min gap/2): 1.0")
-        print(f"  안전 여유: {1.0/drift:.1f}배  {'✓ SAFE' if drift < 1.0 else '✗ UNSAFE'}")
+        bsgs_dep = {7: 3, 13: 4, 15: 4, 27: 5}.get(max_deg, 5)
+        bsgs_level_cost = bsgs_dep * 2
+        print(f"\n[MCP-LP] α={alpha}, degrees={degrees}, δ={delta:.6e}")
+        print(f"         margin η = {margin:.6e} = 2^{math.log2(margin):.2f} (논문 Table 3 max_depth)")
+        print(f"         τ=2^{{-{alpha}}}={tau:.6f}")
+        print(f"         drift({n_calls_typical}콜, |u-v|_avg={uv_avg}): {drift:.3f}")
+        print(f"         threshold(inter-cluster gap/2): 1.0")
+        print(f"         안전 여유: {1.0/drift:.1f}배  {'✓ SAFE' if drift < 1.0 else '✗ UNSAFE'}")
         n_boots = len(degrees) + 1
-        print(f"  bootstrap/fhe_sgn: {n_boots}회 (α=11 5회 대비 +{n_boots-5}회)")
-        print(f"  max_deg={max_deg}, 레벨 소비={max_level_cost}/10 {'✓' if max_level_cost<=9 else '✗ 예산 초과!'}")
+        print(f"         bootstrap/fhe_sgn: {n_boots}회")
+        print(f"         max_deg={max_deg}, BSGS dep={bsgs_dep}, 레벨 소비={bsgs_level_cost}/10 "
+              f"{'✓' if bsgs_level_cost <= 10 else '✗ 예산 초과'}")
+    return compute_mcp_with_margin(degrees=degrees, delta=delta, margin=margin,
+                                   alpha=alpha, verbose=verbose)
 
-    return compute_mcp_with_margin(
-        degrees=degrees, delta=delta, margin=margin, alpha=alpha, verbose=verbose,
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Deprecated: 자동 margin 계산 (역호환 유지, 신규 코드는 사용 금지)
+# ═══════════════════════════════════════════════════════════════════════════
+def _suggest_margin(degrees: List[int], delta: float, alpha: int) -> float:
+    """[DEPRECATED] 자동 margin 추정 — get_paper_margin() 사용 권장."""
+    import warnings
+    warnings.warn(
+        "_suggest_margin은 deprecated입니다. 논문 Table 3 값을 사용하는 "
+        "get_paper_margin(alpha, mode='comp_depth' 또는 'max_depth')으로 교체하세요.",
+        DeprecationWarning, stacklevel=2,
     )
+    a, b = delta, 1.0
+    last_err = 0.0
+    for deg in degrees:
+        _, err = remez_odd_sign(deg, a, b)
+        last_err = err
+        a, b = 1.0 - err, 1.0 + err
+    return max(last_err / 4.0, 2.0 ** (-(alpha + 2)))
+
+
+def compute_mcp_for_label_prop(
+    num_points: int, safety_factor: float = 1.2, verbose: bool = True,
+) -> List[dict]:
+    """[DEPRECATED] compute_mcp_for_label_prop_fixed 사용 권장."""
+    import warnings
+    warnings.warn(
+        "compute_mcp_for_label_prop은 deprecated입니다. "
+        "compute_mcp_for_label_prop_fixed(alpha=15) 사용하세요.",
+        DeprecationWarning, stacklevel=2,
+    )
+    delta_label = 1.0 / (num_points * safety_factor)
+    alpha_equiv = int(np.log2(1.0 / delta_label)) + 1
+    degrees = _MINIMIZE_DEPTH_DEGREES.get(min(alpha_equiv, 12), [15, 15, 15, 15])
+    margin = get_paper_margin(min(alpha_equiv, 20), mode="max_depth")
+    return compute_mcp_with_margin(degrees=degrees, delta=delta_label,
+                                   margin=margin, alpha=alpha_equiv, verbose=verbose)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Chebyshev basis 함수들 (Bossuat Algorithm 1 호환)
+# ═══════════════════════════════════════════════════════════════════════════
+# 
+# 논문 5.2.1: power basis는 high-degree coefficient 폭발 가능 (예: T_15 leading
+# coefficient = 16384). CKKS plaintext mult 시 noise 증가 → 정밀도 손실.
+# 
+# 해결책: Chebyshev basis로 Remez를 풀고, FHE 평가도 Chebyshev recurrence로.
+# 우리 odd-only sign 근사는 odd Chebyshev T_1, T_3, T_5, ... basis 사용.
+
+
+def _eval_odd_cheb(coeffs, x):
+    """
+    odd Chebyshev polynomial 평문 평가:
+        p(x) = Σ_{k=0}^{m-1} c_k × T_{2k+1}(x)
+    
+    Chebyshev recurrence: T_0 = 1, T_1 = x, T_n = 2x T_{n-1} - T_{n-2}
+    
+    Parameters
+    ----------
+    coeffs : array-like
+        [c_0, c_1, ..., c_{m-1}], coefficients for T_1, T_3, ..., T_{2m-1}
+    x : array-like
+        evaluation points
+    
+    Returns
+    -------
+    np.ndarray with same shape as x
+    """
+    x = np.asarray(x, dtype=np.float64)
+    if len(coeffs) == 0:
+        return np.zeros_like(x)
+    
+    result = np.zeros_like(x)
+    T_prev = np.ones_like(x)   # T_0
+    T_curr = x.copy()           # T_1
+    
+    for k, c in enumerate(coeffs):
+        result += c * T_curr   # contribution of T_{2k+1}
+        if k == len(coeffs) - 1:
+            break
+        # Advance two steps: T_{2k+1} → T_{2k+2} → T_{2k+3}
+        T_next = 2.0 * x * T_curr - T_prev   # T_{2k+2}
+        T_prev, T_curr = T_curr, T_next
+        T_next = 2.0 * x * T_curr - T_prev   # T_{2k+3}
+        T_prev, T_curr = T_curr, T_next
+    
+    return result
+
+
+def remez_odd_sign_chebyshev(
+    degree: int, a: float, b: float,
+    n_iter: int = 800, tol: float = 1e-13, n_sample: int = 30_000,
+) -> Tuple[np.ndarray, float]:
+    """
+    sgn(x) 근사 minimax 다항식의 **odd Chebyshev** 계수 결정.
+    
+    출력 다항식: p(x) = Σ_{k=0}^{m-1} c_k × T_{2k+1}(x) ≈ 1 for x ∈ [a, b]
+    
+    Power basis remez_odd_sign과 수학적으로 동일한 minimax polynomial을 반환하지만,
+    수치 안정성과 CKKS 평가 정밀도에서 우월.
+    
+    Returns
+    -------
+    coeffs : np.ndarray
+        odd Chebyshev coefficients [c_0_for_T_1, ..., c_{m-1}_for_T_{2m-1}]
+    E_abs : float
+        minimax error
+    """
+    if degree % 2 != 1:
+        raise ValueError(f"degree must be odd, got {degree}")
+    if not (0.0 < a < b):
+        raise ValueError(f"0 < a < b violated: a={a}, b={b}")
+    
+    m = (degree + 1) // 2
+    n_ref = m + 1
+    
+    # Initial nodes: Chebyshev nodes in [a, b]
+    k_idx = np.arange(n_ref)
+    theta = (2*k_idx + 1) * np.pi / (2*n_ref)
+    nodes = 0.5*(a+b) + 0.5*(b-a)*np.cos(theta[::-1])
+    eps_bd = 1e-10 * (b - a)
+    nodes = np.sort(np.clip(nodes, a + eps_bd, b - eps_bd))
+    
+    x_dense = np.linspace(a, b, n_sample)
+    coeffs = None
+    E_abs = 0.0
+    converged = False
+    
+    for _it in range(n_iter):
+        # Linear system: Σ c_k T_{2k+1}(x_i) - (-1)^i E = 1
+        A = np.zeros((n_ref, m + 1))
+        rhs = np.ones(n_ref)
+        for i, xi in enumerate(nodes):
+            # Evaluate T_1, T_3, ..., T_{2m-1} at xi via recurrence
+            T_prev = 1.0   # T_0
+            T_curr = xi     # T_1
+            for k in range(m):
+                A[i, k] = T_curr   # T_{2k+1}
+                if k == m - 1:
+                    break
+                T_next = 2.0 * xi * T_curr - T_prev   # T_{2k+2}
+                T_prev, T_curr = T_curr, T_next
+                T_next = 2.0 * xi * T_curr - T_prev   # T_{2k+3}
+                T_prev, T_curr = T_curr, T_next
+            A[i, m] = -((-1.0) ** i)
+        
+        try:
+            sol = np.linalg.solve(A, rhs)
+        except np.linalg.LinAlgError:
+            break
+        
+        coeffs = sol[:m]
+        E = float(sol[m])
+        E_abs = abs(E)
+        
+        # Error on dense grid
+        err = _eval_odd_cheb(coeffs, x_dense) - 1.0
+        max_abs = float(np.max(np.abs(err)))
+        if E_abs > 1e-30 and abs(max_abs - E_abs) / E_abs < tol:
+            converged = True
+            break
+        
+        # Extreme point collection (identical to power basis logic)
+        ext_x = [a]; ext_e = [float(err[0])]
+        for i in range(1, n_sample - 1):
+            if err[i-1]*err[i+1] <= 0.0 or (
+                (err[i]-err[i-1])*(err[i+1]-err[i]) <= 0.0 and abs(err[i]) > 0.0
+            ):
+                ext_x.append(float(x_dense[i])); ext_e.append(float(err[i]))
+        ext_x.append(b); ext_e.append(float(err[-1]))
+        
+        # Merge same-sign extremes (keep largest |err|)
+        mx = [ext_x[0]]; me = [ext_e[0]]
+        for i in range(1, len(ext_x)):
+            if np.sign(ext_e[i]) == np.sign(me[-1]) or me[-1] == 0.0:
+                if abs(ext_e[i]) >= abs(me[-1]):
+                    mx[-1] = ext_x[i]; me[-1] = ext_e[i]
+            else:
+                mx.append(ext_x[i]); me.append(ext_e[i])
+        
+        if len(mx) < n_ref:
+            continue
+        
+        # Maximum absolute sum subset selection
+        best, best_s = -1.0, 0
+        for s in range(len(mx) - n_ref + 1):
+            sc = sum(abs(me[s+j]) for j in range(n_ref))
+            if sc > best:
+                best, best_s = sc, s
+        nodes = np.array(mx[best_s: best_s + n_ref])
+    
+    if not converged:
+        import warnings
+        warnings.warn(
+            f"[Remez-Cheb] deg={degree} [{a:.6f},{b:.6f}]: {n_iter}회 내 미수렴 "
+            f"(E_abs={E_abs:.4e}, tol={tol}). 현재 최적값 사용.",
+            RuntimeWarning, stacklevel=2,
+        )
+    
+    return (coeffs if coeffs is not None else np.zeros(m)), E_abs
+
+
+def eval_mcp_np_chebyshev(x, components: List[dict]) -> np.ndarray:
+    """
+    Chebyshev basis MCP 평문 평가 (sanity check / debugging용).
+    
+    각 컴포넌트의 coeffs는 odd Chebyshev: [c_0 for T_1, c_1 for T_3, ...].
+    domain_b 정규화 후 평가.
+    """
+    val = np.asarray(x, dtype=np.float64).copy()
+    for comp in components:
+        domain_b = comp.get("domain_b", 1.0)
+        basis    = comp.get("basis", "power")
+        if basis != "chebyshev":
+            raise ValueError(
+                f"Component {comp.get('index', '?')} has basis='{basis}', "
+                f"expected 'chebyshev'. Use eval_mcp_np for power basis."
+            )
+        val = _eval_odd_cheb(np.array(comp["coeffs"]), val / domain_b)
+    return val
+
+
+def compute_mcp_with_margin_chebyshev(
+    degrees: List[int], delta: float,
+    margin: float, alpha: int, verbose: bool = True,
+) -> List[dict]:
+    """
+    Chebyshev basis MCP. coeffs는 odd Chebyshev (T_1, T_3, ..., T_{2m-1}).
+    """
+    a, b = delta, 1.0
+    comps = []
+    
+    safety = 2.0 ** -(alpha - 1)
+    if verbose:
+        print(f"\n[MCP-Cheb] degrees={degrees}, δ={delta:.6e}, η={margin:.6e} "
+              f"(= 2^{math.log2(margin):.2f})")
+        print(f"           안전 임계값 t_k ≤ {safety:.4e}")
+    
+    for i, deg in enumerate(degrees):
+        if verbose:
+            print(f"  p_{i+1} (deg={deg})  [{a:.8f}, {b:.8f}]  ...", end="", flush=True)
+        coeffs, err = remez_odd_sign_chebyshev(deg, a / b, 1.0)
+        t_i = err + margin
+        comps.append({
+            "index": i+1, "degree": int(deg), "coeffs": coeffs.tolist(),
+            "domain_a": float(a), "domain_b": float(b),
+            "error": float(err), "margin": float(margin), "t_i": float(t_i),
+            "basis": "chebyshev",
+        })
+        if verbose: print(f"  err={err:.4e}, t_i={t_i:.4e}")
+        a, b = 1.0 - t_i, 1.0 + t_i
+    
+    final_t = comps[-1]["t_i"]
+    if verbose:
+        print(f"\n[MCP-Cheb] 완료  t_k={final_t:.4e}  "
+              f"{'✓ SAFE' if final_t <= safety else '✗ UNSAFE'} (≤{safety:.4e})")
+    return comps
+
+
+def compute_mcp_for_normalize_chebyshev(alpha: int = 12, verbose: bool = True) -> List[dict]:
+    """
+    Normalize용 Chebyshev MCP (mcp_alpha12_cheb.json).
+    
+    α=12 [15,15,15,15], η=2^{-14} (논문 Table 3 comp_depth).
+    Power basis 버전 (compute_mcp_for_normalize)과 같은 minimax 다항식이지만
+    Chebyshev basis로 저장되어 CKKS 평가 정밀도 우월.
+    """
+    degrees = _MINIMIZE_DEPTH_DEGREES.get(alpha, [15, 15, 15, 15])
+    delta   = 2.0 ** (-alpha)
+    margin  = get_paper_margin(alpha, mode="comp_depth")
+    if verbose:
+        print(f"\n[MCP-Norm-Cheb] α={alpha}, degrees={degrees}, δ={delta:.6e}")
+        print(f"                margin η = 2^{math.log2(margin):.2f} (Table 3 직접 매핑)")
+    return compute_mcp_with_margin_chebyshev(degrees, delta, margin, alpha, verbose)
+
+
+def compute_mcp_for_core_chebyshev(alpha: int = 12, verbose: bool = True) -> List[dict]:
+    """
+    Core용 Chebyshev MCP. Normalize와 동일한 α=12 [15,15,15,15] 설정.
+    """
+    degrees = _MINIMIZE_DEPTH_DEGREES.get(alpha, [15, 15, 15, 15])
+    delta   = 2.0 ** (-alpha)
+    margin  = get_paper_margin(alpha, mode="comp_depth")
+    if verbose:
+        N_ref = 212
+        print(f"\n[MCP-Core-Cheb] α={alpha}, degrees={degrees}, δ={delta:.6e}")
+        print(f"                min input gap = 0.5/N = {0.5/N_ref:.5f} (N={N_ref})")
+        print(f"                margin η = 2^{math.log2(margin):.2f} (Table 3)")
+    return compute_mcp_with_margin_chebyshev(degrees, delta, margin, alpha, verbose)
+
+
+def compute_mcp_for_label_prop_chebyshev(alpha: int = 15, verbose: bool = True) -> List[dict]:
+    """
+    LP용 Chebyshev MCP (mcp_alpha15_lp_cheb.json).
+    
+    α=15 [7,15,15,15,27], η=2^{-17} (Table 3 max_depth, α=15→α=16 보수적).
+    deg=27 BSGS depth=5 → 10 레벨 = budget ✓
+    """
+    degrees = _MINIMIZE_DEPTH_DEGREES.get(alpha, [7, 15, 15, 15, 27])
+    delta   = 2.0 ** (-alpha)
+    margin  = get_paper_margin(alpha, mode="max_depth")
+    
+    if verbose:
+        tau = delta
+        n_calls_typical = 840
+        uv_avg = 30
+        drift = n_calls_typical * uv_avg * tau / 2
+        max_deg = max(degrees)
+        bsgs_dep = {7: 3, 13: 4, 15: 4, 27: 5}.get(max_deg, 5)
+        print(f"\n[MCP-LP-Cheb] α={alpha}, degrees={degrees}, δ={delta:.6e}")
+        print(f"              margin η = 2^{math.log2(margin):.2f} (Table 3 max_depth)")
+        print(f"              τ=2^{{-{alpha}}}={tau:.6f}, drift={drift:.3f} "
+              f"{'✓ SAFE' if drift < 1.0 else '✗ UNSAFE'}")
+        print(f"              max_deg={max_deg}, BSGS dep={bsgs_dep}, "
+              f"레벨 소비={bsgs_dep*2}/10 {'✓' if bsgs_dep*2 <= 10 else '✗'}")
+    return compute_mcp_with_margin_chebyshev(degrees, delta, margin, alpha, verbose)

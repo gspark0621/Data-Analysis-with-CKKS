@@ -1,20 +1,27 @@
 # core/ciphertext_single/Client_main.py
 #
 # ── 변경사항 ────────────────────────────────────────────────────────────────
-# [변경 1] build_kd_tree_order: Heap(BFS level-order) KD-tree
-#   - root(index 0) = 전체 중앙값
-#   - left child(2i+1), right child(2i+2) = 재귀 분할
-#   - depth d cross-boundary stride = 2^(d-1)  (설계 의도와 일치)
-#   - DFS in-order와 달리 모든 depth의 stride가 명확히 2^(d-1)로 분리됨
+# [변경 1] build_ball_tree_order: BFS → DFS in-order 레이아웃
+#   BFS 문제:
+#     left/right subtree 위치가 {1,3,4,7,8,...} 형태로 전체 배열에 인터리빙
+#     → 클러스터 span ≈ N, k_max = N//2 불가피
+#     → heap window 10개 내 평균 4.66개 클러스터 혼재 (실측)
+#   DFS 해결:
+#     left | root | right → left=[start, start+n_L-1] (연속)
+#     → 클러스터 span ≈ cluster_size, k_max 대폭 감소
+#     → enc_sum_k가 실제 작은 k_max를 올바르게 반영
 #
-# [변경 2] decide_propagation_mode: O(1), BallTree 계산 없음
-#   - DBSCAN 정의상 min_pts = 모든 core point의 최소 이웃 수 보장
-#   - "avg 편향" 문제 원천 제거: avg 계산 자체가 불필요
-#   - min_pts ≥ 4 → kd_depth (doubling 보장)
-#   - min_pts < 4 → sweep (chain형 허용)
-#   - num_sweeps = N // min_pts // 2 (보수적 상한)
+# [변경 2] compute_kmax_from_ball_structure: DFS 레이아웃 기반 candidate 수식
+#   circular stride = min(n_L+n_R, N-(n_L+n_R))  (DFS cross-boundary)
 #
-# [변경 3] run_client_dbscan_fhe: Heap 정렬 + inv_perm 역순열 적용
+# [변경 3] dead code 제거
+#   compute_kmax_from_ball_structure 내 return 이후 unreachable 코드 삭제
+#
+# [변경 4] decide_propagation_mode 중복 정의 제거
+#   첫 번째 (deprecated) 정의 삭제, 단일 정의 유지
+#
+# [변경 5] run_client_dbscan_fhe: prepare_client_ordering 사용
+#   decide_propagation_mode + 별도 build_kd_tree_order 호출 → 통합
 # ────────────────────────────────────────────────────────────────────────────
 
 from time import time
@@ -26,6 +33,13 @@ from core.ciphertext_single.EncryptModule import DimensionalEncryptor
 from core.ciphertext_single.Server_main import send_to_server_fhe as send_to_server
 from util.keypack import KeyPack
 
+# 전파 방식 임계값: 상단 정의로 모든 함수에서 참조 가능
+def _kd_dense_threshold(dim: int) -> int:
+    """
+    Sander et al. (1998) 권장 min_pts = 2 × dim.
+    dim차원 공간에서 밀집 구조를 신뢰할 수 있는 최소 이웃 수.
+    """
+    return 2 * dim
 
 def _gpu_used_mb() -> float:
     try:
@@ -36,138 +50,204 @@ def _gpu_used_mb() -> float:
         return 0.0
 
 
-# ── Heap(BFS level-order) KD-tree 정렬 ───────────────────────────────────
+# ── Ball Tree DFS in-order 정렬 ───────────────────────────────────────────
 
-def build_kd_tree_order(pts: np.ndarray) -> tuple:
+def build_ball_tree_order(pts: np.ndarray) -> tuple:
     """
-    KD-tree를 Heap(BFS level-order) 레이아웃으로 정렬.
+    Ball Tree를 DFS in-order 레이아웃으로 정렬.
 
-    레이아웃:
-      index 0:       root (전체 중앙값)
-      index 1, 2:    depth-1 left/right subtree root
-      index 3~6:     depth-2 subtree roots
-      index 2^d-1 ~ 2^(d+1)-2: depth-d nodes
+    DFS in-order: left subtree | root | right subtree
+    → 각 subtree 멤버가 연속된 위치를 차지:
+        left  → [start, start+n_L-1]   (n_L개 연속)
+        root  → [start+n_L]
+        right → [start+n_L+1, end]     (n_R개 연속)
 
-    핵심 특성:
-      depth d cross-boundary stride = 2^(d-1)
-      → bottom-up strides = [1, 2, 4, 8, ..., N//2]  (2의 거듭제곱)
-      → depth(i) = floor(log₂(i+1)): N에만 의존, data-independent → plaintext 무방
-
-    DFS in-order와 차이:
-      DFS: cross-boundary stride 모두 stride≈1 근방에 몰림 (큰 stride 무의미)
-      Heap: depth d마다 stride가 2^(d-1)로 명확히 분리됨
+    BFS vs DFS 핵심 차이:
+      BFS: left = {1,3,4,7,8,...} 전체 배열에 인터리빙
+           → 클러스터 span ≈ N  → k_max = N//2 불가피 → 848회 fhe_max
+      DFS: left = [start, start+n_L-1] 연속
+           → 클러스터 span ≈ cluster_size  → k_max 대폭 감소 → 연산량 대폭 감소
 
     Returns
     -------
-    heap_indices : np.ndarray[int, N]
-        heap_indices[i] = heap 위치 i에 오는 원래 데이터 인덱스
-    inv_perm : np.ndarray[int, N]
-        역순열. original_labels[j] = heap_labels[inv_perm[j]]
+    order    : np.ndarray[int, N]  order[i] = DFS 위치 i의 원래 데이터 인덱스
+    inv_perm : np.ndarray[int, N]  inv_perm[j] = 원래 인덱스 j의 DFS 위치
     """
     pts_arr = np.array(pts, dtype=np.float64)
     N       = len(pts_arr)
-    heap    = np.full(N, -1, dtype=int)
+    order   = np.empty(N, dtype=int)
 
-    def _build(indices: np.ndarray, h_idx: int):
-        if len(indices) == 0 or h_idx >= N:
+    def _build(indices: np.ndarray, start: int):
+        if len(indices) == 0:
             return
         if len(indices) == 1:
-            heap[h_idx] = indices[0]
+            order[start] = indices[0]
             return
 
-        # 분산 최대 축 기준 정렬 (max-variance axis split)
-        coords = pts_arr[indices]
-        axis   = int(np.argmax(np.var(coords, axis=0)))
-        order  = np.argsort(coords[:, axis], kind='stable')
-        mid    = len(indices) // 2
+        coords   = pts_arr[indices]
+        centroid = coords.mean(axis=0)
+        d_sq_c   = np.einsum('ij,ij->i', coords - centroid, coords - centroid)
+        pole1    = coords[int(np.argmax(d_sq_c))]
+        d_sq_p1  = np.einsum('ij,ij->i', coords - pole1, coords - pole1)
+        pole2    = coords[int(np.argmax(d_sq_p1))]
+        axis     = pole2 - pole1
+        ax_norm  = float(np.dot(axis, axis)) ** 0.5
 
-        # 중앙값 → 현재 heap 위치 배치 (internal node)
-        heap[h_idx] = indices[order[mid]]
+        if ax_norm < 1e-12:
+            proj_order = np.arange(len(indices))
+        else:
+            proj_order = np.argsort(
+                (coords - pole1) @ (axis / ax_norm), kind='stable')
 
-        # 좌/우 subtree 재귀
-        _build(indices[order[:mid]],    2 * h_idx + 1)   # left child
-        _build(indices[order[mid+1:]], 2 * h_idx + 2)   # right child
+        mid = len(indices) // 2
+        # DFS in-order: left | root | right  ← 모두 연속 범위에 배치
+        _build(indices[proj_order[:mid]],      start)             # left:  [start, start+mid-1]
+        order[start + mid] = indices[proj_order[mid]]             # root:  [start+mid]
+        _build(indices[proj_order[mid + 1:]], start + mid + 1)    # right: [start+mid+1, end]
 
     _build(np.arange(N), 0)
 
-    # 누락 검증 (N이 2의 거듭제곱이 아닌 경우 일부 미배치 가능)
-    missing = np.where(heap == -1)[0]
-    if len(missing) > 0:
-        # 미배치 점을 빈 슬롯에 채움 (드문 경우)
-        unplaced = list(set(range(N)) - set(heap[heap != -1].tolist()))
-        for slot, orig_idx in zip(missing, unplaced):
-            heap[slot] = orig_idx
+    inv_perm        = np.empty(N, dtype=int)
+    inv_perm[order] = np.arange(N)
+    return order, inv_perm
 
-    inv_perm           = np.empty(N, dtype=int)
-    inv_perm[heap]     = np.arange(N)
-    return heap, inv_perm
+
+def compute_kmax_from_ball_structure(
+    pts: np.ndarray,
+    heap_idx: np.ndarray,   # 서명 유지 (내부에서 재구성)
+    eps_norm: float,
+    N: int,
+) -> int:
+    """
+    DFS in-order Ball Tree 구조 분석으로 k_max 상한 계산 — eps-이웃 조회 없음.
+
+    DFS in-order cross-boundary circular stride:
+      left  subtree: [start, start+n_L-1]
+      right subtree: [start+n_L+1, start+n_L+n_R]
+      max linear stride  = n_L + n_R
+      max circular stride = min(n_L+n_R, N-(n_L+n_R))
+
+    BFS와 달리 클러스터가 연속 범위에 집중 → ball_gap < eps인 split이
+    cluster 내부에 집중 → k_max ≈ cluster_size (BFS: k_max ≈ N/2)
+
+    비용: O(N log N) — eps-이웃 조회 없음 (시나리오 2 보호)
+    서버의 enc_sum_k가 이후 정밀화 (단, 클라이언트 상한 초과 불가)
+    """
+    pts_arr = np.array(pts, dtype=np.float64)
+    k_max   = 0
+
+    def _analyze(indices: np.ndarray):
+        nonlocal k_max
+        if len(indices) <= 1:
+            if len(indices) == 1:
+                return pts_arr[indices[0]].copy(), 0.0
+            return np.zeros(pts_arr.shape[1]), 0.0
+
+        coords   = pts_arr[indices]
+        centroid = coords.mean(axis=0)
+        radius   = float(np.max(np.linalg.norm(coords - centroid, axis=1)))
+
+        d_sq_c  = np.einsum('ij,ij->i', coords - centroid, coords - centroid)
+        pole1   = coords[int(np.argmax(d_sq_c))]
+        d_sq_p1 = np.einsum('ij,ij->i', coords - pole1, coords - pole1)
+        pole2   = coords[int(np.argmax(d_sq_p1))]
+        axis    = pole2 - pole1
+        ax_norm = float(np.dot(axis, axis)) ** 0.5
+
+        if ax_norm < 1e-12:
+            proj_order = np.arange(len(indices))
+        else:
+            proj_order = np.argsort(
+                (coords - pole1) @ (axis / ax_norm), kind='stable')
+
+        mid = len(indices) // 2
+        n_L = mid
+        n_R = len(indices) - mid - 1
+
+        c_L, r_L = _analyze(indices[proj_order[:mid]])
+        c_R, r_R = _analyze(indices[proj_order[mid + 1:]])
+
+        if n_L > 0 and n_R > 0:
+            ball_gap = float(np.linalg.norm(c_L - c_R)) - r_L - r_R
+            if ball_gap < eps_norm:
+                # DFS in-order: cross-boundary circular stride
+                # left=[start,start+n_L-1], right=[start+n_L+1,start+n_L+n_R]
+                # max linear = n_L+n_R, circular = min(n_L+n_R, N-(n_L+n_R))
+                cross_span = n_L + n_R
+                candidate  = min(cross_span, N - cross_span)
+                if candidate > k_max:
+                    k_max = candidate
+
+        return centroid, radius
+
+    _analyze(np.arange(N))
+    return min(max(k_max, 1), N // 2)
+
+
+# ── deprecated aliases ────────────────────────────────────────────────────
+
+def build_kd_tree_order(pts: np.ndarray) -> tuple:
+    """Deprecated alias → build_ball_tree_order (DFS in-order)."""
+    return build_ball_tree_order(pts)
 
 
 def get_kd_dense_kmax(N: int) -> int:
-    """
-    dense stride 상한 k_max 계산.
-
-    FHE sequential T(k_max) 정리:
-      k=1→2→...→k_max 순서로 처리 시 T(k_max)=k_max(k_max+1)/2 위치까지 전파
-      k_max = min(N//2, 3×ceil(√N)) → T(k_max) >> N → 1 sweep 완전 수렴 보장
-
-    vs depth_strides [1,2,4,...,64] (8개):
-      power-of-2만 체크 → stride=3,5,7,... 영구 누락 → 비구형 cluster 실패
-
-    dense k=1..k_max (45개, N=212):
-      모든 stride 체크 → 비구형 cluster 포함 완전 수렴 ✓
-      T(45)=1035 >> N=212 → 1 forward sweep으로 임의 cluster 수렴 ✓
-
-    N=212: k_max=45, T(45)=1035 >> 212
-    """
-    return min(N // 2, 3 * math.ceil(math.sqrt(N)))
+    """Deprecated: 안전 상한 N//2 반환."""
+    return N // 2
 
 
-# ── 전파 방식 결정 (O(1), BallTree 불필요) ──────────────────────────────
+# ── Ball Tree DFS 정렬 + k_max 구조 분석 통합 ────────────────────────────
 
-_KD_DENSE_MIN_PTS_THRESHOLD = 4
+def prepare_client_ordering(
+    norm_pts: np.ndarray,
+    eps_norm: float,
+    min_pts: int,
+    N: int,
+    dim: int,       # ← 인자 추가
+) -> tuple:
+    threshold = _kd_dense_threshold(dim)  # 2 × dim
+
+    if min_pts >= threshold:
+        t0 = time()
+        order, inv_perm = build_ball_tree_order(norm_pts)
+        print(f"[Client] Ball Tree DFS 구축: {time()-t0:.3f}초")
+
+        t1 = time()
+        k_max = compute_kmax_from_ball_structure(norm_pts, order, eps_norm, N)
+        print(f"[Client] k_max 구조 분석 (DFS): {time()-t1:.3f}초 (eps-이웃 조회 없음)")
+        print(f"[Client] k_max 상한={k_max} (서버 enc_sum_k로 정밀화 예정)")
+        print(f"         T({k_max})={k_max*(k_max+1)//2}  안전값={N//2}")
+        print(f"[Client] 전파 방식: KD-dense "
+              f"(min_pts={min_pts} ≥ 2×dim={threshold}, Sander et al. 1998)")
+        return 'kd_dense', k_max, order, inv_perm
+    else:
+        num_sweeps = max(math.ceil(N / max(min_pts, 1) / 2), math.ceil(math.log2(N)))
+        print(f"[Client] 전파 방식: sweep (num_sweeps={num_sweeps})")
+        print(f"         min_pts={min_pts} < 2×dim={threshold} → 희소 chain형 fallback")
+        return 'sweep', num_sweeps, np.arange(N), np.arange(N)
 
 
-def decide_propagation_mode(min_pts: int, log2_n: int, N: int) -> tuple:
-    """
-    O(1): BallTree 쿼리 없이 min_pts만으로 전파 방식 결정.
+# ── 전파 방식 결정 ─────────────────────────────────────────────────────────
 
-    min_pts ≥ 4 → kd_dense (KD-tree + dense k=1..k_max)
-      - k_max = min(N//2, 3×ceil(√N))
-      - T(k_max) >> N → 1 sweep 완전 수렴 보장
-      - dense stride → stride=3,5,7,... 연결도 커버 (power-of-2 문제 해결)
-
-    min_pts < 4 → sweep (chain형 허용)
-      - num_sweeps = max(N//min_pts//2, ceil(log2N))
-
-    Returns
-    -------
-    mode    : 'kd_dense' | 'sweep'
-    k_max   : dense stride 상한 (kd_dense 시)
-              = num_sweeps (sweep 방식 시)
-    """
-    if min_pts >= _KD_DENSE_MIN_PTS_THRESHOLD:
-        k_max = get_kd_dense_kmax(N)
+def decide_propagation_mode(min_pts: int, log2_n: int, N: int, dim: int) -> tuple:
+    threshold = _kd_dense_threshold(dim)  # 2 × dim
+    if min_pts >= threshold:
+        k_max  = get_kd_dense_kmax(N)
         T_kmax = k_max * (k_max + 1) // 2
-        print(f"[Client] min_pts={min_pts} ≥ {_KD_DENSE_MIN_PTS_THRESHOLD} "
-              f"→ KD-dense 선택  k_max={k_max}, T({k_max})={T_kmax}")
+        print(f"[Client] min_pts={min_pts} ≥ 2×dim={threshold} (Sander et al. 1998) "
+              f"→ KD-dense  k_max={k_max}, T({k_max})={T_kmax}")
         return 'kd_dense', k_max
     else:
         num_sweeps = max(math.ceil(N / max(min_pts, 1) / 2), math.ceil(math.log2(N)))
-        print(f"[Client] min_pts={min_pts} < {_KD_DENSE_MIN_PTS_THRESHOLD} "
-              f"→ ALL-sweep 선택 (num_sweeps={num_sweeps}, chain형 허용)")
+        print(f"[Client] min_pts={min_pts} < 2×dim={threshold} (Sander et al. 1998) "
+              f"→ ALL-sweep (num_sweeps={num_sweeps}, 희소 chain형 fallback)")
         return 'sweep', num_sweeps
 
 
-# ── FHE 엔진 설정 (단일 출처) ────────────────────────────────────────────
+# ── FHE 엔진 설정 ─────────────────────────────────────────────────────────
 
 def setup_fhe_engine(verbose: bool = False):
-    """
-    FHE 엔진 및 KeyPack 생성.
-    production/test 공통 사용 (단일 출처 원칙).
-
-    Returns: engine, secret_key, keypack
-    """
+    """FHE 엔진 및 KeyPack 생성. production/test 공통 사용."""
     engine     = desilofhe.Engine(use_bootstrap=True, mode="gpu")
     secret_key = engine.create_secret_key()
 
@@ -201,7 +281,7 @@ def setup_fhe_engine(verbose: bool = False):
     return engine, secret_key, keypack
 
 
-# ── Production 진입점 ──────────────────────────────────────────────────────
+# ── Production 진입점 ─────────────────────────────────────────────────────
 
 def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
     """
@@ -209,17 +289,18 @@ def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
 
     흐름:
       1. 정규화 → [0, 1]
-      2. decide_propagation_mode (O(1), min_pts 기반)
-      3. kd_depth 선택 시: Heap KD-tree 정렬
-         sweep 선택 시: 원래 순서 유지
-      4. 암호화 → 서버 전송
-      5. 복호화 → inv_perm 적용 → 원래 순서 복원
+      2. prepare_client_ordering:
+           - Ball Tree DFS in-order 정렬 (kd_dense 시)
+           - 구조 분석 k_max 상한 계산 (eps-이웃 조회 없음)
+      3. 암호화 → 서버 전송
+         서버가 enc_sum_k로 k_max 정밀화 (클라이언트 상한 이내)
+      4. 복호화 → inv_perm 적용 → 원래 순서 복원
     """
-    start    = time()
-    pts_arr  = np.array(pts, dtype=np.float64)
-    N        = len(pts_arr)
-    dim      = pts_arr.shape[1]
-    log2_n   = math.ceil(math.log2(N))
+    start   = time()
+    pts_arr = np.array(pts, dtype=np.float64)
+    N       = len(pts_arr)
+    dim     = pts_arr.shape[1]
+    log2_n  = math.ceil(math.log2(N))
 
     engine, secret_key, keypack = setup_fhe_engine(verbose=False)
 
@@ -231,49 +312,45 @@ def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
     ne     = eps / scale
     print(f"[Client] N={N}, dim={dim}, eps_norm={ne:.4f}")
 
-    # 2. 전파 방식 결정 (O(1))
-    mode, k_max = decide_propagation_mode(min_pts, log2_n, N)
+    # 2. Ball Tree DFS 정렬 + k_max 구조 분석 (prepare_client_ordering 통합 사용)
+    mode, k_max, heap_idx, inv_perm = prepare_client_ordering(norm, ne, min_pts, N, dim)
 
-    # 3. 정렬
     if mode == 'kd_dense':
-        heap_idx, inv_perm = build_kd_tree_order(norm)
-        data_for_enc       = norm[heap_idx].tolist()
+        data_for_enc = norm[heap_idx].tolist()
         T_kmax = k_max * (k_max + 1) // 2
-        print(f"[Client] Heap 정렬 완료  k_max={k_max}, T({k_max})={T_kmax}")
+        print(f"[Client] Heap(DFS in-order) 정렬 완료  k_max={k_max}, T({k_max})={T_kmax}")
     else:
-        heap_idx   = np.arange(N)
-        inv_perm   = np.arange(N)
         data_for_enc = norm.tolist()
         print(f"[Client] 정렬 없음 (sweep 방식)")
 
-    # 4. 암호화 → 서버
-    encryptor  = DimensionalEncryptor(engine, keypack)
-    enc_cols   = encryptor.encrypt_data(data_for_enc, dim)
+    # 3. 암호화 → 서버
+    encryptor = DimensionalEncryptor(engine, keypack)
+    enc_cols  = encryptor.encrypt_data(data_for_enc, dim)
 
     enc_result, _ = send_to_server(
         engine=engine, keypack=keypack, secret_key=secret_key,
         encrypted_columns=enc_cols,
         num_points=N, eps=ne, min_pts=min_pts,
-        k_max=k_max,
+        k_max=k_max,                           # 클라이언트 구조 분석 상한 전달
         use_kd_propagation=(mode == 'kd_dense'),
-        num_sweeps=k_max,
+        num_sweeps=k_max if mode == 'sweep' else None, # sweep일 때만 사용
     )
 
-    # 5. 복호화 + 역순열
+    # 4. 복호화 + 역순열
     elapsed = time() - start
     print(f"[Client] 서버 완료 ({elapsed:.2f}초). 복호화 중...")
 
-    heap_labels  = np.real(engine.decrypt(enc_result, secret_key))[:N]
-    # heap_labels[i]: heap 위치 i의 라벨 (= 원래 heap_idx[i] 점의 라벨)
+    heap_labels = np.real(engine.decrypt(enc_result, secret_key))[:N]
+    # heap_labels[i]: DFS 위치 i = 원래 heap_idx[i]번 점의 라벨
     # original_labels[j] = heap_labels[inv_perm[j]]
-    orig_labels  = heap_labels[inv_perm]
+    orig_labels = heap_labels[inv_perm]
 
     cluster_labels = []
     for x in orig_labels:
         r = round(float(x))
-        if r <= 0:           cluster_labels.append(-1)
-        elif r > N:          cluster_labels.append(N)
-        else:                cluster_labels.append(r)
+        if r <= 0:      cluster_labels.append(-1)
+        elif r > N:     cluster_labels.append(N)
+        else:           cluster_labels.append(r)
 
     n_c = len(set(l for l in cluster_labels if l != -1))
     print(f"[Client] 완료! 클러스터 {n_c}개 (노이즈: {cluster_labels.count(-1)}개)")
