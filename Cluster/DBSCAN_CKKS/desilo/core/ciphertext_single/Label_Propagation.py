@@ -41,9 +41,15 @@ _MCP_LABEL_PATH = "mcp_alpha15_lp_cheb.json"   # ★ Chebyshev basis (이전: mc
 # Chebyshev BSGS dep(27)=5 → 10레벨 ≤ budget 10 ✓
 
 # ★ [2026-05c] fhe_sgn의 sign_cleaning 반복 횟수.
-#   1회면 0.999 → 0.99999 (max 하강 거의 제거). 2회면 CKKS 한계.
-#   레벨/시간 절약 위해 기본 1. 부족하면 2로.
-_SGN_CLEANING_ITERS = 1
+#   1회면 0.999 → 0.99999. 2회면 CKKS 한계(2^-32).
+# ★ [Tier 1a / 2026-06] 1 → 2.
+#   진단: fhe_max가 수천 회 누적되며 sgn<1 잔차가 라벨을 압축(hepta 160~166).
+#   2회로 sgn을 ±1에 기계 정밀도까지 붙여 max 하강 제거.
+#   비용: fhe_max마다 호출 → 시간 증가(가장 큰 비용 지점). FHE에서 1 vs 2 측정 권장.
+_SGN_CLEANING_ITERS = 2
+
+# ★ [Tier 1a / 2026-06] 초기 core_mask/non_core cleaning 반복 횟수 (Core와 동일 2).
+_INIT_CLEANING_ITERS = 2
 _mcp_label_components = None
 
 
@@ -62,12 +68,31 @@ def _get_mcp_label():
     return _mcp_label_components
 
 
-def _dbg(engine, secret_key, ct, tag, num_points, show=6):
+def _dbg(engine, secret_key, ct, tag, num_points, show=6, save_path=None):
+    """라벨 상태 디버그. min/max/mean + '서로 구분되는 정수 라벨 수'(distinct)를 출력.
+
+    ★ [2026-06] distinct 추적:
+      클러스터가 압축/병합되면 round 후 distinct 수가 정답 클러스터 수보다 작아짐.
+      round 단계 이전에 압축이 진행되는지 pass마다 직접 관찰 가능.
+      save_path 주면 해당 pass 라벨 전체를 CSV로 저장(클라이언트 round 없이 원시값).
+    """
     if secret_key is None:
         return ct
-    vals = np.array(engine.decrypt(ct, secret_key))[:num_points]
-    print(f"  [DBG] {tag}: min={vals.min():.4f}  max={vals.max():.4f}  mean={vals.mean():.4f}")
-    print(f"         {np.round(vals[:show], 4).tolist()}")
+    vals = np.real(np.array(engine.decrypt(ct, secret_key)))[:num_points]
+    pos  = vals[vals > 0.5]
+    distinct = len(set(int(round(v)) for v in pos)) if len(pos) else 0
+    print(f"  [DBG] {tag}: min={vals.min():.4f} max={vals.max():.4f} "
+          f"mean={vals.mean():.4f} | 양수라벨 distinct(round)={distinct}")
+    print(f"         앞{show}개={np.round(vals[:show], 4).tolist()}")
+    if save_path:
+        try:
+            with open(save_path, "w", encoding="utf-8") as f:
+                f.write("Heap_Position,Label_Raw,Label_Round\n")
+                for i, v in enumerate(vals):
+                    f.write(f"{i},{float(v):.6f},{int(round(v)) if v>0.5 else -1}\n")
+            print(f"         ↳ 스냅샷 저장: {save_path}")
+        except Exception as e:
+            print(f"         ↳ 스냅샷 저장 실패: {e}")
     return ct
 
 
@@ -173,8 +198,17 @@ def _propagate_one_stride_core(
     core_labels_ct, core_mask_ct,
     k, N, label_scale,
     secret_key=None,
+    apply_mask: bool = True,          # ★ [Tier 1b] False면 per-stride 마스킹 생략
 ):
-    """Core-Core 전파: stride k에 대해 Forward + Backward."""
+    """Core-Core 전파: stride k에 대해 Forward + Backward.
+
+    ★ [Tier 1b] apply_mask:
+      True  = 기존(per-stride): 매 max 직후 × core_mask + _refresh(=bootstrap).
+      False = per-pass 모드: 여기선 마스킹 생략(호출측이 pass 끝에 1회 수행).
+      정합성 근거(평문 검증 ①=②): 전파는 항상 shift(core_mask)로 *소스*를
+      게이트하므로 비-core 슬롯의 오염은 다른 슬롯으로 전파되지 않음 → core 라벨
+      결과 불변. per-pass는 점당 수천 회의 곱셈+bootstrap을 제거(비용↓).
+    """
     relin_key = keypack.relinearization_key
     adj_k     = adj_k_half_list[k - 1]
 
@@ -187,8 +221,9 @@ def _propagate_one_stride_core(
     core_labels_ct = fhe_max(engine, core_labels_ct, neighbor_k,
                              N, keypack, label_scale=label_scale,
                              secret_key=secret_key)
-    core_labels_ct = _refresh(engine,
-        engine.multiply(core_labels_ct, core_mask_ct, relin_key), keypack)
+    if apply_mask:
+        core_labels_ct = _refresh(engine,
+            engine.multiply(core_labels_ct, core_mask_ct, relin_key), keypack)
 
     # Backward: label[i] ← max(label[i], adj_{N-k}[i] × label[(i-k)%N])
     if 2 * k < N:
@@ -201,8 +236,9 @@ def _propagate_one_stride_core(
         core_labels_ct = fhe_max(engine, core_labels_ct, neighbor_Nk,
                                  N, keypack, label_scale=label_scale,
                                  secret_key=secret_key)
-        core_labels_ct = _refresh(engine,
-            engine.multiply(core_labels_ct, core_mask_ct, relin_key), keypack)
+        if apply_mask:
+            core_labels_ct = _refresh(engine,
+                engine.multiply(core_labels_ct, core_mask_ct, relin_key), keypack)
 
     return core_labels_ct
 
@@ -214,8 +250,13 @@ def _propagate_one_stride_border(
     border_labels_ct, non_core_ct, core_labels_ct, core_mask_ct,
     k, N, label_scale,
     secret_key=None,
+    apply_mask: bool = True,          # ★ [Tier 1b]
 ):
-    """Core→Border 전파: stride k에 대해 Forward + Backward."""
+    """Core→Border 전파: stride k에 대해 Forward + Backward.
+
+    ★ [Tier 1b] border_labels는 *목적지 전용*(소스는 core_labels)이라 오염이
+      전파되지 않음 → per-pass 마스킹으로 동일 결과(평문 검증 ①=②).
+    """
     relin_key = keypack.relinearization_key
     adj_k     = adj_k_half_list[k - 1]
 
@@ -228,8 +269,9 @@ def _propagate_one_stride_border(
     border_labels_ct = fhe_max(engine, border_labels_ct, candidate_k,
                                N, keypack, label_scale=label_scale,
                                secret_key=secret_key)
-    border_labels_ct = _refresh(engine,
-        engine.multiply(border_labels_ct, non_core_ct, relin_key), keypack)
+    if apply_mask:
+        border_labels_ct = _refresh(engine,
+            engine.multiply(border_labels_ct, non_core_ct, relin_key), keypack)
 
     # Backward
     if 2 * k < N:
@@ -242,8 +284,9 @@ def _propagate_one_stride_border(
         border_labels_ct = fhe_max(engine, border_labels_ct, candidate_Nk,
                                    N, keypack, label_scale=label_scale,
                                    secret_key=secret_key)
-        border_labels_ct = _refresh(engine,
-            engine.multiply(border_labels_ct, non_core_ct, relin_key), keypack)
+        if apply_mask:
+            border_labels_ct = _refresh(engine,
+                engine.multiply(border_labels_ct, non_core_ct, relin_key), keypack)
 
     return border_labels_ct
 
@@ -261,6 +304,8 @@ def fhe_kd_dense_propagation(
     k_max: int,
     secret_key=None,
     n_rounds: int = 1,          # ★ [2026-05c 작업 B] Core-Core 전파 반복 횟수
+    mask_mode: str = "per_stride",   # ★ [Tier 1b] "per_stride"(기존) | "per_pass"
+    debug_snapshot_prefix: str = None,  # ★ [2026-06] 주면 pass마다 라벨 CSV 저장
 ) -> Ciphertext:
     """
     KD-tree ordering + dense stride k=1..k_max 라벨 전파.
@@ -289,51 +334,64 @@ def fhe_kd_dense_propagation(
 
     label_scale = float(N)
     slot_count  = engine.slot_count
+    per_pass    = (mask_mode == "per_pass")   # ★ [Tier 1b]
+    apply_mask_in_stride = (not per_pass)
 
     print(f"\n[KD-LP] ══════════════════════════════════════════")
     print(f"[KD-LP] KD-tree dense stride 전파 (k=1..{k_max})")
     print(f"[KD-LP] N={N}, k_max={k_max}, n_rounds={n_rounds} (★ 작업 B)")
+    print(f"[KD-LP] mask_mode={mask_mode} (★ Tier 1b)  "
+          f"sgn_cleaning_iters={_SGN_CLEANING_ITERS} init_cleaning_iters={_INIT_CLEANING_ITERS} (★ Tier 1a)")
     print(f"[KD-LP] T({k_max})={T_kmax}  {'✓ ≥ N' if T_kmax >= N else '⚠ < N'}")
-    # Phase1: 2pass × n_rounds × k_max × 2dir, Phase2: 2pass × 1 × k_max × 2dir
     fhe_max_cnt = (2 * n_rounds + 2) * k_max * 2
+    # per_stride: 마스킹(곱+bootstrap)이 fhe_max와 동수 발생. per_pass: pass당 1회.
+    n_mask_per_stride = fhe_max_cnt
+    n_mask_per_pass   = (2 * n_rounds + 2)
     print(f"[KD-LP] fhe_max: {fhe_max_cnt}회 "
           f"(Phase1 {2*n_rounds*k_max*2} + Phase2 {2*k_max*2})")
+    print(f"[KD-LP] 마스킹(곱+bootstrap) 횟수: "
+          f"per_stride={n_mask_per_stride} vs per_pass={n_mask_per_pass} "
+          f"→ Tier 1b 절감={n_mask_per_stride-n_mask_per_pass}회")
     print(f"[KD-LP] ══════════════════════════════════════════\n")
 
     # ── 초기화 ─────────────────────────────────────────────────
     # ★ [2026-05c 작업 A 보강] core_mask 정밀도 복원
-    #   [발견된 버그] Core.py가 cleaning으로 core_mask=1.0 만들어 보냈으나,
-    #     여기서 _refresh(=일반 bootstrap)가 다시 noise 주입 → 0.9984로 악화.
-    #     이 0.9984가 _propagate_one_stride_core에서 매 stride 2회 곱해져
-    #     (1 pass = 105 stride × 2 = 210회) 0.9984^210 = 0.714 → 라벨 감쇠.
-    #     8 round(16 pass) 시 라벨이 211→0.85로 소멸 (관측됨).
-    #   [해결] _refresh로 레벨 복구 후 bit_cleaning으로 0.9984 → 1.0 재정리.
-    #     mask=1.0이면 매 stride 곱해도 감쇠 없음.
+    #   _refresh(일반 bootstrap)가 noise 주입 → bit_cleaning으로 1.0 재정리.
+    # ★ [Tier 1a] n_iters를 _INIT_CLEANING_ITERS(=2)로 상향 → mask=1.0 기계정밀도.
     core_mask_ct = _refresh(engine, core_ct, keypack)
     core_mask_ct = bit_cleaning(engine, core_mask_ct, keypack,
-                                n_iters=1, slot_count=slot_count)
-    # non_core = 1 - core_mask. core_mask=1.0이면 0.0 정확하지만,
-    # _refresh noise 대비 cleaning으로 {0,1} 보장 (border 데이터 일반성).
+                                n_iters=_INIT_CLEANING_ITERS, slot_count=slot_count)
     non_core_ct  = engine.subtract(engine.encode([1.0] * slot_count), core_mask_ct)
     non_core_ct  = _refresh(engine, non_core_ct, keypack)
     non_core_ct  = bit_cleaning(engine, non_core_ct, keypack,
-                                n_iters=1, slot_count=slot_count)
+                                n_iters=_INIT_CLEANING_ITERS, slot_count=slot_count)
 
     id_enc = engine.encode(
         [float(i + 1) for i in range(N)] + [0.0] * (slot_count - N))
     core_labels_ct = _refresh(engine,
         engine.multiply(core_mask_ct, id_enc), keypack)
 
-    _dbg(engine, secret_key, core_labels_ct, "초기 core_labels", N)
+    def _snap(name):
+        return (f"{debug_snapshot_prefix}_{name}.csv"
+                if debug_snapshot_prefix else None)
+
+    _dbg(engine, secret_key, core_labels_ct, "초기 core_labels", N,
+         save_path=_snap("init"))
 
     passes = [
         ("forward",  list(range(1, k_max + 1))),
         ("backward", list(range(k_max, 0, -1))),
     ]
 
+    def _mask_core(lab):
+        return _refresh(engine,
+            engine.multiply(lab, core_mask_ct, keypack.relinearization_key), keypack)
+
+    def _mask_border(lab):
+        return _refresh(engine,
+            engine.multiply(lab, non_core_ct, keypack.relinearization_key), keypack)
+
     # ── Phase 1: Core-Core (★ 작업 B: n_rounds 반복) ──────────────
-    #   라벨이 클러스터 전체로 전파되려면 chain형은 여러 round 필요.
-    #   각 round = forward + backward 2 pass.
     for rnd in range(n_rounds):
         for pass_idx, (pass_name, k_order) in enumerate(passes):
             print(f"[KD-LP] Phase1: Core-Core Round{rnd+1}/{n_rounds} "
@@ -343,9 +401,17 @@ def fhe_kd_dense_propagation(
                     engine, keypack, adj_k_half_list,
                     core_labels_ct, core_mask_ct,
                     k, N, label_scale, secret_key=secret_key,
+                    apply_mask=apply_mask_in_stride,    # ★ Tier 1b
                 )
+            if per_pass:                                # ★ Tier 1b: pass당 1회 마스킹
+                core_labels_ct = _mask_core(core_labels_ct)
             _dbg(engine, secret_key, core_labels_ct,
-                 f"P1-R{rnd+1}-{pass_name} 완료", N)
+                 f"P1-R{rnd+1}-{pass_name} 완료", N,
+                 save_path=_snap(f"P1_R{rnd+1}_{pass_name}"))
+
+    # per_pass 모드: Phase 끝에서 비-core 슬롯 오염 최종 정리 (안전)
+    if per_pass:
+        core_labels_ct = _mask_core(core_labels_ct)
 
     # ── Phase 2: Core→Border ───────────────────────────────────
     border_labels_ct = _refresh(engine,
@@ -358,12 +424,19 @@ def fhe_kd_dense_propagation(
                 engine, keypack, adj_k_half_list,
                 border_labels_ct, non_core_ct, core_labels_ct, core_mask_ct,
                 k, N, label_scale, secret_key=secret_key,
+                apply_mask=apply_mask_in_stride,        # ★ Tier 1b
             )
-        _dbg(engine, secret_key, border_labels_ct, f"P2-{pass_name} 완료", N)
+        if per_pass:
+            border_labels_ct = _mask_border(border_labels_ct)
+        _dbg(engine, secret_key, border_labels_ct, f"P2-{pass_name} 완료", N,
+             save_path=_snap(f"P2_{pass_name}"))
+
+    if per_pass:
+        border_labels_ct = _mask_border(border_labels_ct)
 
     final_ct = _refresh(engine,
         engine.add(core_labels_ct, border_labels_ct), keypack)
-    _dbg(engine, secret_key, final_ct, f"최종 [0,{N}]", N)
+    _dbg(engine, secret_key, final_ct, f"최종 [0,{N}]", N, save_path=_snap("final"))
     return final_ct
 
 

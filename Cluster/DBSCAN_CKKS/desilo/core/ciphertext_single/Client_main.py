@@ -254,6 +254,51 @@ def decide_propagation_mode(min_pts: int, log2_n: int, N: int, dim: int) -> tupl
 
 # ── FHE 엔진 설정 ─────────────────────────────────────────────────────────
 
+def gap_cluster_labels(orig_labels, N, min_gap=0.5, gap_factor=5.0):
+    """
+    ★ [Tier 0 / 2026-06] round() 대체용 클라이언트 후처리.
+
+    복호화된 연속 라벨값을 '큰 gap'에서 잘라 클러스터링한다.
+    배경(진단): 같은 클러스터 점들의 라벨값 std는 매우 작지만(응집 완벽),
+      전파 누적오차로 값이 정수에서 벗어나 한 클러스터가 14.29/14.71처럼
+      정수 경계(x.5)를 가로지르면 round()가 한 클러스터를 둘로 쪼갠다(과분할).
+      gap 기반 클러스터링은 '값이 거의 같은 무리'를 한 클러스터로 묶어 이를 복구.
+
+    한계(솔직히): 이건 *과분할*만 고친다. 서로 다른 클러스터의 라벨값이 1 미만으로
+      겹쳐버린 *병합*(hepta 유형)은 정보가 이미 소실되어 복구 불가하며, 임계값을
+      잘못 잡으면 오히려 더 합쳐질 수 있다. 따라서 Tier 1(전파 정밀도)과 병행해야 한다.
+
+    Parameters
+    ----------
+    orig_labels : 원래 순서로 복원된 연속 라벨값 (np.ndarray, 길이 N)
+    min_gap     : 클러스터 분리로 인정할 최소 gap (기본 0.5)
+    gap_factor  : 클러스터 '내부' gap(중앙값)의 몇 배를 분리 기준으로 볼지
+
+    Returns
+    -------
+    labels : list[int]  (노이즈 = -1, 클러스터 = 1,2,3,...)
+    """
+    vals = np.asarray(orig_labels, dtype=float)
+    out  = np.full(len(vals), -1, dtype=int)
+    core_idx = np.where(vals > 0.5)[0]            # 양수 라벨만 클러스터 후보
+    if len(core_idx) == 0:
+        return out.tolist()
+
+    sv_order = core_idx[np.argsort(vals[core_idx])]
+    sv       = vals[sv_order]
+    gaps     = np.diff(sv)
+    pos_gaps = gaps[gaps > 1e-9]
+    thr      = max(min_gap, (np.median(pos_gaps) * gap_factor) if len(pos_gaps) else min_gap)
+
+    cluster_id = 1
+    out[sv_order[0]] = cluster_id
+    for i in range(1, len(sv)):
+        if gaps[i - 1] > thr:
+            cluster_id += 1
+        out[sv_order[i]] = cluster_id
+    return out.tolist()
+
+
 def setup_fhe_engine(verbose: bool = False):
     """FHE 엔진 및 KeyPack 생성. production/test 공통 사용."""
     engine     = desilofhe.Engine(use_bootstrap=True, mode="gpu")
@@ -291,7 +336,10 @@ def setup_fhe_engine(verbose: bool = False):
 
 # ── Production 진입점 ─────────────────────────────────────────────────────
 
-def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
+def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int,
+                          mask_mode: str = "per_stride",   # ★ Tier 1b ("per_stride"|"per_pass")
+                          post_process: str = "round",      # ★ Tier 0 ("round"|"gap")
+                          lp_snapshot: bool = False):       # ★ LP pass별 CSV 저장
     """
     Production 클라이언트 진입점.
 
@@ -343,6 +391,8 @@ def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
         use_kd_propagation=(mode == 'kd_dense'),
         num_sweeps=k_max if mode == 'sweep' else None, # sweep일 때만 사용
         n_rounds=math.ceil(math.log2(N)),      # ★ [2026-05c 작업 B] log₂N round
+        mask_mode=mask_mode,                   # ★ Tier 1b
+        lp_snapshot=lp_snapshot,               # ★ LP pass별 스냅샷
     )
 
     # 4. 복호화 + 역순열
@@ -354,13 +404,26 @@ def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
     # original_labels[j] = heap_labels[inv_perm[j]]
     orig_labels = heap_labels[inv_perm]
 
-    cluster_labels = []
+    # ── 4-1. 후처리: round (기존) vs gap (Tier 0) ──────────────────────
+    #   양쪽을 모두 계산해 클러스터 수를 비교 출력 → 데이터셋별 선택 근거 제공.
+    round_labels = []
     for x in orig_labels:
         r = round(float(x))
-        if r <= 0:      cluster_labels.append(-1)
-        elif r > N:     cluster_labels.append(N)
-        else:           cluster_labels.append(r)
+        if r <= 0:      round_labels.append(-1)
+        elif r > N:     round_labels.append(N)
+        else:           round_labels.append(r)
+    gap_labels = gap_cluster_labels(orig_labels, N)
+
+    n_round = len(set(l for l in round_labels if l != -1))
+    n_gap   = len(set(l for l in gap_labels  if l != -1))
+    print(f"[Client] 후처리 비교: round→클러스터 {n_round}개 | "
+          f"gap→클러스터 {n_gap}개  (선택: {post_process})")
+    print(f"         라벨값 범위 min={float(np.min(orig_labels)):.3f} "
+          f"max={float(np.max(orig_labels)):.3f}")
+
+    cluster_labels = gap_labels if post_process == "gap" else round_labels
 
     n_c = len(set(l for l in cluster_labels if l != -1))
-    print(f"[Client] 완료! 클러스터 {n_c}개 (노이즈: {cluster_labels.count(-1)}개)")
+    print(f"[Client] 완료! 클러스터 {n_c}개 (노이즈: {cluster_labels.count(-1)}개, "
+          f"post_process={post_process})")
     return [list(pts[i]) + [cluster_labels[i]] for i in range(N)], cluster_labels
