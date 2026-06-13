@@ -28,6 +28,12 @@ from desilofhe import Engine, Ciphertext
 from util.keypack import KeyPack
 
 
+# ★ [2026-06 Phase1b] 컴포넌트 간 bootstrap 종류.
+#   "sign"     : sign_bootstrap (유계 sin 클램프 + 이차 수렴 + 레벨 복구) ← 기본
+#   "standard" : 이전 동작 (표준 bootstrap, 노이즈 주입 — 거짓 양성 원인)
+_INTER_COMPONENT_BOOTSTRAP = "sign"
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # 유틸리티: odd → full Chebyshev coefficients
 # ─────────────────────────────────────────────────────────────────────────
@@ -120,10 +126,35 @@ def eval_mcp_full_chebyshev(
                 pass
 
         # ── 5. Bootstrap after each component ─────────────────────────
-        # 가설: evaluate_chebyshev_polynomial 출력은 이미 coefficient form.
-        # 따라서 추가 intt 호출 없이 바로 bootstrap.
-        # (이전 시도: 추가 intt 호출 시 systematic diff ~1.6e-3 발생)
-        current = engine.bootstrap(current, relin_key, conj_key, boot_key)
+        # ★ [2026-06 Phase1b] 컴포넌트 간 표준 bootstrap → sign_bootstrap 교체.
+        #
+        #   [발견된 버그 — hepta 인접행렬 거짓 양성 143개 (cross 138)의 원인]
+        #     표준 bootstrap이 컴포넌트마다 ~2^-9.3 노이즈를 중간값에 주입하고,
+        #     다음 컴포넌트(특히 deg-27, 경계 기울기 ~n²=729)가 이를 증폭.
+        #     희소 슬롯에서 중간값이 z≈2~3까지 폭주하면, 최종 sign_bootstrap의
+        #     주기적 EvalSign(sin)이 z≈2→0, z≈3→−1로 접어 부호가 뒤집힘
+        #     → dist²≫eps²인 cross pair가 adj≈0.5~1.0으로 오판
+        #     → LP Round 1에서 전 클러스터 라벨 오염 (ARI 63 의 근본 원인).
+        #
+        #   [해결 — Hong et al. §4.1, Fig. 4b 그대로]
+        #     컴포넌트 사이를 sign_bootstrap으로 연결:
+        #     (1) sin은 유계 → 중간 폭주를 [−1,1]로 즉시 클램프 (접힘 원천 차단)
+        #     (2) τ → (π²/8)τ² 이차 수렴 "공짜" (Thm 1) — p_{i+1}의 fitted
+        #         domain D_{τ_i}의 부분집합으로 들어가므로 근사 보증 보존
+        #     (3) 레벨 복구는 동일, 런타임도 동등 이하 (논문 Table 5)
+        #     노이즈를 주입하던 유지보수 단계가 수렴을 돕는 단계로 바뀜.
+        #
+        #   _INTER_COMPONENT_BOOTSTRAP = "standard"로 되돌리기 가능.
+        if _INTER_COMPONENT_BOOTSTRAP == "sign":
+            current = engine.sign_bootstrap(
+                current,
+                relin_key,
+                conj_key,
+                keypack.rotation_key,
+                keypack.smallbootstrap_key,
+            )
+        else:
+            current = engine.bootstrap(current, relin_key, conj_key, boot_key)
 
         if debug:
             try:

@@ -209,6 +209,8 @@ def send_to_server_fhe(
     # ══════════════════════════════════════════════════════════════
     # Step 2. Core Point 판별
     # ══════════════════════════════════════════════════════════════
+    print("dump")
+    dump_adjacency(engine, secret_key, adj_k_list, N, k_max)   # ★ 디버그용: Normalize 직후 인접 행렬 덤프
     print(f"\n[Step 2] Core Point 판별 시작")
     before_core = _gpu_used_mb()
     core_start  = time()
@@ -294,3 +296,66 @@ def send_to_server_fhe(
     debug_fhe["timings"] = timings
     _print_mem("send_to_server_fhe() 완료")
     return final_ct, debug_fhe
+
+
+
+
+#삭제용
+# dump_adjacency.py — Server_main.py의 Normalize 완료 직후 호출용
+# 사용법: Server_main.py에서 adj_k_list 트런케이트 직후에
+#   from dump_adjacency import dump_adjacency
+#   dump_adjacency(engine, secret_key, adj_k_list, N, k_max)
+# 를 한 줄 추가. (secret_key가 있는 디버그 경로에서만 동작)
+#
+# 출력: debug_adjacency_suspicious.csv
+#   - 모든 분수 항목 (0.02 < val < 0.98)
+#   - 모든 비영(>0.02) 항목의 (k, i, j=(i+k)%N, val)
+#   → 클라이언트에서 heap 순서·클래스와 대조하면 R1 오염원이 즉시 특정됨.
+
+import numpy as np
+
+
+def dump_adjacency(engine, secret_key, adj_k_list, N, k_max,
+                   out="debug_adjacency_suspicious.csv"):
+    if secret_key is None:
+        print("[dump_adjacency] secret_key 없음 — 건너뜀")
+        return
+    rows = []
+    nonzero_per_k = []
+    for k_idx, adj_ct in enumerate(adj_k_list):
+        k = k_idx + 1
+        vals = np.array(engine.decrypt(adj_ct, secret_key)).real[:N]
+        nz = int((vals > 0.02).sum())
+        frac = int(((vals > 0.02) & (vals < 0.98)).sum())
+        over = int((vals > 1.02).sum())
+        nonzero_per_k.append((k, nz, frac, over))
+        for i in np.where(vals > 0.02)[0]:
+            rows.append((k, int(i), int((i + k) % N), float(vals[i])))
+        # 음수/1 초과 등 비정상도 기록
+        for i in np.where((vals < -0.02) | (vals > 1.02))[0]:
+            rows.append((k, int(i), int((i + k) % N), float(vals[i])))
+
+    with open(out, "w", encoding="utf-8") as f:
+        f.write("k,slot_i,slot_j,adj_value\n")
+        for r in sorted(rows, key=lambda r: -abs(r[3] - round(r[3]))):
+            f.write(f"{r[0]},{r[1]},{r[2]},{r[3]:.6f}\n")
+
+    total_nz   = sum(x[1] for x in nonzero_per_k)
+    total_frac = sum(x[2] for x in nonzero_per_k)
+    total_over = sum(x[3] for x in nonzero_per_k)
+    print(f"[dump_adjacency] 비영 항목 {total_nz}개, "
+          f"분수(0.02~0.98) {total_frac}개, 1.02 초과 {total_over}개")
+    print(f"[dump_adjacency] 저장: {out}")
+
+    # 슬롯 합 (total_neighbors 재구성과 대조용)
+    sums = np.zeros(N)
+    for k_idx, adj_ct in enumerate(adj_k_list):
+        k = k_idx + 1
+        vals = np.array(engine.decrypt(adj_ct, secret_key)).real[:N]
+        sums += vals
+        if 2 * k < N:
+            sums += np.roll(vals, k)   # 대칭 카운트
+    np.savetxt("debug_adjacency_rowsums.csv",
+               np.column_stack([np.arange(N), sums]),
+               delimiter=",", header="slot,sum", comments="", fmt="%.6f")
+    print("[dump_adjacency] 슬롯별 합 저장: debug_adjacency_rowsums.csv")
