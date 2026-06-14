@@ -37,19 +37,7 @@ from core.ciphertext_single.chebyshev_eval import eval_mcp_full_chebyshev
 from core.ciphertext_single.cleaning import bit_cleaning   # ★ [2026-05c] 작업 A
 
 # ★ [2026-05c 작업 A] cleaning 반복 횟수 (Core와 동일 정책).
-# ★ [Tier 1a / 2026-06] 1 → 2 (Core와 동일 — adj_k 누적 bias 추가 억제).
-_CLEANING_ITERS = 2
-
-# ★ [2026-06] 반복 print 제거용 플래그.
-#   check_neighbor_closed_interval가 k=1..N//2 (수백 회) 호출되어 동일 config가
-#   반복 출력되던 문제 → 최초 1회만 출력. reset_normalize_logging()으로 초기화.
-_norm_cfg_printed = False
-
-
-def reset_normalize_logging():
-    """데이터셋/eps가 바뀌어 config를 다시 한 번 출력하고 싶을 때 호출."""
-    global _norm_cfg_printed
-    _norm_cfg_printed = False
+_CLEANING_ITERS = 1
 
 
 def check_neighbor_closed_interval(
@@ -95,8 +83,11 @@ def check_neighbor_closed_interval(
     approx_bound = max_dist_sq * 1.05
     margin_val   = mcp_delta * approx_bound
 
-    global _norm_cfg_printed
-    _print_cfg = (not _norm_cfg_printed) or debug   # ★ 최초 1회(또는 debug)만
+    print(f"  [Normalize] basis=chebyshev, dim={dimension}, eps_sq={eps_sq:.6f}")
+    print(f"  [Normalize] mcp_delta={mcp_delta:.6f} (= 2^{math.log2(mcp_delta):.2f})")
+    print(f"  [Normalize] margin_val={margin_val:.6f}, threshold={eps_sq+margin_val:.6f}")
+    print(f"  [Normalize] eps_effective={math.sqrt(eps_sq+margin_val):.5f} "
+          f"(+{(math.sqrt((eps_sq+margin_val)/eps_sq)*100-100):.1f}%)")
 
     threshold_pt = engine.encode([eps_sq + margin_val] * slot_count)
     x = engine.subtract(dist_sq_ct, threshold_pt)
@@ -106,16 +97,7 @@ def check_neighbor_closed_interval(
     bound        = max(x_min_abs, x_max_abs) * 1.05
     scale_factor = 1.0 / bound
 
-    if _print_cfg:
-        print(f"  [Normalize] basis=chebyshev, dim={dimension}, eps_sq={eps_sq:.6f}")
-        print(f"  [Normalize] mcp_delta={mcp_delta:.6f} (= 2^{math.log2(mcp_delta):.2f})")
-        print(f"  [Normalize] margin_val={margin_val:.6f}, threshold={eps_sq+margin_val:.6f}")
-        print(f"  [Normalize] eps_effective={math.sqrt(eps_sq+margin_val):.5f} "
-              f"(+{(math.sqrt((eps_sq+margin_val)/eps_sq)*100-100):.1f}%)")
-        print(f"  [Normalize] bound={bound:.6f}, scale={scale_factor:.6f}")
-        print(f"  [Normalize] cleaning n_iters={_CLEANING_ITERS} "
-              f"(이하 k=1..N//2 동일 config — 반복 출력 생략)")
-        _norm_cfg_printed = True   # ★ 이후 호출은 config 출력 안 함
+    print(f"  [Normalize] bound={bound:.6f}, scale={scale_factor:.6f}")
 
     current_x = engine.multiply(x, engine.encode([scale_factor] * slot_count))
 
@@ -126,8 +108,7 @@ def check_neighbor_closed_interval(
     )
 
     # ── sign_bootstrap ────────────────────────────────────────────────
-    if debug:
-        print(f"  - [Normalize] sign_bootstrap...")
+    print(f"  - [Normalize] sign_bootstrap...")
     current_x = engine.sign_bootstrap(
         engine.intt(current_x),
         keypack.relinearization_key,
@@ -142,9 +123,22 @@ def check_neighbor_closed_interval(
     result = engine.add(engine.multiply(current_x, m05_pt), c05_pt)
 
     # ── ★ [2026-05c 작업 A] 마지막 일반 bootstrap → bit_cleaning 교체 ──
-    #   (상세 주석 동일 — 생략 없이 유지)
-    if debug:
-        print(f"  - [Normalize] bit_cleaning (n_iters={_CLEANING_ITERS})...")
+    #
+    #   [문제] Core와 동일. sign_bootstrap 직후 깨끗한 adj_k를
+    #     일반 bootstrap이 noise 주입(0.99839)으로 악화시킴.
+    #     adj_k는 Server에서 total_neighbors로 *합산*되므로, 이웃 1개당 0.00161
+    #     결손이 점의 이웃수 d에 비례해 누적 (d=500이면 0.8 bias → minPts 경계 오판).
+    #     N이 큰 빅데이터에서 ARI 저하 위험.
+    #
+    #   [해결] {0,1} 도메인 bit_cleaning. 이웃당 결손 0.00161 → 7.8e-6 (200배↓).
+    #     d=500이어도 누적 0.0039 → 무시 가능.
+    #
+    #   [레벨 자동 처리 ★]
+    #     bit_cleaning 내부가 ciphertext.level 확인 → 부족 시 _refresh.
+    #     (iter 진입 전 level<2, 완료 후 level<3 일 때 자동 bootstrap.)
+    #     adj_k는 Server에서 합산(add)/회전(rotate)에 쓰이고(레벨 소비 無),
+    #     LP 곱셈 전 _refresh되므로 이중 안전.
+    print(f"  - [Normalize] bit_cleaning (n_iters={_CLEANING_ITERS}, 일반 bootstrap 대체)...")
     result = bit_cleaning(
         engine, result, keypack,
         n_iters=_CLEANING_ITERS, slot_count=slot_count,

@@ -68,9 +68,6 @@ def send_to_server_fhe(
     use_kd_propagation: bool = True,
     num_sweeps: int = None,
     n_rounds: int = None,             # ★ [2026-05c 작업 B] LP Core-Core 반복 횟수
-    mask_mode: str = "per_stride",    # ★ [Tier 1b] LP 마스킹 빈도 ("per_stride"|"per_pass")
-    debug_adj_sample=(1, 2, 5, 10),   # ★ [2026-06] 이 stride들의 adj_k를 복호화해 점검
-    lp_snapshot: bool = False,        # ★ [2026-06] LP pass별 라벨 CSV 저장 여부
 ):
     """
     서버 메인 파이프라인.
@@ -171,32 +168,6 @@ def send_to_server_fhe(
         dec_total, "Point_ID,Total_Neighbors"
     )
 
-    # ── ★ [2026-06] neighbor 디버그: 샘플 stride의 adj_k를 복호화해 점검 ──
-    #   "이웃이 각각 어떻게 나오는지" = stride k에서 (i, i+k)가 이웃인지의 0/1 벡터.
-    #   확인 포인트: ① 그 stride의 이웃-쌍 개수(=1인 슬롯 수),
-    #               ② 값이 깨끗한 0/1인지(intermediate 값 = sign 근사 경계 실패).
-    if debug_adj_sample:
-        print(f"[DEBUG][neighbor] 샘플 stride adj_k 점검 (1=이웃, 0=비이웃)")
-        adj_rows = []
-        for k in debug_adj_sample:
-            if k < 1 or k > len(adj_k_list):
-                continue
-            v = np.real(engine.decrypt(adj_k_list[k - 1], secret_key)[:N])
-            n_pair  = int(np.sum(v > 0.5))
-            n_ambig = int(np.sum((v > 0.1) & (v < 0.9)))   # 모호값(경계 실패 신호)
-            print(f"   k={k:>3}: 이웃쌍={n_pair:>4}  "
-                  f"min={v.min():+.4f} max={v.max():+.4f}  모호슬롯(0.1~0.9)={n_ambig}")
-            adj_rows.append((k, v))
-        # 전체 stride별 이웃쌍 분포까지 보고 싶으면 lp_snapshot=True 시 저장
-        if lp_snapshot and adj_rows:
-            with open(f"debug_adj_sample_eps{eps:.4f}_min{int(min_pts)}.csv",
-                      "w", encoding="utf-8") as f:
-                f.write("k,Point_ID,adj_value\n")
-                for k, v in adj_rows:
-                    for i, val in enumerate(v):
-                        f.write(f"{k},{i},{float(val):.6f}\n")
-            print(f"   ↳ adj 샘플 저장: debug_adj_sample_eps{eps:.4f}_min{int(min_pts)}.csv")
-
     # adj_k_list 트런케이트: k_max 초과분은 LP에서 불필요 (메모리 절약)
     if use_kd_propagation and len(adj_k_list) > k_max:
         adj_k_list = adj_k_list[:k_max]
@@ -209,8 +180,6 @@ def send_to_server_fhe(
     # ══════════════════════════════════════════════════════════════
     # Step 2. Core Point 판별
     # ══════════════════════════════════════════════════════════════
-    print("dump")
-    dump_adjacency(engine, secret_key, adj_k_list, N, k_max)   # ★ 디버그용: Normalize 직후 인접 행렬 덤프
     print(f"\n[Step 2] Core Point 판별 시작")
     before_core = _gpu_used_mb()
     core_start  = time()
@@ -226,14 +195,8 @@ def send_to_server_fhe(
     dec_core = np.real(engine.decrypt(core_ct, secret_key)[:N])
     debug_fhe["core_mask"] = np.array(dec_core)
     n_core = int(np.sum(dec_core[:N] > 0.5))
-    n_ambig_core = int(np.sum((dec_core > 0.1) & (dec_core < 0.9)))  # ★ 경계 실패 신호
     print(f"[DEBUG] Core 마스크 (앞 10개): {np.round(dec_core[:10], 4)}")
     print(f"  → Core 포인트: {n_core}/{N}")
-    # ★ [2026-06] "core여부 값이 어떻게 나오는지": 1.0/0.0에 얼마나 붙었는지 + 모호값
-    print(f"  → 값 분포: ~1(>0.9)={int(np.sum(dec_core>0.9))}  "
-          f"~0(<0.1)={int(np.sum(dec_core<0.1))}  모호(0.1~0.9)={n_ambig_core}")
-    print(f"  → 코어 슬롯 1과의 최대 오차={np.max(np.abs(dec_core[dec_core>0.5]-1.0)) if n_core else 0:.2e} "
-          f"(0에 가까울수록 mask=1.0 — LP 감쇠 위험↓)")
     if n_core == 0:
         print("  ❌ [FATAL] 코어 포인트 미검출!")
     save_vector_csv(
@@ -261,10 +224,6 @@ def send_to_server_fhe(
             k_max=k_max,
             secret_key=secret_key,
             n_rounds=n_rounds,          # ★ 작업 B
-            mask_mode=mask_mode,        # ★ Tier 1b ("per_stride"|"per_pass")
-            debug_snapshot_prefix=(
-                f"debug_lp_eps{eps:.4f}_min{int(min_pts)}_{mask_mode}"
-                if lp_snapshot else None),
         )
     else:
         print(f"  방식: ALL strides sweep  num_sweeps={num_sweeps}")
@@ -296,66 +255,3 @@ def send_to_server_fhe(
     debug_fhe["timings"] = timings
     _print_mem("send_to_server_fhe() 완료")
     return final_ct, debug_fhe
-
-
-
-
-#삭제용
-# dump_adjacency.py — Server_main.py의 Normalize 완료 직후 호출용
-# 사용법: Server_main.py에서 adj_k_list 트런케이트 직후에
-#   from dump_adjacency import dump_adjacency
-#   dump_adjacency(engine, secret_key, adj_k_list, N, k_max)
-# 를 한 줄 추가. (secret_key가 있는 디버그 경로에서만 동작)
-#
-# 출력: debug_adjacency_suspicious.csv
-#   - 모든 분수 항목 (0.02 < val < 0.98)
-#   - 모든 비영(>0.02) 항목의 (k, i, j=(i+k)%N, val)
-#   → 클라이언트에서 heap 순서·클래스와 대조하면 R1 오염원이 즉시 특정됨.
-
-import numpy as np
-
-
-def dump_adjacency(engine, secret_key, adj_k_list, N, k_max,
-                   out="debug_adjacency_suspicious.csv"):
-    if secret_key is None:
-        print("[dump_adjacency] secret_key 없음 — 건너뜀")
-        return
-    rows = []
-    nonzero_per_k = []
-    for k_idx, adj_ct in enumerate(adj_k_list):
-        k = k_idx + 1
-        vals = np.array(engine.decrypt(adj_ct, secret_key)).real[:N]
-        nz = int((vals > 0.02).sum())
-        frac = int(((vals > 0.02) & (vals < 0.98)).sum())
-        over = int((vals > 1.02).sum())
-        nonzero_per_k.append((k, nz, frac, over))
-        for i in np.where(vals > 0.02)[0]:
-            rows.append((k, int(i), int((i + k) % N), float(vals[i])))
-        # 음수/1 초과 등 비정상도 기록
-        for i in np.where((vals < -0.02) | (vals > 1.02))[0]:
-            rows.append((k, int(i), int((i + k) % N), float(vals[i])))
-
-    with open(out, "w", encoding="utf-8") as f:
-        f.write("k,slot_i,slot_j,adj_value\n")
-        for r in sorted(rows, key=lambda r: -abs(r[3] - round(r[3]))):
-            f.write(f"{r[0]},{r[1]},{r[2]},{r[3]:.6f}\n")
-
-    total_nz   = sum(x[1] for x in nonzero_per_k)
-    total_frac = sum(x[2] for x in nonzero_per_k)
-    total_over = sum(x[3] for x in nonzero_per_k)
-    print(f"[dump_adjacency] 비영 항목 {total_nz}개, "
-          f"분수(0.02~0.98) {total_frac}개, 1.02 초과 {total_over}개")
-    print(f"[dump_adjacency] 저장: {out}")
-
-    # 슬롯 합 (total_neighbors 재구성과 대조용)
-    sums = np.zeros(N)
-    for k_idx, adj_ct in enumerate(adj_k_list):
-        k = k_idx + 1
-        vals = np.array(engine.decrypt(adj_ct, secret_key)).real[:N]
-        sums += vals
-        if 2 * k < N:
-            sums += np.roll(vals, k)   # 대칭 카운트
-    np.savetxt("debug_adjacency_rowsums.csv",
-               np.column_stack([np.arange(N), sums]),
-               delimiter=",", header="slot,sum", comments="", fmt="%.6f")
-    print("[dump_adjacency] 슬롯별 합 저장: debug_adjacency_rowsums.csv")
