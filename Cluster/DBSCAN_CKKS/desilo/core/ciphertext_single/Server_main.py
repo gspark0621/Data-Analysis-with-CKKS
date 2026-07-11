@@ -68,6 +68,8 @@ def send_to_server_fhe(
     use_kd_propagation: bool = True,
     num_sweeps: int = None,
     n_rounds: int = None,             # ★ [2026-05c 작업 B] LP Core-Core 반복 횟수
+    enc_init_labels=None,             # ★ 신규: 클라이언트 초기 라벨 (None이면 서버 1..N)
+    init_label_max=None,              # ★ 신규: 초기 라벨 최대값 (label_scale 조정)
 ):
     """
     서버 메인 파이프라인.
@@ -224,6 +226,8 @@ def send_to_server_fhe(
             k_max=k_max,
             secret_key=secret_key,
             n_rounds=n_rounds,          # ★ 작업 B
+            enc_init_labels=enc_init_labels,   # ★ 신규
+            init_label_max=init_label_max,     # ★ 신규
         )
     else:
         print(f"  방식: ALL strides sweep  num_sweeps={num_sweeps}")

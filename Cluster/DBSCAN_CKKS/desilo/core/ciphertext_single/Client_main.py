@@ -52,6 +52,10 @@ def _gpu_used_mb() -> float:
 
 # ── Ball Tree DFS in-order 정렬 ───────────────────────────────────────────
 
+# ★ 초기 cluster label 방식: 'depth_asc'(사용자 8번) | 'baseline'(대조)
+_INIT_LABEL_SCHEME = 'depth_asc'
+
+
 def build_ball_tree_order(pts: np.ndarray) -> tuple:
     """
     Ball Tree를 DFS in-order 레이아웃으로 정렬.
@@ -76,12 +80,14 @@ def build_ball_tree_order(pts: np.ndarray) -> tuple:
     pts_arr = np.array(pts, dtype=np.float64)
     N       = len(pts_arr)
     order   = np.empty(N, dtype=int)
+    depth   = np.zeros(N, dtype=int)          # ★ heap 위치별 트리 깊이 (라벨 생성용)
 
-    def _build(indices: np.ndarray, start: int):
+    def _build(indices: np.ndarray, start: int, d: int):
         if len(indices) == 0:
             return
         if len(indices) == 1:
             order[start] = indices[0]
+            depth[start] = d
             return
 
         coords   = pts_arr[indices]
@@ -101,15 +107,16 @@ def build_ball_tree_order(pts: np.ndarray) -> tuple:
 
         mid = len(indices) // 2
         # DFS in-order: left | root | right  ← 모두 연속 범위에 배치
-        _build(indices[proj_order[:mid]],      start)             # left:  [start, start+mid-1]
-        order[start + mid] = indices[proj_order[mid]]             # root:  [start+mid]
-        _build(indices[proj_order[mid + 1:]], start + mid + 1)    # right: [start+mid+1, end]
+        _build(indices[proj_order[:mid]],      start,        d + 1)   # left
+        order[start + mid] = indices[proj_order[mid]]                 # root
+        depth[start + mid] = d                                        # ★ in-order root 깊이
+        _build(indices[proj_order[mid + 1:]], start + mid + 1, d + 1) # right
 
-    _build(np.arange(N), 0)
+    _build(np.arange(N), 0, 0)
 
     inv_perm        = np.empty(N, dtype=int)
     inv_perm[order] = np.arange(N)
-    return order, inv_perm
+    return order, inv_perm, depth          # ★ depth 추가 반환
 
 
 def compute_kmax_from_ball_structure(
@@ -184,10 +191,124 @@ def compute_kmax_from_ball_structure(
     return min(max(k_max, 1), N // 2)
 
 
+# ── 밀도 지표 + 초기 cluster label 생성 (client 측, ball-tree 1회 구축 재사용) ──
+
+def compute_density_and_mode(norm_pts, order, eps_norm, k_max, N, dim,
+                             min_pts):
+    """전파 그래프의 '지름'으로 mode/round 결정. client 평문 분석(서버엔 스칼라만).
+
+    ★ 핵심 발견 (hepta/lsun/tetra/two_moons/chain 2D·3D 측정):
+      수렴 round 는 밀도(이웃수)나 dim 이 아니라 **전파 그래프 지름**(클러스터를
+      가로지르는 최장 최단경로 hop)이 결정한다. 지름이 dim·밀도·모양 효과를 모두 흡수.
+      회귀: round ≈ 지름/3.8.  안전식: round = ceil(지름/4) + 2  (5개 데이터셋 전부 커버)
+        측정: hepta 지름6→2, lsun 11→2, tetra 8→2, two_moons 33→6, chain 71→20
+        예측: ceil(d/4)+2 = 4,5,4,11,20 (모두 실제 이상)
+
+    mode 구분: 지름이 너무 크면(전파 비현실적) all_sweep. 경계는 보수적으로 잡되,
+      kd_dense round 상한(예: 12)을 넘기면 all_sweep 권장.
+
+    Returns: mode('kd_dense'|'all_sweep'), n_rounds(int|None), diameter(int)
+    """
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import shortest_path
+
+    eps2 = eps_norm * eps_norm
+    P = norm_pts[order]                       # heap 순서
+    # core mask (전체 stride 이웃수 = pairwise)
+    D2 = ((P[:, None, :] - P[None, :, :]) ** 2).sum(2)
+    nbr = (D2 <= eps2).sum(1)                 # self 포함
+    core = (nbr >= min_pts)
+
+    # 전파 그래프(<=k_max, core-core) 간선
+    rows, cols = [], []
+    for k in range(1, k_max + 1):
+        for i in range(N):
+            j = (i + k) % N
+            if D2[i, j] <= eps2 and core[i] and core[j]:
+                rows += [i, j]; cols += [j, i]
+    if not rows:
+        return 'all_sweep', None, 0
+    G = csr_matrix(([1] * len(rows), (rows, cols)), shape=(N, N))
+
+    # 각 연결성분의 지름 (최장 최단경로 hop). core 노드 기준.
+    core_idx = np.where(core)[0]
+    sp = shortest_path(G, indices=core_idx, directed=False)[:, core_idx]
+    sp[np.isinf(sp)] = 0
+    diameter = int(sp.max())
+
+    # round = ceil(지름/4) + 2.  상한 넘으면 all_sweep.
+    ROUND_CAP = 12
+    n_rounds = int(np.ceil(diameter / 4.0) + 2)
+    if n_rounds > ROUND_CAP:
+        return 'all_sweep', None, diameter      # chain류: 전파 비현실적
+    return 'kd_dense', max(n_rounds, 2), diameter
+
+
+def build_initial_labels(depth, N, scheme='depth_asc'):
+    """초기 cluster label 생성 (heap 순서). client가 tree depth로 생성 → 암호화해 전송.
+
+    scheme:
+      'baseline'   : 1..N (heap 위치+1). 인접 slot 라벨차 1/N.
+      'depth_asc'  : depth 오름차순(루트→리프) 1..N 부여. 예 [4,2,5,1,6,3,7].
+                     인접 slot 라벨차 ≥ 2 → max 오차 강건 가설. 1..N 순열이라
+                     label_scale=1.1N 그대로 유효(init_label_max=N).
+
+    Returns: labels(heap순, 1..N), init_label_max(float)
+    """
+    if scheme == 'baseline':
+        return np.array([float(i + 1) for i in range(N)]), float(N)
+    if scheme == 'depth_asc':
+        od = np.lexsort((np.arange(N), depth))     # depth 우선, 같으면 heap 위치순
+        labels = np.empty(N, dtype=float)
+        labels[od] = np.arange(1, N + 1)
+        return labels, float(N)
+    raise ValueError(f"unknown scheme: {scheme}")
+
+
+def gap_decode_labels(heap_labels, N, tau=1.0):
+    """압축된 FHE 라벨을 gap 기반으로 디코딩 (τ=1 고정).
+
+    배경: FHE 전파 후 라벨은 클러스터별로 압축되어 좁은 띠를 이룸(예 138.16~138.83).
+      round()/floor() 같은 고정 정수 경계는 이 띠가 경계(x.5)를 관통하면 한 클러스터를
+      둘로 가름 (실측 LSUN: 138/139 분리 → ARI 0.97). 노이즈가 양/음 양방향이라
+      어떤 고정 경계도 본질적으로 취약.
+
+    해결: 절대 위치가 아니라 '이웃 값과의 거리(gap)'로 판정.
+      라벨을 오름차순 정렬한 뒤, 인접 값의 차이가 tau(=1)를 넘으면 클러스터 경계.
+      전제: FHE 오차로 인한 클러스터 내부폭 < 1 < 클러스터간 라벨 간격.
+        - 내부폭 < 1: depth_asc 라벨이 정수 단위라 같은 클러스터는 1 미만으로 압축됨
+          (실측 LSUN 내부 최대 gap 0.47, class간 최소 간격 2.0+).
+        - 한 클러스터 내 점이 1.0 이상 떨어지는 일은 압축이 연속 띠를 만들어 발생 안 함.
+
+    Parameters
+    ----------
+    heap_labels : np.ndarray  복호화된 라벨 (값만 사용, 순서 무관)
+    tau         : float       분리 임계. 인접 정렬값 차이가 tau 초과면 새 클러스터.
+                              FHE 오차 < 1 전제에서 tau=1.0이 자연값.
+
+    Returns
+    -------
+    cluster_ids : np.ndarray[int]  0,1,2,... 클러스터 ID, noise는 -1
+    """
+    lab = np.asarray(heap_labels, dtype=float)
+    out = np.full(len(lab), -1, dtype=int)
+    valid = np.where(lab > 0.5)[0]                  # 양의 라벨만 (0/음수=noise)
+    if len(valid) == 0:
+        return out
+    sv = valid[np.argsort(lab[valid])]              # 값 오름차순 인덱스
+    cur = 0
+    out[sv[0]] = cur
+    for a, b in zip(sv[:-1], sv[1:]):
+        if lab[b] - lab[a] > tau:                   # 인접 차이가 tau 초과 → 새 클러스터
+            cur += 1
+        out[b] = cur
+    return out
+
 # ── deprecated aliases ────────────────────────────────────────────────────
 
 def build_kd_tree_order(pts: np.ndarray) -> tuple:
-    """Deprecated alias → build_ball_tree_order (DFS in-order)."""
+    """Deprecated alias → build_ball_tree_order (DFS in-order).
+    주의: build_ball_tree_order는 (order, inv_perm, depth) 3개 반환."""
     return build_ball_tree_order(pts)
 
 
@@ -216,23 +337,31 @@ def prepare_client_ordering(
     #          작업 C 검증에서 min_pts=4 데이터들이 kd_dense로 수렴 확인.)
     threshold = _kd_dense_threshold(dim)  # 2 × dim (참고용 로그만)
 
+    # ── ball-tree 1회 구축: order, inv_perm, depth 동시 획득 ──
     t0 = time()
-    order, inv_perm = build_ball_tree_order(norm_pts)
+    order, inv_perm, depth = build_ball_tree_order(norm_pts)   # ★ depth 추가
     print(f"[Client] Ball Tree DFS 구축: {time()-t0:.3f}초")
 
     t1 = time()
     k_max = compute_kmax_from_ball_structure(norm_pts, order, eps_norm, N)
     print(f"[Client] k_max 구조 분석 (DFS): {time()-t1:.3f}초 (eps-이웃 조회 없음)")
-    print(f"[Client] k_max 상한={k_max}")
-    print(f"         T({k_max})={k_max*(k_max+1)//2}  안전값={N//2}")
-    if min_pts >= threshold:
-        print(f"[Client] 전파 방식: KD-dense "
-              f"(min_pts={min_pts} ≥ 2×dim={threshold}, Sander et al. 1998)")
+    print(f"[Client] k_max 상한={k_max}  T({k_max})={k_max*(k_max+1)//2}  안전값={N//2}")
+
+    # ── 밀도 기반 mode/round 결정 (client 평문 분석; 서버엔 스칼라만 전달) ──
+    mode, n_rounds, diameter = compute_density_and_mode(
+        norm_pts, order, eps_norm, k_max, N, dim, min_pts)
+    if mode == 'kd_dense':
+        print(f"[Client] 전파 방식: KD-dense  (전파그래프 지름={diameter}) "
+              f"→ n_rounds=⌈{diameter}/4⌉+2={n_rounds}")
     else:
-        print(f"[Client] 전파 방식: KD-dense (통일) "
-              f"— min_pts={min_pts} < 2×dim={threshold} 이지만 sweep 폐기, "
-              f"작업 A+B로 kd_dense가 희소 데이터도 커버")
-    return 'kd_dense', k_max, order, inv_perm
+        print(f"[Client] 전파 방식: all-sweep (지름={diameter} 과대 → num_sweeps=k_max)")
+
+    # ── 초기 cluster label 생성 (heap 순서, depth 기반) ──
+    init_labels_heap, init_label_max = build_initial_labels(depth, N, scheme=_INIT_LABEL_SCHEME)
+    print(f"[Client] 초기 라벨 scheme='{_INIT_LABEL_SCHEME}' "
+          f"범위[{init_labels_heap.min():.0f},{init_labels_heap.max():.0f}] max={init_label_max:.0f}")
+
+    return mode, k_max, order, inv_perm, n_rounds, init_labels_heap, init_label_max
 
 
 # ── 전파 방식 결정 ─────────────────────────────────────────────────────────
@@ -320,29 +449,42 @@ def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
     ne     = eps / scale
     print(f"[Client] N={N}, dim={dim}, eps_norm={ne:.4f}")
 
-    # 2. Ball Tree DFS 정렬 + k_max 구조 분석 (prepare_client_ordering 통합 사용)
-    mode, k_max, heap_idx, inv_perm = prepare_client_ordering(norm, ne, min_pts, N, dim)
+    # 2. Ball Tree DFS 정렬 + k_max 구조 분석 + 밀도/지름 기반 mode·round + 초기라벨
+    #    ★ prepare_client_ordering은 7개 반환 (test 하니스와 동일 인터페이스)
+    (mode, k_max, heap_idx, inv_perm,
+     n_rounds_client, init_labels_heap, init_label_max) = prepare_client_ordering(
+        norm, ne, min_pts, N, dim)
 
+    # ★ kd_dense / all_sweep 모두 heap 정렬 데이터 사용 (전파 방식만 다름)
+    data_for_enc = norm[heap_idx].tolist()
     if mode == 'kd_dense':
-        data_for_enc = norm[heap_idx].tolist()
         T_kmax = k_max * (k_max + 1) // 2
-        print(f"[Client] Heap(DFS in-order) 정렬 완료  k_max={k_max}, T({k_max})={T_kmax}")
+        print(f"[Client] Heap(DFS in-order) 정렬 완료  k_max={k_max}, "
+              f"T({k_max})={T_kmax}, n_rounds={n_rounds_client}")
     else:
-        data_for_enc = norm.tolist()
-        print(f"[Client] 정렬 없음 (sweep 방식)")
+        print(f"[Client] all_sweep 방식 (num_sweeps={k_max})")
 
     # 3. 암호화 → 서버
     encryptor = DimensionalEncryptor(engine, keypack)
     enc_cols  = encryptor.encrypt_data(data_for_enc, dim)
 
+    # ★ 초기 cluster label 암호화 (client depth 생성, heap 순서)
+    slot_count = engine.slot_count
+    enc_init_labels = engine.encrypt(
+        init_labels_heap.tolist() + [0.0] * (slot_count - N),
+        keypack.public_key,
+    )
+
     enc_result, _ = send_to_server(
         engine=engine, keypack=keypack, secret_key=secret_key,
         encrypted_columns=enc_cols,
         num_points=N, eps=ne, min_pts=min_pts,
-        k_max=k_max,                           # 클라이언트 구조 분석 상한 전달
+        k_max=k_max,                                # 클라이언트 구조 분석 상한 전달
         use_kd_propagation=(mode == 'kd_dense'),
-        num_sweeps=k_max if mode == 'sweep' else None, # sweep일 때만 사용
-        n_rounds=math.ceil(math.log2(N)),      # ★ [2026-05c 작업 B] log₂N round
+        num_sweeps=k_max if mode == 'all_sweep' else None,  # ★ 'all_sweep' (오타 수정)
+        n_rounds=n_rounds_client,                   # ★ 지름 기반 (log₂N 하드코딩 폐기)
+        enc_init_labels=enc_init_labels,            # ★ depth_asc 초기라벨 전달
+        init_label_max=init_label_max,              # ★ label_scale 조정
     )
 
     # 4. 복호화 + 역순열
@@ -354,12 +496,9 @@ def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
     # original_labels[j] = heap_labels[inv_perm[j]]
     orig_labels = heap_labels[inv_perm]
 
-    cluster_labels = []
-    for x in orig_labels:
-        r = round(float(x))
-        if r <= 0:      cluster_labels.append(-1)
-        elif r > N:     cluster_labels.append(N)
-        else:           cluster_labels.append(r)
+    # ★ gap 기반 디코딩 (데이터 적응형 τ). round()는 압축된 라벨 띠가 정수 경계를
+    #   관통할 때 한 클러스터를 둘로 가름 (실측 LSUN ARI 0.97 → gap으로 1.0).
+    cluster_labels = gap_decode_labels(orig_labels, N).tolist()
 
     n_c = len(set(l for l in cluster_labels if l != -1))
     print(f"[Client] 완료! 클러스터 {n_c}개 (노이즈: {cluster_labels.count(-1)}개)")

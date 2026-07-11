@@ -77,6 +77,13 @@ _LABEL_MIN_LEVEL = 7
 #   post-max ×core_mask는 어느 쪽이든 제거됨).
 _HOIST_ADJ_MASKS = True
 
+# ★ [Phase1d/메모리] adjm 캐시 최대 개수 (GPU 메모리 상한).
+#   None = 전체(k_max) 캐시. 정수 M = stride k=1..M만 캐시, 나머지는 즉석 계산.
+#   sign_bootstrap 작업 메모리를 위해 캐시가 GPU를 다 채우지 않도록 제한.
+#   LSUN(N=400, k_max=199)에서 199개 캐시 후 sign_bootstrap OOM → 줄여서 사용.
+#   권장 시작값: hepta에서 통과한 105 근방. 더 줄여야 하면 64, 32, 0 순으로.
+_MAX_CACHED_ADJM = 105
+
 _mcp_label_components = None
 
 # ★ [Phase1-③] 라벨 lineage refresh 횟수 카운터 (감사용)
@@ -281,24 +288,25 @@ def _build_adjm_border_pair(engine, keypack, adj_k, non_core_ct, core_mask_ct, k
 
 
 def _build_adjm_cache(engine, keypack, adj_k_half_list, dest_mask_ct,
-                      core_mask_ct, k_max, N, tag=""):
-    """k=1..k_max의 adjm_fwd만 사전계산 (bwd는 사용 시 shift로 유도).
-    메모리 ≈ k_max ciphertext (이전 2×k_max에서 절반).
-    GPU OOM 발생 시 None 반환 → 즉석 계산 모드로 자동 폴백."""
-    print(f"[KD-LP] {tag} adjm 사전계산: {k_max} ciphertext "
-          f"(fwd만 저장, bwd=shift(fwd) 유도 / 라운드 불변 호이스팅)")
-    cache = []
+                      core_mask_ct, k_max, N, tag="", max_cached=None):
+    """k=1..min(k_max, max_cached)의 adjm_fwd만 사전계산.
+    반환: dict {k: adjm_fwd}. 캐시 안 된 k는 사용 시 즉석 계산.
+    (메모리 상한: sign_bootstrap 작업 공간 확보용. bwd는 shift로 유도.)
+    GPU OOM 발생 시 거기까지만 캐시하고 부분 dict 반환 (나머지 즉석)."""
+    limit = k_max if max_cached is None else min(k_max, max_cached)
+    print(f"[KD-LP] {tag} adjm 사전계산: {limit}/{k_max} ciphertext "
+          f"(fwd만 저장, bwd=shift(fwd) 유도; k>{limit}은 즉석 계산)")
+    cache = {}
     try:
-        for k in range(1, k_max + 1):
-            cache.append(_build_adjm_fwd(
+        for k in range(1, limit + 1):
+            cache[k] = _build_adjm_fwd(
                 engine, keypack, adj_k_half_list[k - 1],
-                dest_mask_ct, core_mask_ct, k, N))
+                dest_mask_ct, core_mask_ct, k, N)
     except RuntimeError as e:
         if "out of memory" in str(e).lower():
-            print(f"[KD-LP] ⚠ adjm 캐시 중 GPU OOM (k={len(cache)+1}/{k_max}) "
-                  f"→ 캐시 해제, 즉석 계산 모드로 폴백")
-            cache.clear()
-            return None
+            print(f"[KD-LP] ⚠ adjm 캐시 중 GPU OOM (k={len(cache)+1}/{limit}) "
+                  f"→ {len(cache)}개까지만 캐시, 나머지 즉석 계산")
+            return cache if cache else None
         raise
     return cache
 
@@ -320,8 +328,8 @@ def _propagate_one_stride_core(
     """
     relin_key = keypack.relinearization_key
 
-    if adjm_cache is not None:
-        adjm_fwd = adjm_cache[k - 1]
+    if adjm_cache is not None and k in adjm_cache:
+        adjm_fwd = adjm_cache[k]
     else:
         adjm_fwd = _build_adjm_fwd(
             engine, keypack, adj_k_half_list[k - 1],
@@ -405,6 +413,8 @@ def fhe_kd_dense_propagation(
     k_max: int,
     secret_key=None,
     n_rounds: int = 1,
+    enc_init_labels=None,        # ★ 신규: 클라이언트 초기 라벨 (None이면 서버 1..N)
+    init_label_max=None,         # ★ 신규: 초기 라벨 최대값 (label_scale 조정)
 ) -> Ciphertext:
     """KD-tree ordering + dense stride k=1..k_max 라벨 전파.
 
@@ -421,7 +431,8 @@ def fhe_kd_dense_propagation(
     k_max = min(k_max, N // 2)
     T_kmax = k_max * (k_max + 1) // 2
 
-    label_scale = _SCALE_INSET * float(N)      # ★ [Phase1-④] 인셋
+    _eff_max = float(N) if init_label_max is None else float(init_label_max)
+    label_scale = _SCALE_INSET * _eff_max      # ★ [Phase1-④] 인셋 (init_label_max로 sgn포화 방지)
     slot_count  = engine.slot_count
 
     print(f"\n[KD-LP] ══════════════════════════════════════════")
@@ -447,10 +458,17 @@ def fhe_kd_dense_propagation(
                                 n_iters=1, slot_count=slot_count,
                                 ensure_output_level=False)
 
-    id_enc = engine.encode(
-        [float(i + 1) for i in range(N)] + [0.0] * (slot_count - N))
-    core_labels_ct = _refresh(engine,
-        engine.multiply(core_mask_ct, id_enc), keypack)
+    if enc_init_labels is None:
+        id_enc = engine.encode(
+            [float(i + 1) for i in range(N)] + [0.0] * (slot_count - N))
+        core_labels_ct = _refresh(engine,
+            engine.multiply(core_mask_ct, id_enc), keypack)
+    else:
+        # ★ 클라이언트 제공 초기 라벨 (암호문) × core_mask
+        #   ct×ct 곱이므로 relinearization_key 필수 (3-poly→2-poly).
+        core_labels_ct = _refresh(engine,
+            engine.multiply(core_mask_ct, enc_init_labels,
+                            keypack.relinearization_key), keypack)
 
     _dbg(engine, secret_key, core_labels_ct, "초기 core_labels", N)
 
@@ -459,7 +477,8 @@ def fhe_kd_dense_propagation(
     if _HOIST_ADJ_MASKS:
         adjm_cache = _build_adjm_cache(
             engine, keypack, adj_k_half_list, core_mask_ct,
-            core_mask_ct, k_max, N, tag="Core-Core")
+            core_mask_ct, k_max, N, tag="Core-Core",
+            max_cached=_MAX_CACHED_ADJM)
 
     passes = [
         ("forward",  list(range(1, k_max + 1))),
@@ -542,10 +561,17 @@ def fhe_sweep_propagation(
                                 n_iters=1, slot_count=slot_count,
                                 ensure_output_level=False)
 
-    id_enc = engine.encode(
-        [float(i + 1) for i in range(N)] + [0.0] * (slot_count - N))
-    core_labels_ct = _refresh(engine,
-        engine.multiply(core_mask_ct, id_enc), keypack)
+    if enc_init_labels is None:
+        id_enc = engine.encode(
+            [float(i + 1) for i in range(N)] + [0.0] * (slot_count - N))
+        core_labels_ct = _refresh(engine,
+            engine.multiply(core_mask_ct, id_enc), keypack)
+    else:
+        # ★ 클라이언트 제공 초기 라벨 (암호문) × core_mask
+        #   ct×ct 곱이므로 relinearization_key 필수 (3-poly→2-poly).
+        core_labels_ct = _refresh(engine,
+            engine.multiply(core_mask_ct, enc_init_labels,
+                            keypack.relinearization_key), keypack)
 
     _dbg(engine, secret_key, core_labels_ct, "초기 core_labels", N)
 
@@ -553,7 +579,8 @@ def fhe_sweep_propagation(
     if _HOIST_ADJ_MASKS:
         adjm_cache = _build_adjm_cache(
             engine, keypack, adj_k_half_list, core_mask_ct,
-            core_mask_ct, N_half, N, tag="sweep Core-Core")
+            core_mask_ct, N_half, N, tag="sweep Core-Core",
+            max_cached=_MAX_CACHED_ADJM)
 
     for sweep in range(num_sweeps):
         print(f"[LP-sweep] P1 Sweep {sweep+1}/{num_sweeps}")

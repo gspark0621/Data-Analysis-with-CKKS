@@ -50,11 +50,15 @@ python: 3.12.10
     - eps: 1.8
     - minpts: 8
     - 결과: 군집 10개/정답: 7개(ARI 66.06점)
-2. seeds(210개)
+3. seeds(210개)
     - max_iter: 3
     - eps: 2.6
     - minpts: 3
     - 결과: 군집 3개/정답: 3개(ARI 80.39점)
+4. target(770개)
+    - eps: 0.455
+    - minpts: 4
+    - 결과: 군집 2개(ARI 100점)
 
 ### TODO
 1. scaling factor를 이용하여 Normalize.py와 Core.py에서 근사함수 input의 원하는 범위로 scaling

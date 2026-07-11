@@ -44,6 +44,7 @@ from core.ciphertext_single.Client_main import (
     prepare_client_ordering,     # ★ Ball Tree + k_max 구조 분석 통합
     build_ball_tree_order,       # 개별 접근 (디버그용)
     compute_kmax_from_ball_structure,  # 개별 접근 (디버그용)
+    gap_decode_labels,           # ★ gap(>τ) 기반 라벨 복원 (round() 대체, 프로덕션 경로와 동일)
 )
 from core.ciphertext_single.Server_main import send_to_server_fhe
 from core.ex.plaintext.Server_main import send_to_server_np
@@ -60,7 +61,7 @@ from core.ciphertext_single.minimax import (
 # ─────────────────────────────────────────────────────────────────────────
 _MCP_ALPHA15_CHEB_PATH = "mcp_alpha15_lp_cheb.json"   # Normalize/Core/LP 공유
 
-DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/hepta.arff"
+DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/DBSCAN/target.arff"
 
 
 # ── MCP 파일 준비 ─────────────────────────────────────────────────────────
@@ -205,19 +206,20 @@ def main():
 
     # ── Step 3+4: Ball Tree 정렬 + k_max 구조 분석 (eps-이웃 조회 없음) ──
     print("\n[Ball Tree] BFS level-order 정렬 + k_max 구조 분석...")
-    mode, k_max, heap_idx, inv_perm = prepare_client_ordering(
+    (mode, k_max, heap_idx, inv_perm,
+     n_rounds_client, init_labels_heap, init_label_max) = prepare_client_ordering(
         normalized_pts, normalized_eps, int(min_pts_val), N, dimension  # ← dim 추가
     )
 
+    # ★ kd_dense / all_sweep 모두 heap 정렬 데이터 사용 (전파 방식만 다름)
+    ball_sorted_pts = normalized_pts[heap_idx]
+    save_heap_order_csv(f"debug_heap_order_N{N}.csv", heap_idx, inv_perm, N)
+    T_kmax = k_max * (k_max + 1) // 2
     if mode == 'kd_dense':
-        ball_sorted_pts = normalized_pts[heap_idx]
-        save_heap_order_csv(f"debug_heap_order_N{N}.csv", heap_idx, inv_perm, N)
-        T_kmax = k_max * (k_max + 1) // 2
-        print(f"  → k_max={k_max}  T({k_max})={T_kmax}  "
-            f"{'✓ ≥' if T_kmax >= N else '⚠ <'} N={N}")
+        print(f"  → kd_dense  k_max={k_max}  T({k_max})={T_kmax}  "
+              f"{'✓ ≥' if T_kmax >= N else '⚠ <'} N={N}  n_rounds={n_rounds_client}")
     else:
-        ball_sorted_pts = normalized_pts
-        print(f"  → sweep 방식 (num_sweeps={k_max})")
+        print(f"  → all_sweep (num_sweeps={k_max})  k_max={k_max}")
 
 
     # ── Step 5: 평문 DBSCAN (원래 순서 기준, 비교 기준) ──────────
@@ -253,6 +255,12 @@ def main():
     encrypted_columns = encryptor.encrypt_data(ball_sorted_pts.tolist(), dimension)
     _mem_delta(f"encrypt_data Ball-sorted ({dimension}개)", before)
 
+    # ★ 초기 cluster label 암호화 (client depth 생성, heap 순서)
+    enc_init_labels = engine.encrypt(
+        init_labels_heap.tolist() + [0.0] * (slot_count - N),
+        keypack.public_key,
+    )
+
     # 서버 연산 (Phase 1: Normalize+Core+enc_sum_k, Phase 2: Label Prop)
     # 서버가 enc_sum_k 계산 후 k_max 자동 정밀화
     before = _gpu_used_mb()
@@ -265,8 +273,10 @@ def main():
         num_points=N, eps=normalized_eps, min_pts=float(min_pts_val),
         k_max=k_max,                                        # Ball Tree 구조 분석 최종값
         use_kd_propagation=(mode == 'kd_dense'),
-        num_sweeps=k_max if mode == 'sweep' else None,      # sweep dead path
-        n_rounds=math.ceil(math.log2(N)),                   # ★ 작업 B: log₂N round
+        num_sweeps=k_max if mode == 'all_sweep' else None,  # ★ all_sweep 경로
+        n_rounds=n_rounds_client,           # ★ client 밀도기반 결정
+        enc_init_labels=enc_init_labels,    # ★ client depth 초기라벨
+        init_label_max=init_label_max,      # ★ label_scale 조정 (depth_asc는 =N)
     )
     
     print(f"\n[k_max] {k_max}  (Ball Tree DFS 구조 분석 최종값, 서버 재계산 없음)")
@@ -282,12 +292,12 @@ def main():
     heap_labels_raw    = decrypted_heap[:N]
     original_labels_raw = heap_labels_raw[inv_perm]
 
-    cluster_labels_fhe = []
-    for x in original_labels_raw:
-        r = int(np.round(x))
-        if r <= 0:  cluster_labels_fhe.append(-1)
-        elif r > N: cluster_labels_fhe.append(N)
-        else:       cluster_labels_fhe.append(r)
+    # ★ gap 기반 디코딩 (round() 대체). Client_main.run_client_dbscan_fhe와 동일 경로.
+    #   round()는 압축된 라벨 띠가 정수 경계(x.5)를 관통할 때 한 클러스터를 둘로 가름
+    #   (실측 target: True_Class 2가 138/139 밴드로 분할 → 4클러스터 → ARI 97.15).
+    #   gap_decode: 라벨 오름차순 정렬 후 인접 차이 > τ(=1)인 곳만 클러스터 경계.
+    #   → 138/139 내부 gap<1이면 하나로 병합. noise(≤0.5)는 -1.
+    cluster_labels_fhe = gap_decode_labels(original_labels_raw, N).tolist()
 
     fhe_elapsed = time() - fhe_start
     print(f"▶ FHE: {fhe_elapsed:.2f}초\n")
