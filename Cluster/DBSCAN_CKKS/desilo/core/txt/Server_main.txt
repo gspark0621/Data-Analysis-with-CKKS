@@ -67,6 +67,7 @@ def send_to_server_fhe(
     k_max: int,                       # 클라이언트 Ball Tree 구조 분석 결과 (필수)
     use_kd_propagation: bool = True,
     num_sweeps: int = None,
+    n_rounds: int = None,             # ★ [2026-05c 작업 B] LP Core-Core 반복 횟수
 ):
     """
     서버 메인 파이프라인.
@@ -78,15 +79,30 @@ def send_to_server_fhe(
         서버는 이 값을 그대로 사용하며 재계산하지 않음.
         T(k_max) = k_max*(k_max+1)//2 ≥ N → kd_dense 수렴 보장.
     use_kd_propagation : bool
-        True  → fhe_kd_dense_propagation  (min_pts ≥ 2×dim)
-        False → fhe_sweep_propagation     (min_pts < 2×dim, 희소 chain형 fallback)
+        ★ [2026-05c] 기본 True (kd_dense 통일 권장).
+        all-sweep은 mask damping이 누적 곱셈으로 라벨을 0으로 소멸시켜
+        iris 등에서 -1 완전 붕괴 발생 (실측). 작업 A로 mask=1.0 확보 +
+        작업 B로 적응적 round 사용 시 kd_dense가 모든 경우를 커버하므로
+        sweep은 deprecated 예정. (호환 위해 인자는 유지.)
     num_sweeps : int
-        sweep 방식 사용 시 sweep 횟수. None이면 ceil(log2(N)).
+        [deprecated] sweep 방식 잔존 시에만 사용.
+    n_rounds : int
+        ★ [2026-05c 작업 B] kd_dense의 Core-Core 전파 반복 횟수.
+        None이면 ⌈log₂N⌉ (검증: 2*log₂N pass가 ARI>=0.9 커버).
+        작업 A(mask=1.0)가 안전망이라 과대 추정해도 라벨 안 죽음.
     """
     dim  = len(encrypted_columns)
     N    = num_points
     if num_sweeps is None:
         num_sweeps = math.ceil(math.log2(N))
+    if n_rounds is None:
+        # ★ [2026-07] log₂N 폐기 → 고정 32.
+        #   log₂N은 수렴 보장이 아니었음 (실측: chainlink log₂1000=10 < R=12,
+        #   target log₂770=10 < R=11 → under-merge 오답).
+        #   R = Θ(graph diameter) 이고 diameter를 O(N log N)에 잡는 것은
+        #   연결성분 계산 = DBSCAN 자체 → 자기모순. 따라서 n_rounds는 파라미터.
+        #   32 = 대상 7개 데이터셋 실측 최대 R(=31, chainlink) 의 2의 거듭제곱 올림.
+        n_rounds = 32
 
     T_kmax = k_max * (k_max + 1) // 2
 
@@ -159,9 +175,11 @@ def send_to_server_fhe(
     )
 
     # adj_k_list 트런케이트: k_max 초과분은 LP에서 불필요 (메모리 절약)
-    if len(adj_k_list) > k_max:
+    if use_kd_propagation and len(adj_k_list) > k_max:
         adj_k_list = adj_k_list[:k_max]
         print(f"  adj_k_list 트런케이트: → {k_max}개 (k_max 이내로 제한)")
+    elif not use_kd_propagation:
+        print(f"  adj_k_list 유지: {len(adj_k_list)}개 (sweep 모드는 전체 stride 사용)")
 
     debug_fhe["k_max_used"] = k_max
 
@@ -200,9 +218,9 @@ def send_to_server_fhe(
     lp_start  = time()
 
     if use_kd_propagation:
-        print(f"  방식: KD-dense  k=1..{k_max}")
+        print(f"  방식: KD-dense  k=1..{k_max}, n_rounds={n_rounds} (★ 작업 B)")
         print(f"  T({k_max})={T_kmax} {'≥' if T_kmax >= N else '<'} N={N}  "
-              f"(fhe_max≈{2*2*k_max*2}회)")
+              f"(fhe_max≈{(2*n_rounds+2)*k_max*2}회)")
 
         final_ct = fhe_kd_dense_propagation(
             engine, keypack,
@@ -211,6 +229,7 @@ def send_to_server_fhe(
             num_points=N,
             k_max=k_max,
             secret_key=secret_key,
+            n_rounds=n_rounds,          # ★ 작업 B
         )
     else:
         print(f"  방식: ALL strides sweep  num_sweeps={num_sweeps}")

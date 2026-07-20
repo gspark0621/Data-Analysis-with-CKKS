@@ -44,6 +44,8 @@ from core.ciphertext_single.Client_main import (
     prepare_client_ordering,     # ★ Ball Tree + k_max 구조 분석 통합
     build_ball_tree_order,       # 개별 접근 (디버그용)
     compute_kmax_from_ball_structure,  # 개별 접근 (디버그용)
+    assign_clusters_by_gap,      # ★ [2026-07] 간격 기반 클러스터 판정
+    _N_ROUNDS,                   # ★ [2026-07] 고정 n_rounds
 )
 from core.ciphertext_single.Server_main import send_to_server_fhe
 from core.ex.plaintext.Server_main import send_to_server_np
@@ -60,7 +62,7 @@ from core.ciphertext_single.minimax import (
 # ─────────────────────────────────────────────────────────────────────────
 _MCP_ALPHA15_CHEB_PATH = "mcp_alpha15_lp_cheb.json"   # Normalize/Core/LP 공유
 
-DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/hepta.arff"
+DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/tetra.arff"
 
 
 # ── MCP 파일 준비 ─────────────────────────────────────────────────────────
@@ -229,12 +231,9 @@ def main():
         encrypted_columns=columns_np, num_points=N,
         eps=normalized_eps, min_pts=float(min_pts_val), dimension=dimension
     )
-    cluster_labels_np = []
-    for x in np_final_labels[:N]:
-        r = round(x)
-        if r <= 0:  cluster_labels_np.append(-1)
-        elif r > N: cluster_labels_np.append(N)
-        else:       cluster_labels_np.append(r)
+    # ★ [2026-07] 간격 기반 판정 (정수 반올림 대체) — Client_main 과 동일 경로
+    print("[평문]", end=" ")
+    cluster_labels_np = assign_clusters_by_gap(np.asarray(np_final_labels[:N]), N)
     print(f"▶ Plaintext: {time()-pt_start:.2f}초\n")
 
     # ── Step 6: FHE DBSCAN (Heap 정렬 데이터) ────────────────────
@@ -266,7 +265,7 @@ def main():
         k_max=k_max,                                        # Ball Tree 구조 분석 최종값
         use_kd_propagation=(mode == 'kd_dense'),
         num_sweeps=k_max if mode == 'sweep' else None,      # sweep dead path
-        n_rounds=math.ceil(math.log2(N)),                   # ★ 작업 B: log₂N round
+        n_rounds=_N_ROUNDS,                                 # ★ [2026-07] Client_main._N_ROUNDS 사용
     )
     
     print(f"\n[k_max] {k_max}  (Ball Tree DFS 구조 분석 최종값, 서버 재계산 없음)")
@@ -282,12 +281,9 @@ def main():
     heap_labels_raw    = decrypted_heap[:N]
     original_labels_raw = heap_labels_raw[inv_perm]
 
-    cluster_labels_fhe = []
-    for x in original_labels_raw:
-        r = int(np.round(x))
-        if r <= 0:  cluster_labels_fhe.append(-1)
-        elif r > N: cluster_labels_fhe.append(N)
-        else:       cluster_labels_fhe.append(r)
+    # ★ [2026-07] 간격 기반 판정 (정수 반올림 대체)
+    print("[FHE]", end=" ")
+    cluster_labels_fhe = assign_clusters_by_gap(original_labels_raw, N)
 
     fhe_elapsed = time() - fhe_start
     print(f"▶ FHE: {fhe_elapsed:.2f}초\n")

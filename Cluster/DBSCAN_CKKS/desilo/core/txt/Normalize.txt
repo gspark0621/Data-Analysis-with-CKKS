@@ -1,13 +1,18 @@
 # core/ciphertext_single/Normalize.py
 #
+# [2026-05c 작업 A] 마지막 일반 bootstrap → bit_cleaning 교체
+#   adj_k가 Server에서 합산되므로 noise 누적이 N(밀도)에 비례 → 빅데이터 ARI 위험.
+#   bit_cleaning으로 이웃당 결손 0.00161 → 7.8e-6 (200배↓).
+#
 # [2026-05 수정] Chebyshev basis BSGS (Bossuat Algorithm 1) + α=15 통일
 #
 # 변경 이력:
 #   이전:    mcp_alpha12.json           (α=12, odd power basis)
 #            from bsgs_poly import eval_mcp_full
 #   2026-05a: mcp_alpha12_cheb.json     (α=12, odd Chebyshev basis)
-#   2026-05b 현재: mcp_alpha15_lp_cheb.json  (α=15, Normalize/Core/LP 공유)
+#   2026-05b: mcp_alpha15_lp_cheb.json  (α=15, Normalize/Core/LP 공유)
 #            from bsgs_chebyshev import eval_mcp_full_chebyshev
+#   2026-05c 현재: + bit_cleaning (일반 bootstrap 대체)
 #
 # α=15 통일 이유 (옵션 B: 전부 α=15):
 #   - α=12 worst case 영역 (|scaled_x| < τ = 2.4e-4) 안전성 미확인.
@@ -28,7 +33,11 @@ import math
 from desilofhe import Engine
 from util.keypack import KeyPack
 from core.ciphertext_single.minimax import load_mcp
-from desilo.core.ciphertext_single.chebyshev_eval import eval_mcp_full_chebyshev
+from core.ciphertext_single.chebyshev_eval import eval_mcp_full_chebyshev
+from core.ciphertext_single.cleaning import bit_cleaning   # ★ [2026-05c] 작업 A
+
+# ★ [2026-05c 작업 A] cleaning 반복 횟수 (Core와 동일 정책).
+_CLEANING_ITERS = 1
 
 
 def check_neighbor_closed_interval(
@@ -113,5 +122,25 @@ def check_neighbor_closed_interval(
     c05_pt = engine.encode([ 0.5] * slot_count)
     result = engine.add(engine.multiply(current_x, m05_pt), c05_pt)
 
-    result = engine.intt(result)
-    return engine.bootstrap(result, relin_key, conj_key, boot_key)
+    # ── ★ [2026-05c 작업 A] 마지막 일반 bootstrap → bit_cleaning 교체 ──
+    #
+    #   [문제] Core와 동일. sign_bootstrap 직후 깨끗한 adj_k를
+    #     일반 bootstrap이 noise 주입(0.99839)으로 악화시킴.
+    #     adj_k는 Server에서 total_neighbors로 *합산*되므로, 이웃 1개당 0.00161
+    #     결손이 점의 이웃수 d에 비례해 누적 (d=500이면 0.8 bias → minPts 경계 오판).
+    #     N이 큰 빅데이터에서 ARI 저하 위험.
+    #
+    #   [해결] {0,1} 도메인 bit_cleaning. 이웃당 결손 0.00161 → 7.8e-6 (200배↓).
+    #     d=500이어도 누적 0.0039 → 무시 가능.
+    #
+    #   [레벨 자동 처리 ★]
+    #     bit_cleaning 내부가 ciphertext.level 확인 → 부족 시 _refresh.
+    #     (iter 진입 전 level<2, 완료 후 level<3 일 때 자동 bootstrap.)
+    #     adj_k는 Server에서 합산(add)/회전(rotate)에 쓰이고(레벨 소비 無),
+    #     LP 곱셈 전 _refresh되므로 이중 안전.
+    print(f"  - [Normalize] bit_cleaning (n_iters={_CLEANING_ITERS}, 일반 bootstrap 대체)...")
+    result = bit_cleaning(
+        engine, result, keypack,
+        n_iters=_CLEANING_ITERS, slot_count=slot_count,
+    )
+    return result

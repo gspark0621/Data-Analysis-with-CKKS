@@ -22,6 +22,14 @@
 #   - 단일 파일 mcp_alpha15_lp_cheb.json 만 자동 생성 (Normalize/Core/LP 공유).
 #   - 이유: Core α=12 worst case 안전성 미확인 → α=15에서 77τ 마진 확보.
 #           Chebyshev basis는 high-deg coefficient 폭발 회피.
+#
+# [변경 6, 2026-05c] 정확도 버그 수정 통합
+#   - 작업 A: Core/Normalize 마지막 일반 bootstrap → bit_cleaning (mask noise 제거)
+#     + LP의 core_mask _refresh 직후 bit_cleaning 추가 (0.714 감쇠 버그 수정)
+#   - 작업 B: LP에 n_rounds=⌈log₂N⌉ 적응적 round (test에서 명시 전달)
+#   - 작업 C: verify_convergence.py (FHE 불필요 평문 수렴 검증, 별도 도구)
+#   - sgn 정밀화: fhe_sgn에 sign_cleaning 추가 (fhe_max 라벨 단조하강 수정)
+#   - sweep 폐기 → kd_dense 통일 (prepare_client_ordering 항상 'kd_dense' 반환)
 # ────────────────────────────────────────────────────────────────────────────
 
 import os
@@ -36,6 +44,8 @@ from core.ciphertext_single.Client_main import (
     prepare_client_ordering,     # ★ Ball Tree + k_max 구조 분석 통합
     build_ball_tree_order,       # 개별 접근 (디버그용)
     compute_kmax_from_ball_structure,  # 개별 접근 (디버그용)
+    assign_clusters_by_gap,      # ★ [2026-07] 간격 기반 클러스터 판정
+    _N_ROUNDS,                   # ★ [2026-07] 고정 n_rounds
 )
 from core.ciphertext_single.Server_main import send_to_server_fhe
 from core.ex.plaintext.Server_main import send_to_server_np
@@ -52,7 +62,7 @@ from core.ciphertext_single.minimax import (
 # ─────────────────────────────────────────────────────────────────────────
 _MCP_ALPHA15_CHEB_PATH = "mcp_alpha15_lp_cheb.json"   # Normalize/Core/LP 공유
 
-DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/hepta.arff"
+DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/tetra.arff"
 
 
 # ── MCP 파일 준비 ─────────────────────────────────────────────────────────
@@ -221,12 +231,9 @@ def main():
         encrypted_columns=columns_np, num_points=N,
         eps=normalized_eps, min_pts=float(min_pts_val), dimension=dimension
     )
-    cluster_labels_np = []
-    for x in np_final_labels[:N]:
-        r = round(x)
-        if r <= 0:  cluster_labels_np.append(-1)
-        elif r > N: cluster_labels_np.append(N)
-        else:       cluster_labels_np.append(r)
+    # ★ [2026-07] 간격 기반 판정 (정수 반올림 대체) — Client_main 과 동일 경로
+    print("[평문]", end=" ")
+    cluster_labels_np = assign_clusters_by_gap(np.asarray(np_final_labels[:N]), N)
     print(f"▶ Plaintext: {time()-pt_start:.2f}초\n")
 
     # ── Step 6: FHE DBSCAN (Heap 정렬 데이터) ────────────────────
@@ -248,13 +255,17 @@ def main():
     # 서버 연산 (Phase 1: Normalize+Core+enc_sum_k, Phase 2: Label Prop)
     # 서버가 enc_sum_k 계산 후 k_max 자동 정밀화
     before = _gpu_used_mb()
+    # ★ [2026-05c] kd_dense 통일: prepare_client_ordering이 항상 'kd_dense' 반환
+    #   → use_kd_propagation=True 고정. num_sweeps는 dead path지만 호환 위해 인자 유지.
+    # ★ [2026-05c 작업 B] n_rounds 명시: log₂N (Server가 None시 동일 처리하나 명시성)
     fhe_final_ct, debug_fhe = send_to_server_fhe(
         engine=engine, keypack=keypack, secret_key=secret_key,
         encrypted_columns=encrypted_columns,
         num_points=N, eps=normalized_eps, min_pts=float(min_pts_val),
         k_max=k_max,                                        # Ball Tree 구조 분석 최종값
         use_kd_propagation=(mode == 'kd_dense'),
-        num_sweeps=k_max if mode == 'sweep' else None,      # sweep일 때만 유효
+        num_sweeps=k_max if mode == 'sweep' else None,      # sweep dead path
+        n_rounds=_N_ROUNDS,                                 # ★ [2026-07] Client_main._N_ROUNDS 사용
     )
     
     print(f"\n[k_max] {k_max}  (Ball Tree DFS 구조 분석 최종값, 서버 재계산 없음)")
@@ -270,12 +281,9 @@ def main():
     heap_labels_raw    = decrypted_heap[:N]
     original_labels_raw = heap_labels_raw[inv_perm]
 
-    cluster_labels_fhe = []
-    for x in original_labels_raw:
-        r = int(np.round(x))
-        if r <= 0:  cluster_labels_fhe.append(-1)
-        elif r > N: cluster_labels_fhe.append(N)
-        else:       cluster_labels_fhe.append(r)
+    # ★ [2026-07] 간격 기반 판정 (정수 반올림 대체)
+    print("[FHE]", end=" ")
+    cluster_labels_fhe = assign_clusters_by_gap(original_labels_raw, N)
 
     fhe_elapsed = time() - fhe_start
     print(f"▶ FHE: {fhe_elapsed:.2f}초\n")

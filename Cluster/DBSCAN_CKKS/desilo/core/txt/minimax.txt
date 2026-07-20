@@ -77,7 +77,7 @@ def _poly_np(coeffs: np.ndarray, x: np.ndarray) -> np.ndarray:
 # ═══════════════════════════════════════════════════════════════════════════
 def remez_odd_sign(
     degree: int, a: float, b: float,
-    n_iter: int = 800, tol: float = 1e-13, n_sample: int = 30_000,
+    n_iter: int = 800, tol: float = 1e-11, n_sample: int = 30_000,
 ) -> Tuple[np.ndarray, float]:
     """
     sgn(x) 근사를 위한 odd-degree minimax 다항식 계수 결정.
@@ -89,7 +89,7 @@ def remez_odd_sign(
 
     수렴 조건 (논문 Algorithm 1, line 7):
       (max - min) / min < tol
-      tol=1e-13: float64 정밀도 한계에 가까워 보통 n_iter 끝까지 돌지만,
+      tol=1e-11: float64 정밀도 한계에 가까워 보통 n_iter 끝까지 돌지만,
                  그 사이 nodes 갱신 반복으로 더 정확한 minimax에 수렴.
     """
     if degree % 2 != 1:
@@ -719,7 +719,7 @@ def compute_mcp_with_margin_chebyshev(
     for i, deg in enumerate(degrees):
         if verbose:
             print(f"  p_{i+1} (deg={deg})  [{a:.8f}, {b:.8f}]  ...", end="", flush=True)
-        coeffs, err = remez_odd_sign_chebyshev(deg, a, b)
+        coeffs, err = remez_odd_sign_chebyshev(deg, a / b, 1.0)
         t_i = err + margin
         comps.append({
             "index": i+1, "degree": int(deg), "coeffs": coeffs.tolist(),

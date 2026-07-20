@@ -96,7 +96,13 @@ def send_to_server_fhe(
     if num_sweeps is None:
         num_sweeps = math.ceil(math.log2(N))
     if n_rounds is None:
-        n_rounds = math.ceil(math.log2(N))   # ★ 작업 B: log₂N round 기본값
+        # ★ [2026-07] log₂N 폐기 → 고정 32.
+        #   log₂N은 수렴 보장이 아니었음 (실측: chainlink log₂1000=10 < R=12,
+        #   target log₂770=10 < R=11 → under-merge 오답).
+        #   R = Θ(graph diameter) 이고 diameter를 O(N log N)에 잡는 것은
+        #   연결성분 계산 = DBSCAN 자체 → 자기모순. 따라서 n_rounds는 파라미터.
+        #   32 = 대상 7개 데이터셋 실측 최대 R(=31, chainlink) 의 2의 거듭제곱 올림.
+        n_rounds = 32
 
     T_kmax = k_max * (k_max + 1) // 2
 

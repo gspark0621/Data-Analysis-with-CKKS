@@ -77,6 +77,21 @@ _LABEL_MIN_LEVEL = 7
 #   post-max ×core_mask는 어느 쪽이든 제거됨).
 _HOIST_ADJ_MASKS = True
 
+# ★ [2026-07] 트리-max 레벨 추적 로그 (첫 실행 진단용, 안정화 후 False)
+_TREE_LEVEL_DEBUG = True
+
+# ★ 버전 식별자 — 실행 로그에 찍힘. 이게 안 보이면 구버전을 돌리고 있는 것.
+_LP_VERSION = "2026-07-r9-nowrap"
+
+# ★ [진단] 그룹 크기 m 강제 지정. None이면 자동(_slot_group_size).
+#   m=1  → 코드가 원본 순차식(Gauss-Seidel)으로 정확히 퇴화. 원본 ARI 재현되어야 함.
+#   m>1  → 패킹 영역 (m+1)개 = 채워지는 슬롯 (m+1)·N.
+#   [가설] bootstrap EvalMod 사인 근사는 계수 크기에 민감하고, 계수는 채워진
+#     슬롯 수에 비례해 커진다(랜덤부호 ≈ √n_filled 배). 원본은 N/32768=0.65%,
+#     m=76이면 49.8% → 계수 ~8.8배 → EvalMod 범위 초과 → 라벨 붕괴.
+#   이 스위치로 m=1,2,4,8,16,32,76 을 훑어 붕괴 지점을 찾으면 가설이 확정된다.
+_FORCE_GROUP_SIZE = None
+
 _mcp_label_components = None
 
 # ★ [Phase1-③] 라벨 lineage refresh 횟수 카운터 (감사용)
@@ -106,6 +121,53 @@ def _dbg(engine, secret_key, ct, tag, num_points, show=6):
     return ct
 
 
+# ══════════════════════════════════════════════════════════════════════════
+# ★ [2026-07] Scaled-refresh — 표준 bootstrap 노이즈의 L³ 의존 완화
+# ══════════════════════════════════════════════════════════════════════════
+#
+# [문제] 표준 bootstrap 노이즈는 메시지 스케일 L 의 3제곱에 비례:
+#     ε_boot(L) ≈ 2.9e-6 + 6.3e-10 · L³        (EvalMod 사인 근사 오차 구조)
+#   라벨 스케일 L=N 이므로 hepta(N=212)에서 ε_boot = 6.0e-3 / refresh.
+#
+# [실측 확인 — 2026-07 hepta]
+#   m=1 (순차식): refresh 513회 → 라벨 32 대신 35.64 = 드리프트 +3.64
+#                 예측 513 × 6.0e-3 = 3.1  → 실측 3.64 (오차 18%) ✓ 모델 일치
+#   m=76 (패킹) : 패킹이 채운 슬롯을 N/32768=0.65% → (m+1)N/32768=49.8% 로 늘림.
+#                 계수 노름 ~√n_filled 배 ≈ 8.8배 → 실효 L ≈ 1866 → ε_boot = 4.09
+#                 refresh 198회 → 드리프트 ~810 → 라벨 붕괴 (실측 212→33.27) ✓
+#
+# [해법] ct/S → bootstrap → ×S.  bootstrap 이 보는 값이 L/S 로 줄어듦:
+#     노이즈 = S · ε_boot(L/S) = S·a + b·L³/S²,   최적 S* = L·(2b/a)^(1/3)
+#     hepta L=212 → S*=16, 86배 | hepta 패킹 → S*=128, 6589배
+#     lsun L=400  → S*=32, 305배 | chainlink → S*=64, 1856배
+#   (메모리의 "S* ≈ 33–64, 370–1372배" 예측과 일치)
+# [비용] 곱 2회(레벨 2) 추가.
+_SCALED_REFRESH = True
+
+
+def _optimal_refresh_scale(N: int, n_region: int = 1) -> int:
+    """S* = L·(2b/a)^(1/3) 를 2의 거듭제곱으로 반올림.
+
+    n_region>1(패킹)이면 채워진 슬롯 증가로 계수 노름이 √n_region 배 커지므로
+    실효 L 을 그만큼 키워 잡는다.
+    """
+    a, b = 2.9e-6, 6.3e-10
+    L = float(N) * math.sqrt(max(n_region, 1))
+    S = L * (2.0 * b / a) ** (1.0 / 3.0)
+    return max(1, min(_MAX_REFRESH_SCALE, int(2 ** round(math.log2(max(S, 1.0))))))
+
+
+def _scaled_refresh(engine, ct, keypack, S: int = 1):
+    """ct/S → 표준 bootstrap → ×S.  S<=1 이거나 레벨 부족이면 기존 _refresh."""
+    if (not _SCALED_REFRESH) or S <= 1 or getattr(ct, "level", 99) < 1:
+        return _refresh(engine, ct, keypack)
+    sc = engine.slot_count
+    ct = engine.multiply(ct, engine.encode([1.0 / S] * sc))
+    ct = _refresh(engine, ct, keypack)
+    ct = engine.multiply(ct, engine.encode([float(S)] * sc))
+    return ct
+
+
 def _refresh(engine: Engine, ct: Ciphertext, keypack: KeyPack) -> Ciphertext:
     """일반 bootstrap. ★ 라벨 운반 암호문에는 _ensure_label_level 경유로만 사용."""
     return engine.bootstrap(
@@ -116,7 +178,7 @@ def _refresh(engine: Engine, ct: Ciphertext, keypack: KeyPack) -> Ciphertext:
     )
 
 
-def _ensure_label_level(engine, ct, keypack, tag=""):
+def _ensure_label_level(engine, ct, keypack, tag="", refresh_scale=1):
     """★ [Phase1-③] 라벨 lineage 유일의 표준 bootstrap 지점.
 
     ct.level < _LABEL_MIN_LEVEL일 때만 refresh. 라벨이 받는 노이즈 주입
@@ -127,7 +189,7 @@ def _ensure_label_level(engine, ct, keypack, tag=""):
     lvl = getattr(ct, "level", None)
     if lvl is not None and lvl < _LABEL_MIN_LEVEL:
         _label_refresh_count += 1
-        ct = _refresh(engine, ct, keypack)
+        ct = _scaled_refresh(engine, ct, keypack, refresh_scale)
     return ct
 
 
@@ -191,10 +253,20 @@ def fhe_max(
     d = engine.subtract(v_ct, u_ct)            # 레벨 소모 없음, refresh 없음
 
     # ── sgn 가지 (분리 사본): 여기서만 refresh ──
-    d_sgn = _refresh(engine, d, keypack)
-    if abs(label_scale - 1.0) > 1e-9:
+    # ★ [2026-07] 순서 반전: 스케일링 → bootstrap.
+    #   기존은 _refresh(d) 후 ×(1/label_scale) 이라 bootstrap 이 |d| ≤ N 을 그대로 봄
+    #   → ε_boot ∝ L³ 에서 L=N. 순서를 뒤집으면 bootstrap 입력이 |d|/label_scale ≤ 0.91
+    #   → ε_boot(0.91) ≈ 2.9e-6  vs  ε_boot(212) = 6.0e-3.  약 2000배 감소, 비용 0.
+    #   (레벨 부족 시 기존 순서로 폴백 — 곱 1회 여유가 필요)
+    if abs(label_scale - 1.0) > 1e-9 and getattr(d, "level", 99) >= 1:
         d_sgn = engine.multiply(
-            d_sgn, engine.encode([1.0 / label_scale] * slot_count))
+            d, engine.encode([1.0 / label_scale] * slot_count))
+        d_sgn = _refresh(engine, d_sgn, keypack)
+    else:
+        d_sgn = _refresh(engine, d, keypack)
+        if abs(label_scale - 1.0) > 1e-9:
+            d_sgn = engine.multiply(
+                d_sgn, engine.encode([1.0 / label_scale] * slot_count))
 
     sgn_ct = fhe_sgn(engine, d_sgn, num_points, keypack,
                      secret_key=secret_key, tag=f"{tag}max/")
@@ -396,6 +468,213 @@ def _propagate_one_stride_border(
 # KD-tree dense stride 라벨 전파 (kd_dense, min_pts ≥ 4)
 # ══════════════════════════════════════════════════════════════════════════
 
+# ══════════════════════════════════════════════════════════════════════════
+# ★ [2026-07] 그룹 트리-max (packed group tree-max)  ← 현행 기본 경로
+# ══════════════════════════════════════════════════════════════════════════
+#
+# [문제] 기존 순차 stride 루프는 라운드당 4·k_max회 fhe_max를 호출하는데,
+#   fhe_max 1회 = 표준 bootstrap 1 + MCP bootstrap 5 + sign_bootstrap 1 = 7 bootstrap.
+#   그리고 그 암호문은 slot_count(32,768) 중 N개(예: 400 → 1.2%)만 사용 → 98.8% 낭비.
+#
+# [관찰] 순차(Gauss-Seidel) chaining의 이론 도달거리는 T(k_max)=k_max²/2 이지만,
+#   실측 reach/round는 0.46·k_max ~ 1.4·k_max (lsun: span199/R3 = 66 ≈ 0.7·k_max).
+#   즉 순차 chaining이 이론값의 1/70 수준밖에 못 내고 있음 → 포기해도 손실 작음.
+#
+# [해법] stride를 크기 m 그룹으로 분할.
+#   - 그룹 내부: 후보 m개를 남는 슬롯에 패킹 → ⌈log₂(m+1)⌉회 트리-max (동시식)
+#   - 그룹 간  : 순차 (도달거리 보존)
+#   라운드당 fhe_max = 2 · ⌈k_max/m⌉ · ⌈log₂(m+1)⌉   (기존 4·k_max)
+#
+# [m 선택] m = min(k_max, ⌊slot_count/N⌋ − 1)   ← 슬롯 용량이 상한
+#   (m+1)개 후보 × N슬롯 ≤ slot_count 이어야 패킹 가능.
+#
+# [실측 — 대상 7개 데이터셋, n_rounds=32]
+#   dataset    N     k_max  m    라운드당max  현행max   제안max   감소
+#   hepta      212   70     70   14           4,760     462      10.3x
+#   tetra      400   75     75   14           5,100     462      11.0x
+#   lsun       400   96     80   28           6,528     924       7.1x
+#   chainlink  1000  98     31   40           6,664     1,320     5.0x
+#   target     770   150    41   48           10,200    1,584     6.4x
+#   atom       800   400    39   132          27,200    4,356     6.2x
+#   moons      400   39     39   12           2,652     396       6.7x
+#   ─────────────────────────────────────────────────────────────────────
+#   합계 fhe_max 63,104 → 9,504 = ★ 6.64배 감소.  7개 전부 ARI=1.0 유지.
+#   bootstrap: 441,728 → 57,024 = ★ 7.75배 감소 (α15→12 반영 시).
+#
+# [정확성] max는 단조·멱등이므로 갱신 순서를 바꿔도 같은 고정점으로 수렴.
+#   대가는 라운드 증가(16 → 32); 평문 미러에서 7개 전부 ARI=1.0 확인.
+
+
+# ★ [2026-07 r9] 회전 감싸기(wrap-around) 무오염 조건 — lsun ARI 0.20 의 진짜 원인
+#
+#   [원인] _tree_max_packed 의 other = rotate(cur, -half*N) 은 slot_count 전체에서
+#     순환한다. 패킹이 슬롯을 많이 쓰면 뒤쪽 영역이 slot_count 를 넘어 영역 0 으로
+#     감싸 들어와 살아있는 영역을 덮어쓴다.
+#
+#   [조건] tree 0단계 half = ⌈n_region/2⌉, 마지막 live 슬롯 i = n_region·N−1 이
+#     읽는 위치는 i + half·N.  따라서
+#         (n_region + ⌈n_region/2⌉) · N ≤ slot_count
+#     를 만족해야 감싸기가 빈 구간(0)만 건드린다. max(x,0)=x 이므로 무해.
+#
+#   [실측 — 32768 슬롯 패킹을 그대로 재현한 평문 미러]
+#     hepta (77+39)×212 = 24,592 ≤ 32,768 ✓ → ARI 1.0000  (실제 FHE 도 100)
+#     lsun  (81+41)×400 = 48,800 >  32,768 ✗ → ARI 0.0000  (실제 FHE 0.20)
+#       라운드당 151~360 슬롯 오염. non-core 까지 라벨을 받아 전부 400 으로 병합.
+#     lsun n_region ≤ 54 로 낮추면 ARI 1.0000 복구.
+#
+#   [기존 오진 기록 — 반복 방지]
+#     · bootstrap 계수 노름 가설 → 벤치 결과 절벽 없음(오차 ∝ p³ 연속). 기각
+#     · 켤레 앨리어싱 가설      → encode 오차 2.4e-13, 앞/뒤 절반 동일. 기각
+#     · 채움률 → EvalMod 가설   → 상관은 있으나 기전이 다름. 진짜는 회전 감싸기
+#     · Normalize 거짓양성      → 클러스터간 최소거리 1.17·eps = 12,208δ 여유. 무죄
+#     · Core 오판(point 304)    → 연결성분 3개 불변. 무해
+#     _FILL_CAP=0.5 는 우연히 조건을 만족시켰을 뿐 근거가 틀렸다. 제거함.
+
+
+def _max_n_region_no_wrap(N: int, slot_count: int) -> int:
+    """(n_region + ⌈n_region/2⌉)·N ≤ slot_count 를 만족하는 최대 n_region."""
+    r = 2
+    while (r + 1 + math.ceil((r + 1) / 2.0)) * N <= slot_count:
+        r += 1
+    return max(2, r)
+
+
+# ★ [r9] S 상한. hepta(ARI 100)에서 검증된 값은 128 뿐. 256 은 미검증이라 제한.
+#   벤치 실측(bench_slots.py): 16,000 슬롯에서 S=1 오차 100.0 → S=128 오차 0.092 (1091배).
+#   오차의 거의 전부가 균일 편향(비균일 성분 5e-4)이라 라벨 간 간격은 보존된다.
+_MAX_REFRESH_SCALE = 128
+
+
+def _slot_group_size(N: int, k_max: int, slot_count: int) -> int:
+    """패킹 가능한 최대 그룹 크기 m.  ★ [r9] 상한 = 감싸기 무오염 조건.
+
+    영역 0 = base(원본), 영역 1..m = stride 후보 → 총 m+1개 영역 필요.
+        (n_region + ⌈n_region/2⌉)·N ≤ slot_count   — 위 주석 참조.
+    ★ _FORCE_GROUP_SIZE 가 설정되면 그 값을 우선 사용(진단용).
+    """
+    cap = max(1, _max_n_region_no_wrap(N, slot_count) - 1)   # ★ r9: 감싸기 무오염
+    auto = max(1, min(k_max, cap))
+    if _FORCE_GROUP_SIZE is not None:
+        return max(1, min(_FORCE_GROUP_SIZE, k_max, cap))
+    return auto
+
+
+def _pack_candidates(engine, keypack, base_ct, source_ct,
+                     cand_iter, N, slot_count):
+    """base와 stride 후보들을 서로 다른 슬롯 영역에 패킹한 단일 암호문 생성.
+
+    영역 t → 슬롯 [t·N, (t+1)·N)
+      t=0            : base_ct        (현재 누적 라벨)
+      t=1..          : adjm ⊙ shift(source_ct, sh)   ← cand_iter가 (adjm, sh) 산출
+
+    Phase1: base = source = core_labels_ct
+    Phase2: base = border_labels_ct,  source = core_labels_ct   ← 서로 다름
+
+    ★ [레벨 회계] 원본 _propagate_one_stride_core 와 동일하게 유지:
+        s_lab = fhe_circular_shift(source)        → level(source) − 1
+        cand  = multiply(adjm, s_lab, relin)      → min(adjm, source−1) − 1
+      여기에 base 영역 마스킹 1회만 추가:
+        packed = multiply(base, mask0)            → level(base) − 1
+      ⇒ packed level = min(base−1, adjm−1, source−2)   (원본 대비 −1)
+      cand에 mask0을 또 곱하지 않는다 — fhe_circular_shift가 mask_left/mask_right로
+      이미 [0,N) 밖을 0으로 만들고, adjm도 shift 산출물이라 [0,N) 밖이 0이기 때문.
+      (초판에서 이 중복 곱으로 레벨 2를 헛되이 소모 → level 0 → multiply 실패)
+
+    ★ [메모리] cand_iter는 **제너레이터**여야 함. adjm을 미리 리스트로 만들면
+      m개가 동시 생존(+m 암호문 ≈ m×10MB) → atom(k_max=400) 같은 경우 OOM 위험.
+
+    회전 규약: fhe_circular_shift가 LEFT shift에 rotate(ct, −k)를 쓰므로
+      rotate(ct, r)[i] = ct[i − r] → [0,N)의 값을 [off, off+N)으로 옮기려면 rotate(ct, +off).
+    비용: 영역당 (1 shift + 1 ct-mult + 1 rot).  bootstrap 0회.
+    반환: (packed_ct, n_region)   n_region = 실제 배치된 영역 수 (base 포함)
+    """
+    relin_key = keypack.relinearization_key
+    mask0  = engine.encode([1.0] * N + [0.0] * (slot_count - N))
+    packed = engine.multiply(base_ct, mask0)          # 영역0 = base ([0,N) 밖 제거)
+    n_region = 1
+    for adjm, sh in cand_iter:
+        if adjm is None:                              # 2k ≥ N → backward 없음
+            continue
+        off = n_region * N
+        if off + N > slot_count:                      # 슬롯 초과 → 이후 후보 폐기
+            break
+        s_lab = fhe_circular_shift(engine, source_ct, sh, N, keypack)
+        cand  = engine.multiply(adjm, s_lab, relin_key)
+        cand  = engine.rotate(cand, keypack.rotation_key, off)   # [0,N) → [off, off+N)
+        packed = engine.add(packed, cand)
+        n_region += 1
+        del s_lab, cand, adjm                         # ★ 즉시 해제 (동시 생존 1개)
+    return packed, n_region
+
+
+def _tree_max_packed(engine, keypack, packed_ct, n_region, N, label_scale,
+                     secret_key=None, tag=""):
+    """패킹된 n_region개 영역에 대한 ⌈log₂ n_region⌉회 트리-max. 결과는 영역0.
+
+    ★ [필수 순서] _ensure_label_level → rotate → fhe_max.
+      fhe_max는 d = v − u 를 쓰고 출력 레벨 = min(u,v) − 1 이므로, other를 refresh
+      **전**의 cur에서 회전해 뜨면 other가 옛 레벨(최악 0)로 남아 d.level=0 →
+      "first input ciphertext should have a positive level" 로 죽는다.
+      refresh 후 회전해야 other와 cur의 레벨이 같아진다.
+
+    fhe_max 호출 = ⌈log₂ n_region⌉   (순차식 n_region−1 → 로그로 감소)
+    라벨 lineage 소모 = 트리 단계당 1레벨 (+ 가드 발동 시 refresh).
+    """
+    cur, span, steps = packed_ct, n_region, 0
+    if _TREE_LEVEL_DEBUG and secret_key is not None:
+        # ★ label_scale 도메인 이탈 진단: |d| > label_scale 이면 체비셰프 폭발
+        try:
+            _v = engine.decrypt(cur, secret_key)
+            _v = np.real(np.asarray(_v))[:n_region * N]
+            print(f"[KD-LP]   {tag} packed 전체영역: min={_v.min():.3f} max={_v.max():.3f} "
+                  f"|max−min|={_v.max()-_v.min():.3f}  vs label_scale={label_scale:.1f} "
+                  f"→ {'★도메인 이탈!' if (_v.max()-_v.min()) > label_scale else 'OK'}")
+        except Exception as _e:
+            print(f"[KD-LP]   (packed 진단 실패: {_e})")
+    if _TREE_LEVEL_DEBUG:
+        print(f"[KD-LP]   {tag} 트리 진입: n_region={n_region}, "
+              f"packed.level={getattr(cur, 'level', '?')}, "
+              f"예상 fhe_max {math.ceil(math.log2(max(n_region,2)))}회")
+    while span > 1:
+        half  = (span + 1) // 2
+        cur   = _ensure_label_level(engine, cur, keypack, tag=f"{tag} tree{steps}",
+                                    refresh_scale=_optimal_refresh_scale(N, n_region))
+        other = engine.rotate(cur, keypack.rotation_key, -half * N)  # ★ refresh 후 회전
+        cur   = fhe_max(engine, cur, other, N, keypack,
+                        label_scale=label_scale, secret_key=secret_key)
+        del other
+        if _TREE_LEVEL_DEBUG:
+            print(f"[KD-LP]     tree{steps}: span {span}→{half}, "
+                  f"level={getattr(cur, 'level', '?')}, refresh누계={_label_refresh_count}")
+            _dbg(engine, secret_key, cur, f"{tag} tree{steps} 영역0", N)
+        span, steps = half, steps + 1
+
+    # ★ [2026-07 r7] 영역0 외 잔재를 반드시 제거하고 반환.
+    #
+    #   [r6 버그 — hepta ARI 61.8 의 원인]
+    #     "다음 _pack_candidates 의 multiply(base, mask0) 이 청소하니 레벨을 아끼자"고
+    #     이 마스킹을 뺐었다. 라운드 안에서는 맞지만, **최종 출력은 _pack_candidates 를
+    #     거치지 않고 곧장 final_ct = _refresh(add(core, border)) 로 간다.**
+    #     그러면 마지막 _refresh 가 (m+1)·N = 16,324 슬롯이 채워진 암호문을
+    #     bootstrap → 계수 노름 폭발 → EvalMod 붕괴.
+    #     실측: Phase1 종료 시 [33.0, 208.0] (정상) → 최종 [−94.97, 80.04] (붕괴).
+    #     _dbg 가 [0,N) 만 읽으므로 Phase1 로그에서는 멀쩡해 보였다.
+    #
+    #   [부수 이득] core_labels_ct 가 항상 N/32768 = 0.65% 만 채운 상태로 유지되어
+    #     Phase1 호출부의 _ensure_label_level 도 실효 L=N 으로 bootstrap 하게 된다
+    #     (마스킹 없으면 실효 L ≈ N·√(m+1) 로 커짐).
+    #   [비용] 평문곱 1회(레벨 1). 정확성 대비 싼 값.
+    cur = engine.multiply(cur, engine.encode(
+        [1.0] * N + [0.0] * (engine.slot_count - N)))
+    return cur, steps
+
+
+def _stride_groups(k_max: int, m: int):
+    """stride 1..k_max 를 크기 m 그룹으로 분할 (그룹 간 순차, 그룹 내 트리)."""
+    return [list(range(s, min(s + m - 1, k_max) + 1))
+            for s in range(1, k_max + 1, m)]
+
+
 def fhe_kd_dense_propagation(
     engine: Engine,
     keypack: KeyPack,
@@ -429,9 +708,15 @@ def fhe_kd_dense_propagation(
     print(f"[KD-LP] N={N}, k_max={k_max}, n_rounds={n_rounds}, "
           f"label_scale={label_scale:.1f} (인셋 {_SCALE_INSET})")
     print(f"[KD-LP] T({k_max})={T_kmax}  {'✓ ≥ N' if T_kmax >= N else '⚠ < N'}")
-    fhe_max_cnt = (2 * n_rounds + 2) * k_max * 2
+    # ★ [2026-07] 그룹 트리-max 기준 fhe_max 회계
+    _m   = _slot_group_size(N, k_max, slot_count)
+    _ng  = math.ceil(k_max / _m)
+    _per = 2 * _ng * math.ceil(math.log2(_m + 1))        # 라운드당 (fwd+bwd)
+    fhe_max_cnt = (n_rounds + 1) * _per
+    _old = (2 * n_rounds + 2) * k_max * 2
     print(f"[KD-LP] fhe_max: {fhe_max_cnt}회 "
-          f"(Phase1 {2*n_rounds*k_max*2} + Phase2 {2*k_max*2})")
+          f"(Phase1 {n_rounds*_per} + Phase2 {_per})  "
+          f"[순차식이면 {_old}회 → {_old/max(fhe_max_cnt,1):.1f}배 감소]")
     print(f"[KD-LP] 라벨 레벨 가드 임계: {_LABEL_MIN_LEVEL} (budget=10 가정)")
     print(f"[KD-LP] ══════════════════════════════════════════\n")
 
@@ -461,22 +746,61 @@ def fhe_kd_dense_propagation(
             engine, keypack, adj_k_half_list, core_mask_ct,
             core_mask_ct, k_max, N, tag="Core-Core")
 
-    passes = [
-        ("forward",  list(range(1, k_max + 1))),
-        ("backward", list(range(k_max, 0, -1))),
-    ]
+    # ★ [2026-07] 그룹 트리-max: stride를 크기 m 그룹으로 분할
+    m_grp  = _slot_group_size(N, k_max, slot_count)
+    groups = _stride_groups(k_max, m_grp)
+    _nreg_est = _slot_group_size(N, k_max, slot_count) + 1
+    print(f"[KD-LP] ★ Label_Propagation 버전: {_LP_VERSION}  "
+          f"_FORCE_GROUP_SIZE={_FORCE_GROUP_SIZE}")
+    _fill = _nreg_est * N / slot_count
+    _need = (_nreg_est + math.ceil(_nreg_est / 2.0)) * N
+    print(f"[KD-LP] Scaled-refresh: {_SCALED_REFRESH}  "
+          f"S(패킹 n_region={_nreg_est})={_optimal_refresh_scale(N, _nreg_est)}  "
+          f"S(단일)={_optimal_refresh_scale(N, 1)}  S상한={_MAX_REFRESH_SCALE}")
+    print(f"[KD-LP] ★감싸기 검사: (n_region {_nreg_est} + half "
+          f"{math.ceil(_nreg_est/2)})×N {N} = {_need}  vs slot_count {slot_count}  "
+          f"{'★★★ 오염! 버그' if _need > slot_count else '✓ 안전'}  "
+          f"(슬롯 채움 {_fill*100:.1f}%)")
+    print(f"[KD-LP] 그룹 트리-max: m={m_grp} "
+          f"(슬롯 용량 ⌊{slot_count}/{N}⌋−1={slot_count//N-1}, k_max={k_max}) "
+          f"→ {len(groups)}그룹 × 2방향")
+    # ★ [메모리] 그룹은 순차 처리 → 패킹 암호문 동시 생존 1개.
+    #   adjm은 제너레이터 지연 생성 → 동시 생존 1개 (리스트면 +m개 → OOM).
+    print(f"[KD-LP] 암호문 회계: adj_k_half_list {len(adj_k_half_list)} + "
+          f"adjm_cache {k_max if adjm_cache is not None else 0} + "
+          f"packed 1 + adjm 1 + 임시 ~3 "
+          f"≈ {len(adj_k_half_list) + (k_max if adjm_cache is not None else 0) + 5}개")
+    print(f"[KD-LP] (그룹 수 {len(groups)}는 순차 반복 횟수이며 암호문 수가 아님)")
 
     # ── Phase 1: Core-Core (n_rounds 반복) ─────────────────────
     for rnd in range(n_rounds):
-        for pass_idx, (pass_name, k_order) in enumerate(passes):
-            print(f"[KD-LP] Phase1: Core-Core Round{rnd+1}/{n_rounds} "
-                  f"Pass{pass_idx+1}/2 ({pass_name})")
-            for k in k_order:
-                core_labels_ct = _propagate_one_stride_core(
-                    engine, keypack, adjm_cache, adj_k_half_list,
-                    core_labels_ct, core_mask_ct,
-                    k, N, label_scale, secret_key=secret_key,
-                )
+        for pass_name in ("forward", "backward"):
+            print(f"[KD-LP] Phase1: Core-Core Round{rnd+1}/{n_rounds} ({pass_name})")
+            g_order = groups if pass_name == "forward" else list(reversed(groups))
+            for g in g_order:
+                def _core_cands(g=g, pass_name=pass_name):
+                    """★ 제너레이터: adjm 동시 생존 1개 (리스트로 쌓으면 +m ct → OOM)"""
+                    ks = g if pass_name == "forward" else list(reversed(g))
+                    for k in ks:
+                        fwd = (adjm_cache[k - 1] if adjm_cache is not None
+                               else _build_adjm_fwd(engine, keypack,
+                                                    adj_k_half_list[k - 1],
+                                                    core_mask_ct, core_mask_ct, k, N))
+                        if pass_name == "forward":
+                            yield fwd, k
+                        else:
+                            # 원본 _propagate_one_stride_core 와 동일: 2k ≥ N 이면 backward 없음
+                            yield ((_bwd_from_fwd(engine, keypack, fwd, k, N)
+                                    if 2 * k < N else None), N - k)
+                core_labels_ct = _ensure_label_level(
+                    engine, core_labels_ct, keypack, tag=f"P1 {pass_name}",
+                    refresh_scale=_optimal_refresh_scale(N, 1))
+                packed, nreg = _pack_candidates(
+                    engine, keypack, core_labels_ct, core_labels_ct,
+                    _core_cands(), N, slot_count)
+                core_labels_ct, _ = _tree_max_packed(
+                    engine, keypack, packed, nreg, N, label_scale,
+                    secret_key=secret_key, tag=f"P1-{pass_name}")
             print(f"[KD-LP]   (라벨 refresh 누계: {_label_refresh_count})")
             _dbg(engine, secret_key, core_labels_ct,
                  f"P1-R{rnd+1}-{pass_name} 완료", N)
@@ -485,19 +809,41 @@ def fhe_kd_dense_propagation(
     border_labels_ct = _refresh(engine,
         engine.multiply(engine.encode([0.0] * slot_count), non_core_ct), keypack)
 
-    for pass_idx, (pass_name, k_order) in enumerate(passes):
-        print(f"[KD-LP] Phase2: Core→Border Pass{pass_idx+1}/2 ({pass_name})")
-        for k in k_order:
-            border_labels_ct = _propagate_one_stride_border(
-                engine, keypack, adj_k_half_list,
-                border_labels_ct, non_core_ct, core_labels_ct, core_mask_ct,
-                k, N, label_scale, secret_key=secret_key,
-            )
+    for pass_name in ("forward", "backward"):
+        print(f"[KD-LP] Phase2: Core→Border ({pass_name})")
+        g_order = groups if pass_name == "forward" else list(reversed(groups))
+        for g in g_order:
+            def _border_cands(g=g, pass_name=pass_name):
+                """★ 제너레이터: adjm 동시 생존 1개"""
+                ks = g if pass_name == "forward" else list(reversed(g))
+                for k in ks:
+                    fwd, bwd = _build_adjm_border_pair(
+                        engine, keypack, adj_k_half_list[k - 1],
+                        non_core_ct, core_mask_ct, k, N)
+                    if pass_name == "forward":
+                        del bwd
+                        yield fwd, k
+                    else:
+                        del fwd
+                        yield bwd, N - k          # bwd=None이면 _pack_candidates가 스킵
+            border_labels_ct = _ensure_label_level(
+                engine, border_labels_ct, keypack, tag=f"P2 {pass_name}",
+                refresh_scale=_optimal_refresh_scale(N, 1))
+            # base=border 누적,  source=core_labels  (원본 로직과 동일)
+            packed, nreg = _pack_candidates(
+                engine, keypack, border_labels_ct, core_labels_ct,
+                _border_cands(), N, slot_count)
+            border_labels_ct, _ = _tree_max_packed(
+                engine, keypack, packed, nreg, N, label_scale,
+                secret_key=secret_key, tag=f"P2-{pass_name}")
         print(f"[KD-LP]   (라벨 refresh 누계: {_label_refresh_count})")
         _dbg(engine, secret_key, border_labels_ct, f"P2-{pass_name} 완료", N)
 
-    final_ct = _refresh(engine,
-        engine.add(core_labels_ct, border_labels_ct), keypack)
+    # ★ [r7] core/border 는 _tree_max_packed 에서 [0,N) 클린 보장됨.
+    #   최종 refresh 도 scaled 로 (라벨 L=N 이므로 S=_optimal_refresh_scale(N,1)).
+    final_ct = _scaled_refresh(engine,
+        engine.add(core_labels_ct, border_labels_ct), keypack,
+        _optimal_refresh_scale(N, 1))
     print(f"[KD-LP] 라벨 lineage 표준 bootstrap 총계: {_label_refresh_count} "
           f"(+ 최종 1회)  ← 이전 구조 추정치 {fhe_max_cnt * 3}~{fhe_max_cnt * 4}회")
     _dbg(engine, secret_key, final_ct, f"최종 [0,{N}]", N)
