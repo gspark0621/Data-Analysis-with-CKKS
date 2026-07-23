@@ -39,6 +39,16 @@ python: 3.12.10
     - eps: 0.5
     - minpts: 4
     - 결과: 군집 3개(ARI 100점)
+5. target(770개)
+    - max_iter: ?
+    - eps: 0.25
+    - minpts: 4
+    - 결과: 군집 6개(ARI 99.96점 - 이게 맞음. noise로 분류되어야 할 점들이 ground truth에서는 각 cluster로 표현됨(eps 0.25 minpoints 3으로 하면 ARI 100 나옴))
+6. 3_spiral(312개)
+    - max_iter: 3
+    - eps: 1.4
+    - minpts: 3
+    - 결과: 군집 3개(ARI 100점)
 -------------------------------------------
 1. Iris(150개)
     - max_iter: 4

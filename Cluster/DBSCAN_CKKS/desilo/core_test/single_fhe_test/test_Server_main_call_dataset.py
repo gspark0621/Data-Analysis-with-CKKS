@@ -7,7 +7,7 @@
 #
 # [변경 3] k_max 결정 방식 단순화                          ← 수정
 #   기존: 서버 enc_sum_k 계산 → 클라이언트 복호화 → k_max 정밀화
-#   변경: 클라이언트 Ball Tree DFS 구조 분석 결과를 최종값으로 사용.
+#   변경: 클라이언트 PCA window 상한 결과를 최종값으로 사용.
 #         서버는 수신한 k_max를 그대로 사용하며 재계산하지 않음.
 #
 # [변경 4] min_pts 분기 기준: 고정값 4 → 2×dim (Sander et al. 1998) ← 신규
@@ -62,7 +62,7 @@ from core.ciphertext_single.minimax import (
 # ─────────────────────────────────────────────────────────────────────────
 _MCP_ALPHA15_CHEB_PATH = "mcp_alpha15_lp_cheb.json"   # Normalize/Core/LP 공유
 
-DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/tetra.arff"
+DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/3_spiral.arff"
 
 
 # ── MCP 파일 준비 ─────────────────────────────────────────────────────────
@@ -268,7 +268,7 @@ def main():
         n_rounds=_N_ROUNDS,                                 # ★ [2026-07] Client_main._N_ROUNDS 사용
     )
     
-    print(f"\n[k_max] {k_max}  (Ball Tree DFS 구조 분석 최종값, 서버 재계산 없음)")
+    print(f"\n[k_max] {k_max}  (PCA(PC1) ε-window 상한, 클라이언트 산출)")
 
     # 복호화 (Heap 순서)
     before = _gpu_used_mb()

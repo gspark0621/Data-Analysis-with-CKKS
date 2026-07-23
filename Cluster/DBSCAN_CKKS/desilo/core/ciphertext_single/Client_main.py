@@ -36,6 +36,15 @@
 #   유지: build_ball_tree_order / compute_kmax_from_ball_structure (비교·폴백용)
 # ────────────────────────────────────────────────────────────────────────────
 
+from time import time
+import math
+import numpy as np
+import desilofhe
+import pynvml
+from core.ciphertext_single.EncryptModule import DimensionalEncryptor
+from core.ciphertext_single.Server_main import send_to_server_fhe as send_to_server
+from util.keypack import KeyPack
+
 # ★ [2026-07] LP Core-Core 반복 횟수. 이전 math.ceil(log2(N))에서 고정 상수로 교체.
 #
 #   [log₂N 폐기 이유 — 실측 반증]
@@ -59,16 +68,7 @@
 #     hepta R=3, tetra R=7, lsun R=11, chainlink R=31, target R=26, atom R=6, moons R=29
 #     → 최대 31 → 2의 거듭제곱 올림 = 32 (여유 1). 7개 전부 ARI=1.0 (sklearn 일치).
 #   [한계] 곡률이 큰 매니폴드(나선 등)에는 불충분. 논문 한계 절에 명시할 것.
-_N_ROUNDS = 8
-
-from time import time
-import math
-import numpy as np
-import desilofhe
-import pynvml
-from core.ciphertext_single.EncryptModule import DimensionalEncryptor
-from core.ciphertext_single.Server_main import send_to_server_fhe as send_to_server
-from util.keypack import KeyPack
+_N_ROUNDS = 32
 
 # 전파 방식 임계값: 상단 정의로 모든 함수에서 참조 가능
 def _kd_dense_threshold(dim: int) -> int:
@@ -77,6 +77,9 @@ def _kd_dense_threshold(dim: int) -> int:
     dim차원 공간에서 밀집 구조를 신뢰할 수 있는 최소 이웃 수.
     """
     return 2 * dim
+
+
+
 
 def _gpu_used_mb() -> float:
     try:
