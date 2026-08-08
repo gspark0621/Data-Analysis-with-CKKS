@@ -54,8 +54,48 @@ _LEVEL_PER_ITER = 2
 _MIN_SAFE_LEVEL = 3
 
 
+# ★ [2026-07 진단] 표준 bootstrap(=bootstrap_key, 13.4GB) 이 실제로 몇 번
+#   호출되는지 단계별로 센다.  smallbootstrap_key(232MB) 를 쓰는 sign_bootstrap 과
+#   달리 표준 bootstrap 은 EvalMod 기반이라 **값을 보존**하며 레벨만 복구한다.
+#   (sign_bootstrap 은 EvalSign 이라 값을 ±1 로 반올림 → sign 값에만 유효)
+#
+#   목적: Normalize 단계에서 이 카운터가 0 이면 bootstrap_key 는 Core 이전까지
+#   불필요하다는 뜻이고, 키 생성을 Normalize 이후로 **지연**시켜 13.4GB 를
+#   Step 1 에서 통째로 확보할 수 있다(OOM 이 나는 바로 그 지점).
+_STD_BOOT_COUNT = {"total": 0}
+
+
+def std_boot_count(reset: bool = False) -> int:
+    """표준 bootstrap 누적 호출 수 반환. reset=True 면 0 으로 초기화."""
+    n = _STD_BOOT_COUNT["total"]
+    if reset:
+        _STD_BOOT_COUNT["total"] = 0
+    return n
+
+
+# ★ [2026-07] True 면 표준 bootstrap 에도 small_bootstrap_key 를 쓴다
+#   (full bootstrap_key 13.4GB 생성 불필요). 문제 시 False 로 원복.
+_USE_SMALL_BOOT_FOR_REFRESH = True
+
+
 def _refresh(engine: Engine, ct: Ciphertext, keypack: KeyPack) -> Ciphertext:
     """일반 bootstrap으로 level 복구 (Label_Propagation._refresh와 동일)."""
+    _STD_BOOT_COUNT["total"] += 1
+    # ★ [2026-07] small_bootstrap_key 로 전환.
+    #   DesiloFHE 는 engine.bootstrap(ct, relin, conj, rotation, small_bootstrap)
+    #   형태를 지원한다. 'small' 은 EvalSign 전용 키가 아니라 키 변형이므로
+    #   값 보존 bootstrap 에도 쓸 수 있다. 이로써 13.4GB 짜리 full bootstrap_key
+    #   를 아예 생성하지 않아도 된다(GPU 18.6GB → 5.2GB).
+    #   ※ sign_bootstrap 과 bootstrap 은 여전히 다른 연산이다. 라벨처럼 임의
+    #     실수를 나르는 암호문에는 반드시 bootstrap(EvalMod) 을 써야 한다.
+    if _USE_SMALL_BOOT_FOR_REFRESH:
+        return engine.bootstrap(
+            engine.intt(ct),
+            keypack.relinearization_key,
+            keypack.conjugation_key,
+            keypack.rotation_key,
+            keypack.smallbootstrap_key,
+        )
     return engine.bootstrap(
         engine.intt(ct),
         keypack.relinearization_key,

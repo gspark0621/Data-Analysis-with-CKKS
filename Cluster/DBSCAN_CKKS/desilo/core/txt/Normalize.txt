@@ -65,7 +65,10 @@ def check_neighbor_closed_interval(
     """
     relin_key  = keypack.relinearization_key
     conj_key   = keypack.conjugation_key
-    boot_key   = keypack.bootstrap_key
+    # ★ [2026-07] 제거: 이 파일은 표준 bootstrap 을 직접 호출하지 않는다.
+    #   (sign_bootstrap → smallbootstrap_key, bit_cleaning 내부 _refresh 는
+    #    cleaning.py 가 처리). full bootstrap_key 는 생성되지 않으므로
+    #    이 할당을 남겨두면 None 이 되어 혼란만 준다.
     slot_count = engine.slot_count
 
     components = load_mcp(mcp_path)

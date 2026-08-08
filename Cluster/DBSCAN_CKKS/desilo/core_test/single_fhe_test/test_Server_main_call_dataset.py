@@ -35,6 +35,8 @@
 import os
 import math
 import numpy as np
+from sklearn.cluster import DBSCAN
+from sklearn.neighbors import NearestNeighbors
 from time import time
 import pynvml
 from sklearn.metrics import adjusted_rand_score
@@ -62,7 +64,7 @@ from core.ciphertext_single.minimax import (
 # ─────────────────────────────────────────────────────────────────────────
 _MCP_ALPHA15_CHEB_PATH = "mcp_alpha15_lp_cheb.json"   # Normalize/Core/LP 공유
 
-DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/3_spiral.arff"
+DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/s1.arff"
 
 
 # ── MCP 파일 준비 ─────────────────────────────────────────────────────────
@@ -87,7 +89,7 @@ def _ensure_mcp_files():
       - ±3τ FAIL: 안전 영역이 실측 ~16τ. hepta ARI 실측으로 영향도 판단.
     """
     if not os.path.exists(_MCP_ALPHA15_CHEB_PATH):
-        print(f"[MCP] α=15 Chebyshev MCP 생성 중 (Normalize/Core/LP 공유)")
+        print(f"[MCP] α=15 Chebyshev MCP 생성 중 (Normalize 전용)")
         print(f"      degrees=[7,15,15,15,27], BSGS depth=5, margin η=2^{{-17}}")
         print(f"      δ=2^{{-15}}≈3.05e-5, drift(840콜)≈0.39 < 1.0 ✓")
         comps = compute_mcp_for_label_prop_chebyshev(alpha=15, verbose=True)
@@ -95,10 +97,62 @@ def _ensure_mcp_files():
         print(f"[MCP] 저장 → {_MCP_ALPHA15_CHEB_PATH}  "
               f"err={comps[-1]['error']:.4e}  t_k={comps[-1]['t_i']:.4e}")
     else:
-        print(f"[MCP] {_MCP_ALPHA15_CHEB_PATH} 존재 → 스킵 (Normalize/Core/LP 공유)")
+        print(f"[MCP] {_MCP_ALPHA15_CHEB_PATH} 존재 → 스킵 (Normalize 전용)")
 
 
 # ── GPU 메모리 유틸 ───────────────────────────────────────────────────────
+
+def _ensure_mcp_files_for_N(N: int):
+    """[2026-07] N이 정해진 뒤 Core/LP가 쓸 alpha별 MCP를 미리 생성.
+
+    미리 만들지 않아도 파이프라인 실행 중 자동 생성되지만, 그러면 Remez 계산
+    시간과 로그가 FHE 연산 로그에 섞여 읽기 어렵다.
+
+    alpha 선택 근거 (둘 다 N에만 의존 -> 공개값, 추가 유출 없음):
+      LP  : 라벨이 정수 -> 최소 gap = 1/(1.1N)  -> alpha = ceil(log2(1.1N)) + 1
+      Core: neighbor_count가 정수 -> gap = 0.5/N -> alpha = ceil(log2(2N)) + 2
+    Normalize만 alpha=15를 유지하는 이유: dist_sq는 연속값이라 '정수 바닥'이 없고
+      최소 gap이 eps 경계 근접도(데이터 분포)에 의존해 공개값으로 하한을 못 잡는다.
+    """
+    from core.ciphertext_single.Core import _core_alpha, _CORE_ALPHA_AUTO
+    from core.ciphertext_single.Label_Propagation import (
+        _lp_alpha, _LP_ALPHA_AUTO, _LP_USE_CLEANING_DEGREES, _SGN_CLEANING_ITERS,
+    )
+    from core.ciphertext_single.minimax import (
+        compute_mcp_for_label_prop_chebyshev,
+        compute_mcp_for_label_prop_cleaning, save_mcp,
+    )
+
+    print(f"\n[MCP] N={N} 기반 alpha별 MCP 준비")
+
+    if _CORE_ALPHA_AUTO:
+        a = _core_alpha(N)
+        path = f"mcp_alpha{a}_lp_cheb.json"
+        if os.path.exists(path):
+            print(f"      Core: alpha={a} -> {path} 존재, 스킵")
+        else:
+            print(f"      Core: alpha={a} (gap=0.5/{N}={0.5/N:.6f}) 생성 -> {path}")
+            save_mcp(compute_mcp_for_label_prop_chebyshev(alpha=a, verbose=True), path)
+    else:
+        print("      Core: alpha 자동선택 OFF -> alpha=15 공유 파일 사용")
+
+    if _LP_ALPHA_AUTO:
+        a = _lp_alpha(N)
+        path = (f"mcp_alpha{a}_lp_clean{_SGN_CLEANING_ITERS}.json"
+                if _LP_USE_CLEANING_DEGREES else f"mcp_alpha{a}_lp_cheb.json")
+        if os.path.exists(path):
+            print(f"      LP:   alpha={a} -> {path} 존재, 스킵")
+        else:
+            print(f"      LP:   alpha={a} (gap=1/(1.1*{N})={1.0/(1.1*N):.6f}) 생성 -> {path}")
+            if _LP_USE_CLEANING_DEGREES:
+                comps = compute_mcp_for_label_prop_cleaning(
+                    alpha=a, cleaning_iters=_SGN_CLEANING_ITERS, verbose=True)
+            else:
+                comps = compute_mcp_for_label_prop_chebyshev(alpha=a, verbose=True)
+            save_mcp(comps, path)
+    else:
+        print("      LP:   alpha 자동선택 OFF -> alpha=15 고정 파일 사용")
+
 
 def _gpu_used_mb() -> float:
     try:
@@ -201,6 +255,11 @@ def main():
     normalized_pts = (pts - global_min) / scale_factor
     normalized_eps = eps_val / scale_factor
 
+    # [2026-07] N이 정해졌으니 Core/LP용 alpha별 MCP를 여기서 미리 생성
+
+    _ensure_mcp_files_for_N(N)
+
+
     print(f"데이터: {N}개, {dimension}차원  정규화 eps={normalized_eps:.6f}")
     if N > 100:
         print(f"⚠️  {N}개 → 긴 시간 소요 예상\n")
@@ -223,17 +282,22 @@ def main():
 
 
     # ── Step 5: 평문 DBSCAN (원래 순서 기준, 비교 기준) ──────────
-    print("\n================ Plaintext ===================")
-    pt_start   = time()
-    transposed = list(zip(*normalized_pts.tolist()))
-    columns_np = [np.array(v, dtype=np.float64) for v in transposed]
-    np_final_labels, _, debug_np = send_to_server_np(
-        encrypted_columns=columns_np, num_points=N,
-        eps=normalized_eps, min_pts=float(min_pts_val), dimension=dimension
-    )
-    # ★ [2026-07] 간격 기반 판정 (정수 반올림 대체) — Client_main 과 동일 경로
-    print("[평문]", end=" ")
-    cluster_labels_np = assign_clusters_by_gap(np.asarray(np_final_labels[:N]), N)
+    print("\n================ Plaintext (sklearn DBSCAN) ===================")
+    pt_start = time()
+    _db = DBSCAN(eps=normalized_eps, min_samples=int(min_pts_val)).fit(normalized_pts)
+    cluster_labels_np = _db.labels_.tolist()          # -1=노이즈, 0,1,…=클러스터
+
+    # debug_np 재구성 (Step 8 디버그 CSV 호환)
+    _nn    = NearestNeighbors(radius=normalized_eps).fit(normalized_pts)
+    _cnt   = np.array([len(x) for x in _nn.radius_neighbors(normalized_pts,
+                                                            return_distance=False)], dtype=float)
+    debug_np = {
+        'total_neighbors': _cnt,                                  # 자기 포함
+        'core_mask'      : (_cnt >= min_pts_val).astype(float),
+        'final_labels'   : np.array([l + 1 if l >= 0 else 0 for l in _db.labels_], dtype=float),
+    }
+    print(f"[평문/sklearn] 클러스터 {len(set(cluster_labels_np) - {-1})}개, "
+        f"노이즈 {cluster_labels_np.count(-1)}개, core {int(debug_np['core_mask'].sum())}개")
     print(f"▶ Plaintext: {time()-pt_start:.2f}초\n")
 
     # ── Step 6: FHE DBSCAN (Heap 정렬 데이터) ────────────────────
@@ -349,7 +413,7 @@ def main():
     else:                     print("  => ❌ 군집 구조 붕괴")
 
     # ── Step 10: 최종 결과 저장 ──────────────────────────────────
-    output_filename = f"hepta_fhe_heap_result_eps{eps_val}_min{min_pts_val}.csv"
+    output_filename = f"longsquare_fhe_heap_result_eps{eps_val}_min{min_pts_val}.csv"
     try:
         with open(output_filename, 'w', encoding='utf-8') as f:
             axis_headers = [f"x{i+1}" for i in range(dimension)]

@@ -1,0 +1,9 @@
+============================================================
+  FHE DBSCAN E2E 테스트 (Heap KD-tree depth 전파)
+============================================================
+
+[STEP 0] MCP 파일 준비
+[MCP] mcp_alpha15_lp_cheb.json 존재 → 스킵 (Normalize 전용)
+
+▶ 데이터셋: /home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/tetra.arff
+eps 값 > 

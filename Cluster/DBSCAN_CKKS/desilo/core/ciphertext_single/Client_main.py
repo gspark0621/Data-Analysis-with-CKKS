@@ -68,7 +68,7 @@ from util.keypack import KeyPack
 #     hepta R=3, tetra R=7, lsun R=11, chainlink R=31, target R=26, atom R=6, moons R=29
 #     → 최대 31 → 2의 거듭제곱 올림 = 32 (여유 1). 7개 전부 ARI=1.0 (sklearn 일치).
 #   [한계] 곡률이 큰 매니폴드(나선 등)에는 불충분. 논문 한계 절에 명시할 것.
-_N_ROUNDS = 32
+_N_ROUNDS = 5
 
 # 전파 방식 임계값: 상단 정의로 모든 함수에서 참조 가능
 def _kd_dense_threshold(dim: int) -> int:
@@ -421,8 +421,29 @@ def setup_fhe_engine(verbose: bool = False):
     rk  = _create("rotation_key",        engine.create_rotation_key)
     rlk = _create("relinearization_key", engine.create_relinearization_key)
     ck  = _create("conjugation_key",     engine.create_conjugation_key)
-    bk  = _create("bootstrap_key",       engine.create_bootstrap_key)
     sbk = _create("smallbootstrap_key",  engine.create_small_bootstrap_key)
+
+    # ★ [2026-07] full bootstrap_key 생성 생략 (13.4GB → 0).
+    #   DesiloFHE 는 engine.bootstrap(ct, relin, conj, rotation, small_bootstrap)
+    #   형태를 지원하므로, 값 보존 bootstrap(EvalMod) 도 small 키로 수행 가능하다.
+    #   'small' 은 EvalSign 전용 키가 아니라 **키 변형**이다.
+    #   (sign_bootstrap 과 bootstrap 은 여전히 다른 연산 — 라벨처럼 임의 실수를
+    #    나르는 암호문에는 반드시 bootstrap 을 써야 한다. 바뀐 건 키뿐이다.)
+    #   실사용처: Label_Propagation._refresh, cleaning._refresh — 둘 다
+    #   _USE_SMALL_BOOT_FOR_REFRESH=True 로 small 키 경로를 쓴다.
+    #   나머지 3곳(Core.py:72, Normalize.py:68, chebyshev_eval.py:157)은
+    #   죽은 할당/죽은 분기라 None 이어도 무해하다.
+    #   ⇒ GPU 사용량 18.6GB → 약 5.2GB. Step 1(Normalize) 여유 6GB → 19GB.
+    #   문제 시 _CREATE_FULL_BOOTSTRAP_KEY=True + 각 파일의
+    #   _USE_SMALL_BOOT_FOR_REFRESH=False 로 원복.
+    _CREATE_FULL_BOOTSTRAP_KEY = False
+    if _CREATE_FULL_BOOTSTRAP_KEY:
+        bk = _create("bootstrap_key",    engine.create_bootstrap_key)
+    else:
+        bk = None
+        if verbose:
+            print(f"  [MEM] bootstrap_key                             "
+                  f"생략 (small 키로 대체)  (used={_gpu_used_mb():.0f} MB)")
 
     keypack = KeyPack(
         public_key=pk, rotation_key=rk, relinearization_key=rlk,
@@ -486,8 +507,133 @@ def setup_fhe_engine(verbose: bool = False):
 #     뒤섞이면 최대 슬롯이 인접할 수 있다 (lsun 이 실제 겹침 구조 —
 #     클러스터1 슬롯[202,399], 클러스터2 슬롯[200,339]. 다만 최대 슬롯이 멀어
 #     간격 67 확보). 아래 진단 출력으로 매 실행 확인할 것.
-_GAP_THRESHOLD = 1.0      # 라벨 간격이 이 값을 넘으면 다른 클러스터
+_GAP_THRESHOLD = 1.0      # 고정 thr (적응형 실패 시 폴백)
 _NOISE_BAND = 0.5         # |라벨| < 이 값이면 노이즈
+
+# ★ [2026-07] 적응형 thr — 고정 1.0 대신 복호화된 라벨에서 직접 결정.
+#
+# [동기] thr 의 안전조건은 "내부퍼짐 < thr < 클러스터간 최소간격" 인데,
+#   두 경계 모두 **데이터 의존**이다. 특히 클러스터간 최소간격은 N·k_max·dim
+#   같은 공개값으로는 유도할 수 없다(위 §반례: 슬롯상 뒤섞이면 간격 1 가능).
+#   고정 1.0 은 FCPS 7개에서 우연히 (0.079, 13) 사이에 들어맞았을 뿐 보장이 아니다.
+#
+# [정보유출 없음] 이 계산은 **클라이언트가 이미 복호화해 손에 쥔 라벨**만 사용한다.
+#   서버로 아무것도 보내지 않고, 서버는 thr 을 알지 못한다. 즉 기존 대비 추가 유출 0.
+#   (반대로 서버측에서 thr 을 정하려면 클러스터 구조를 알아야 하므로 유출이 생긴다.)
+#
+# [원리] 정렬된 gap 들은 '내부 gap(작음)'과 '클러스터간 gap(큼)' 두 무리로 갈린다.
+#   그 사이의 최대 *비율 점프* 를 찾아 기하평균을 thr 로 취한다. 비례감쇠·균일이동에
+#   불변이며, 감쇠가 심해지거나 내부퍼짐이 커져도 경계를 스스로 옮긴다.
+#
+# [검증 — 실측 수치 재현]
+#   tetra(내부0.079,간격48)→thr 1.61 (4클러스터 ✓) / atom(간격13)→0.56 (7 ✓)
+#   hepta(간격17)→0.73 (7 ✓) / chainlink(단일)→분리없음 판정 (1 ✓)
+#   감쇠 ×0.77 → 0.44 (7 ✓) / 내부퍼짐 10배 악화 → 1.46 (7 ✓)
+#   ※ 고정 1.0 도 이 케이스들은 통과하나, 여유가 줄면 먼저 깨진다.
+_ADAPTIVE_THR      = True    # False 면 _GAP_THRESHOLD 고정 사용
+_ADAPTIVE_MIN_RATIO = 8.0    # 이 배수 미만이면 '분리 없음'(단일 클러스터)로 판정
+
+# ★ [2026-07 최종] thr = 1.0·c  (c 추정 불가 시 1.0 폴백)
+#
+#   [원리] 라벨 = c·(정수). 여기서 c 는 FHE 감쇠계수이고, **감쇠 후 좌표계에서의
+#     라벨 1칸**이 바로 c 다. 따라서 thr=1.0·c 는 "라벨 한 칸"을 뜻한다.
+#     감쇠가 없으면 c=1 이라 예전의 하드코딩 1.0 과 정확히 같아진다.
+#
+#   [안전 구간]  내부퍼짐 s  <  thr  <  최소 진짜 간격
+#     · 상한: 라벨 = 성분 내 최대(슬롯인덱스+1)이고 PCA 정렬로 클러스터가 인덱스
+#       구간을 차지하므로, 인접 두 클러스터의 라벨 차 = 뒤 클러스터의 크기 ≥ min_pts.
+#       ⇒ 최소 진짜 간격 ≥ min_pts·c.  thr=1.0·c 면 상한 여유 = **정확히 min_pts 배**로
+#         감쇠와 무관한 불변량이 된다. (고정 1.0 은 3c 라서 c 가 떨어지면 여유도 준다.)
+#     · 하한: s < c 여야 한다. 실측 s/c = 0.56(16R), 0.45(32R).
+#
+#   [실측 검증 — lsun]
+#     n_rounds=16: c=0.9316, s=0.5206 → thr=0.9316 ✓ (하한 1.79배, 상한 3.00배)
+#     n_rounds=32: c=0.8782, s=0.3977 → thr=0.8782 ✓ (하한 2.21배, 상한 3.00배)
+#     ※ 한때 쓴 0.5·c 는 16라운드에서 s 아래로 내려가 클러스터를 갈랐다(ARI 99.47).
+#       문제는 c 스케일링이 아니라 **계수 0.5** 였다. 계수는 1.0 이 맞다.
+#
+#   [분모가 N 이 아니라 max(live_idx)+1 인 이유]
+#     live = |라벨| ≥ noise_band 인 점(=노이즈 아님). 뒤쪽에 노이즈가 몰리면
+#     최고 core 인덱스도 함께 낮아지므로, 분모를 max(live_idx)+1 로 두면 그 효과가
+#     상쇄되어 c 를 정확히 복원한다. 분모를 N 으로 고정하면 과소평가된다.
+#       예) N=400, 마지막 10점이 노이즈, 실제 c=0.88
+#           분모 N     → c_est=0.858 (2.5% 과소)
+#           분모 390   → c_est=0.880 (오차 0)
+#     남는 오차원은 뒤쪽 **border**(live 지만 core 아님)뿐이고, 그 경우에도
+#     과소평가 폭은 수 % 수준이라 하한 여유(1.8~2.2배) 안에서 흡수된다.
+_THR_C_FRACTION = 1.0
+_GAP_THRESHOLD_FIXED = 1.0      # c 추정 불가 시 폴백
+
+
+def choose_gap_threshold(v_live, live_idx=None, min_ratio=None, fallback=None):
+    """복호화된 라벨에서 thr 결정. 반환: (thr, 설명문자열).
+
+    ★ [2026-07 수정] 감쇠 기반 기준을 **1차 경로**로. 비율점프는 c 추정 불가 시 보조.
+
+    [이전 버그] 비율점프를 1차로 쓰고 `gaps = gaps[gaps > 0]` 로 0 을 걸렀더니,
+      **평문 경로에서 오작동**했다. 평문은 라벨이 정확한 정수라 내부 gap 이 정확히 0
+      → 필터에 전부 제거 → 남는 건 클러스터간 gap 뿐 → '작은 무리 vs 큰 무리' 대비가
+      사라져 비율이 3.6 밖에 안 나오고 '분리 없음'으로 오판(thr=532, 1클러스터).
+      FHE 에서는 노이즈로 내부 gap 이 0.079 같은 양수라 우연히 작동했다.
+
+    [원리] 라벨은 항상 c·(정수) 다 (초기값=슬롯인덱스+1, max 전파는 정수 보존,
+      FHE 감쇠는 비례 ×c). 따라서
+        · 클러스터간 간격 ≥ c·1 = c
+        · 내부퍼짐 = 비균일 오차 ≪ c
+      ⇒ thr = 0.5·c 는 항상 안전구간 (내부퍼짐, 최소간격) 안에 있다.
+      c ≈ max(라벨)/(최대 live 슬롯+1).  c 추정이 2배 틀려도 안전구간이 넓어
+      (예: atom 0.06 ~ 10) thr 은 여전히 구간 안에 남는다.
+
+    [검증] 평문 정확(5성분)→5 ✓ / 평문 단일→1 ✓ / FHE atom c=0.77→7 ✓ /
+      FHE 간격1 인접 c=0.961→3 ✓  (고정 thr=1.0 은 마지막 케이스에서 병합 실패)
+
+    [유출 없음] 클라이언트가 이미 복호화해 가진 라벨과 live 슬롯 인덱스만 사용.
+      서버로 아무것도 보내지 않고 서버는 thr 을 모른다.
+    """
+    min_ratio = _ADAPTIVE_MIN_RATIO if min_ratio is None else min_ratio
+    fallback  = _GAP_THRESHOLD if fallback is None else fallback
+    v = np.asarray(v_live, dtype=float)
+    sv = np.sort(v)
+    gaps = np.diff(sv)
+
+    # ── 1차: 감쇠계수 c 기반 (라벨 = c·정수 구조) ──
+    c_est = None
+    if live_idx is not None and len(live_idx) > 0:
+        denom = int(np.max(live_idx)) + 1
+        vmax = float(np.max(v))
+        if denom > 0 and vmax > 0:
+            c_est = vmax / denom
+    # ── 판정: thr = _THR_C_FRACTION · c  (c 추정 불가 시 고정 폴백) ──
+    thr = (_THR_C_FRACTION * c_est) if (c_est is not None and c_est > 0) \
+          else _GAP_THRESHOLD_FIXED
+    inner = gaps[gaps < thr]
+    inner_max = float(inner.max()) if len(inner) else 0.0
+    n_cut = int((gaps >= thr).sum())
+    why = f"thr={thr:.4f} | 내부최대 {inner_max:.4f}, 분리 {n_cut}곳"
+    # ── c 는 진단용: 감쇠가 얼마나 진행됐는지 + 여유가 얼마나 남았는지 ──
+    if c_est is not None and c_est > 0:
+        why += f" | 감쇠 c≈{c_est:.4f}"
+        if 3.0 * c_est < thr:
+            why += (f"  ★★경고: 3c={3*c_est:.3f} < thr={thr} — 감쇠가 심해 최소 클러스터"
+                    f" 간격(≥min_pts·c)이 thr 아래로 내려갔다. 클러스터 병합 위험.")
+    if inner_max > 0.5 * thr:
+        why += (f"  ★★경고: 내부퍼짐 {inner_max:.4f} 이 thr 의 50% 초과 — "
+                f"라벨 감쇠 누적. n_rounds 축소 또는 _SGN_CLEANING_ITERS 상향 필요")
+    return thr, why
+
+    # ── 보조: c 추정 불가 시 비율점프 ──
+    gp = gaps[gaps > 0]
+    if len(gp) < 2:
+        return fallback, f"c 추정 불가 & gap 부족 → 고정 thr={fallback}"
+    sg = np.sort(gp)
+    ratios = sg[1:] / np.maximum(sg[:-1], 1e-12)
+    i = int(np.argmax(ratios)); best = float(ratios[i])
+    if best < min_ratio:
+        return float(sg[-1] * 2.0), (f"c 추정 불가, 비율점프 {best:.1f} < {min_ratio} "
+                                     f"→ 단일 클러스터로 판정")
+    lo, hi = float(sg[i]), float(sg[i + 1])
+    return float(np.sqrt(lo * hi)), (f"c 추정 불가 → 비율점프 {best:.0f}배 "
+                                     f"(내부최대 {lo:.4f} | 간격최소 {hi:.4f})")
 
 
 def assign_clusters_by_gap(orig_labels, N, thr=None, noise_band=None):
@@ -495,7 +641,6 @@ def assign_clusters_by_gap(orig_labels, N, thr=None, noise_band=None):
 
     반환: list[int]. 노이즈는 -1, 클러스터는 대표 라벨(그룹 중앙값의 반올림).
     """
-    thr = _GAP_THRESHOLD if thr is None else thr
     noise_band = _NOISE_BAND if noise_band is None else noise_band
     v = np.asarray(orig_labels, dtype=float)
     out = np.full(len(v), -1, dtype=int)
@@ -504,6 +649,14 @@ def assign_clusters_by_gap(orig_labels, N, thr=None, noise_band=None):
     if len(live) == 0:
         print(f"[Client] 간격판정: 전부 노이즈 (|라벨| < {noise_band})")
         return out.tolist()
+
+    # ★ thr 결정: 명시 지정 > 적응형 > 고정
+    if thr is None:
+        if _ADAPTIVE_THR:
+            thr, why = choose_gap_threshold(v[live], live_idx=live)
+            print(f"[Client] 적응형 thr: {why}")
+        else:
+            thr = _GAP_THRESHOLD
 
     order = live[np.argsort(v[live])]
     grp, groups = [order[0]], []

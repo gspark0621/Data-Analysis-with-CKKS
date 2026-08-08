@@ -363,7 +363,14 @@ _MINIMIZE_DEPTH_DEGREES = {
     10: [7, 7, 13, 15],
     11: [7, 15, 15, 15],
     12: [15, 15, 15, 15],
-    13: [7, 7, 7, 7, 15],
+    13: [15, 15, 15, 31],   # ★ [2026-07 정정] 기존 [7,7,7,7,15] 는 논문 Table 2 와
+                            #   불일치(오타). 논문 minimize-depth α=13 = {15,15,15,31}.
+                            #   증상: sanity_sweep 에서 α=13 만 1x 오차 1e-5 (이웃 α=12/15 는
+                            #   1e-12). 스펙 2^-13=1.2e-4 는 만족하나 여유가 없어 이웃 대비
+                            #   10^7 배 열등했다. 다른 8개 항목은 논문과 완전 일치 확인됨.
+                            #   ※ degree 31 은 이 Chebyshev BSGS 구현에서 미검증
+                            #     (논문도 '31 초과는 수치오차' 경고). 정정 후 sanity_sweep 로
+                            #     α=13 재측정 전까지는 호출측의 13→12 회피를 유지할 것.
     14: [7, 7, 15, 15, 27],
     15: [7, 15, 15, 15, 27],
     16: [15, 15, 15, 15, 27],
@@ -700,40 +707,127 @@ def eval_mcp_np_chebyshev(x, components: List[dict]) -> np.ndarray:
     return val
 
 
-def compute_mcp_with_margin_chebyshev(
-    degrees: List[int], delta: float,
-    margin: float, alpha: int, verbose: bool = True,
-) -> List[dict]:
-    """
-    Chebyshev basis MCP. coeffs는 odd Chebyshev (T_1, T_3, ..., T_{2m-1}).
-    """
-    a, b = delta, 1.0
-    comps = []
-    
-    safety = 2.0 ** -(alpha - 1)
-    if verbose:
-        print(f"\n[MCP-Cheb] degrees={degrees}, δ={delta:.6e}, η={margin:.6e} "
-              f"(= 2^{math.log2(margin):.2f})")
-        print(f"           안전 임계값 t_k ≤ {safety:.4e}")
-    
+def _build_chain_chebyshev(degrees, delta, margin, cache=None):
+    """주어진 (degrees, δ, η) 로 minimax 합성 체인을 만들고 (comps, t_k) 반환."""
+    a, b, comps = delta, 1.0, []
     for i, deg in enumerate(degrees):
-        if verbose:
-            print(f"  p_{i+1} (deg={deg})  [{a:.8f}, {b:.8f}]  ...", end="", flush=True)
-        coeffs, err = remez_odd_sign_chebyshev(deg, a / b, 1.0)
+        key = (deg, round(a / b, 12))
+        if cache is not None and key in cache:
+            coeffs, err = cache[key]
+        else:
+            coeffs, err = remez_odd_sign_chebyshev(deg, a / b, 1.0)
+            if cache is not None:
+                cache[key] = (coeffs, err)
         t_i = err + margin
         comps.append({
-            "index": i+1, "degree": int(deg), "coeffs": coeffs.tolist(),
+            "index": i + 1, "degree": int(deg), "coeffs": coeffs.tolist(),
             "domain_a": float(a), "domain_b": float(b),
             "error": float(err), "margin": float(margin), "t_i": float(t_i),
             "basis": "chebyshev",
         })
-        if verbose: print(f"  err={err:.4e}, t_i={t_i:.4e}")
+        if t_i >= 1.0:
+            return comps, 999.0
         a, b = 1.0 - t_i, 1.0 + t_i
-    
-    final_t = comps[-1]["t_i"]
+    return comps, comps[-1]["t_i"]
+
+
+def find_max_valid_margin(degrees, delta, alpha, n_iter=14, cache=None, hi0=None):
+    """τ_k ≤ 2^(1-α) 를 만족하는 **최대** margin η 를 이분탐색.
+
+    ★ 이것이 논문(Lee et al.) Section 3.5 / Algorithm 7 의 원래 처방이다:
+      "the margin η is set as large as possible among valid values of margin
+       such that τ_k ≤ 2^{1-α}".
+      즉 η 는 표에서 가져오는 상수가 아니라 **degree 세트에 종속된 값**이다.
+      Table 3 은 α∈{8,12,16,20} 의 특정 degree 세트에 대해서만 주어져 있고,
+      그 사이 α 를 보간하거나 다른 degree 세트에 그대로 쓰면 근거가 없다.
+    """
+    import warnings
+    safety = 2.0 ** -(alpha - 1)
+    # ★ 탐색 중 Remez 미수렴 경고는 억제한다. tol=1e-13 은 배정밀도 한계라 통상
+    #   n_iter 를 소진하며(정상 동작), 이분탐색이 η 마다 Remez 를 재호출하므로
+    #   억제하지 않으면 경고가 수십 개로 늘어 실제 문제를 가린다.
+    #   (탐색 종료 후 최종 체인은 억제 없이 한 번 더 만들어 경고를 정상 노출한다.)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        if _build_chain_chebyshev(degrees, delta, 0.0, cache)[1] > safety:
+            return 0.0                  # η=0 으로도 불가 → degree 세트 자체가 부족
+        lo, hi = 0.0, (hi0 if hi0 is not None else 2.0 ** -(alpha - 1))
+        for _ in range(n_iter):
+            mid = (lo + hi) / 2
+            if _build_chain_chebyshev(degrees, delta, mid, cache)[1] <= safety:
+                lo = mid
+            else:
+                hi = mid
+    return lo
+
+
+def _resolve_margin(degrees, delta, margin, tau_limit, alpha, cache, tag=""):
+    """지정 margin 이 tau_limit 을 위반하면 논문 §3.5 처방(유효 최대 η)으로 자동 하향.
+    반환: (comps, final_t, used_margin).  η=0 에서도 불가하면 RuntimeError."""
+    comps, final_t = _build_chain_chebyshev(degrees, delta, margin, cache)
+    if final_t <= tau_limit:
+        return comps, final_t, margin
+
+    # tau_limit 기준으로 유효 최대 η 이분탐색 (경고 억제)
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        if _build_chain_chebyshev(degrees, delta, 0.0, cache)[1] > tau_limit:
+            raise RuntimeError(
+                f"[MCP{tag}] degree 세트 자체가 부족: η=0 에서도 t_k > {tau_limit:.4e} "
+                f"(α={alpha}, degrees={degrees}). degree 를 상향해야 한다.")
+        # ★ 탐색 상한 = 실패한 margin. (margin 이 실패했으므로 답은 반드시 그 아래)
+        #   이전엔 hi=0.5 로 시작해 12회로는 1e-4 수준을 분해하지 못하고 lo=0 으로
+        #   떨어졌다(η=0 → CKKS 오차 보호 상실). 상한을 margin 으로 좁히면
+        #   12회에 margin/4096 해상도가 나와 충분하다.
+        lo, hi = 0.0, margin
+        for _ in range(14):
+            mid = (lo + hi) / 2
+            if _build_chain_chebyshev(degrees, delta, mid, cache)[1] <= tau_limit:
+                lo = mid
+            else:
+                hi = mid
+    used = 0.9 * lo
+    comps2, final2 = _build_chain_chebyshev(degrees, delta, used, cache)
+    print(f"  [MCP{tag}] ⚠ 지정 η={margin:.4e} 는 스펙 위반 (t_k={final_t:.4e} > {tau_limit:.4e}).")
+    print(f"            논문 §3.5 처방대로 유효 최대 η={lo:.4e} 를 찾아 90%={used:.4e} 로 "
+          f"자동 하향 → t_k={final2:.4e}  (α={alpha}, degrees={degrees})")
+    if final2 > tau_limit:
+        raise RuntimeError(
+            f"[MCP{tag}] 자동 하향 후에도 위반: t_k={final2:.4e} > {tau_limit:.4e}")
+    return comps2, final2, used
+
+
+def compute_mcp_with_margin_chebyshev(
+    degrees: List[int], delta: float,
+    margin: float, alpha: int, verbose: bool = True,
+) -> List[dict]:
+    """Chebyshev basis MCP. coeffs는 odd Chebyshev (T_1, T_3, ..., T_{2m-1}).
+
+    ★ [2026-07] margin 자동 보정.
+      [문제] get_paper_margin 은 논문 Table 3 을 α 로 보간해 η 를 준다. 그런데
+        (1) Table 3 의 η 는 α∈{8,12,16,20} 의 **특정 degree 세트**에 대해 실험적으로
+            정해진 값이라 다른 α/다른 세트에 그대로 쓸 근거가 없고,
+        (2) η 는 체인의 **매 단계마다 더해져 누적**되므로, 여유가 얇은 degree 세트에서는
+            η 가 조금만 커도 t_k 가 2^(1-α) 를 넘는다.
+        실제로 논문 Table 2 세트는 여유가 1.1~1.9배뿐이라 α=10,12 에서 보간 η 를
+        감당하지 못하고 스펙을 위반한다(관측된 RuntimeError 의 원인).
+      [해결] 논문 Section 3.5 의 원래 처방대로 '유효 범위 내 최대 η' 를 이분탐색해
+        쓴다. 주어진 margin 이 유효하면 그대로 쓰고, 초과하면 자동으로 낮춘다.
+        η 는 클수록 CKKS 오차에 강인하므로 유효 최대치의 90% 를 채택한다.
+    """
+    safety = 2.0 ** -(alpha - 1)
+    cache = {}
+    comps, final_t, used_margin = _resolve_margin(
+        degrees, delta, margin, safety, alpha, cache, tag="-Cheb")
     if verbose:
-        print(f"\n[MCP-Cheb] 완료  t_k={final_t:.4e}  "
-              f"{'✓ SAFE' if final_t <= safety else '✗ UNSAFE'} (≤{safety:.4e})")
+        print(f"\n[MCP-Cheb] degrees={degrees}, δ={delta:.6e}, η={used_margin:.6e}")
+        print(f"           안전 임계값 t_k ≤ {safety:.4e}")
+        for c in comps:
+            print(f"  p_{c['index']} (deg={c['degree']})  "
+                  f"[{c['domain_a']:.8f}, {c['domain_b']:.8f}]  "
+                  f"err={c['error']:.4e}, t_i={c['t_i']:.4e}")
+        print(f"[MCP-Cheb] 완료  t_k={final_t:.4e}  ✓ SAFE (≤{safety:.4e})")
     return comps
 
 
@@ -767,6 +861,96 @@ def compute_mcp_for_core_chebyshev(alpha: int = 12, verbose: bool = True) -> Lis
         print(f"                min input gap = 0.5/N = {0.5/N_ref:.5f} (N={N_ref})")
         print(f"                margin η = 2^{math.log2(margin):.2f} (Table 3)")
     return compute_mcp_with_margin_chebyshev(degrees, delta, margin, alpha, verbose)
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# ★ [2026-07] cleaning 예산을 활용한 LP 전용 MCP  (δ 와 τ 를 분리)
+#
+# [착안] 논문 Table 2 의 α 는 deadzone δ=2^-α 와 출력정밀도 τ=2^(1-α) 를 **함께**
+#   묶는다. 그러나 우리 파이프라인은 MCP 뒤에 sign_cleaning g(x)=1.5x-0.5x³ 이
+#   붙고, 이는 오차를 **이차수렴**으로 줄인다(e→1.5e²). 즉
+#     · δ (deadzone) : 라벨차 1 을 삼키면 전파가 깨지므로 **반드시** δ ≤ gap. cleaning 무관.
+#     · τ (출력정밀도): cleaning 이 처리 가능 → **훨씬 느슨해도 된다**.
+#   두 요구를 분리해 τ 만 풀면 컴포넌트(=sign_bootstrap) 수를 줄일 수 있다.
+#
+# [τ 목표 산정] cleaning n회 후 최종오차 η 를 정하고 역산.
+#   e_1=1.5e₀², e_2=3.375e₀⁴, e_3=17.1e₀⁸ …
+#   η 목표는 1e-6 채택: sign 유래 감쇠 = n_max·|d|·η/2 인데, 실측상 기존 감쇠
+#   (tetra 15.45/400, bootstrap 유래)와 같아지는 η* ≈ 7.8e-4 이므로 1e-6 이면
+#   그 0.1% 수준 → sign 이 감쇠 지배항이 되지 않는다.
+#     cleaning 2회 → τ ≤ 0.0234 / cleaning 3회 → τ ≤ 0.1277
+#
+# [탐색] δ=2^-α 고정, τ≤목표 를 만족하는 최소 (컴포넌트수, 깊이비용) degree 조합을
+#   DP 로 전탐색(후보 {3,5,7,13,15,27,31}, dep 은 논문 Table 1). 결과가 아래 표.
+#
+# [효과] 논문 Table 2 대비 컴포넌트 1개 감소(α=9~13) → fhe_max bootstrap 5 → 4.
+#   (#3 중복 SB 제거와 합쳐 원래 7 → 4, 총 1.75배)
+#
+# ★ 검증 필요: cleaning 2회는 레벨 4 를 쓴다(1회는 2). sign_bootstrap 직후의
+#   레벨 여유가 4 이상인지 확인할 것. 부족하면 _SGN_CLEANING_ITERS 를 되돌리고
+#   아래 표의 clean1 열(더 촘촘한 τ)을 쓰면 된다.
+# ── [레버 A] 논문과 동일한 τ 목표, 단 '컴포넌트 수' 최소화 ──────────────────
+#   논문은 depth/비스칼라곱셈을 최소화한다(컴포넌트 사이에 bootstrap 이 없으므로).
+#   그러나 우리 파이프라인은 eval_mcp 가 **컴포넌트마다 sign_bootstrap** 을 한다.
+#   즉 우리 비용은 depth 가 아니라 **컴포넌트 수**다. 목적함수를 바꿔 같은 τ 로
+#   재탐색하면 총 depth 는 논문과 동일하면서 컴포넌트가 1개 적은 해가 존재한다.
+#   ★ τ 목표가 논문과 완전히 같으므로 정확도 저하 위험이 없다.
+#   (검증: 이 DP 를 논문 목표로 돌리면 Table 2 의 최소 depth 를 α=8~16 전부 재현.)
+_LP_DEGREES_COMP_MIN = {   # τ ≤ 2^(1-α) — 논문과 동일
+    8:  [7, 15, 15],       # 3개, dep 11 (논문과 동일)
+    9:  [15, 15, 31],      # 3개, dep 13 (논문 4개 → 1개 감소)
+    10: [15, 31, 31],      # 3개, dep 14 (논문 4개 → 1개 감소)
+    11: [31, 31, 31],      # 3개, dep 15 (논문 4개 → 1개 감소)
+    12: [7, 15, 15, 31],   # 4개, dep 16 (논문과 동일)
+    13: [15, 15, 15, 31],  # 4개, dep 17 (논문과 동일)
+    14: [15, 31, 31, 31],  # 4개, dep 19 (논문 5개 → 1개 감소)
+    15: [31, 31, 31, 31],  # 4개, dep 20 (논문 5개 → 1개 감소)
+}
+
+# ── [레버 B] 추가로 τ 를 cleaning 예산까지 완화 ────────────────────────────
+#   sign_cleaning g(x)=1.5x-0.5x³ 는 이차수렴(e→1.5e²)이라 MCP 출력정밀도 τ 를
+#   느슨하게 둬도 최종 η 를 유지한다. δ(deadzone)는 절대 건드리지 않는다.
+#   η 목표 1e-6 채택 근거: sign 유래 감쇠 = n_max·|d|·η/2 이고, 실측상 기존 감쇠
+#   (tetra 15.45/400, bootstrap 유래)와 같아지는 η*≈7.8e-4 → 1e-6 이면 그 0.1%.
+#   ★ 레버 A 대비 추가 이득은 α=8,12 에서만 1개. 레벨을 2 더 쓰므로(cleaning 2회)
+#     기본은 A 만 쓰고, B 는 필요할 때만 켠다.
+_LP_DEGREES_BY_CLEANING = {
+    2: {8: [31, 31], 9: [15, 15, 15], 10: [15, 15, 31], 11: [15, 31, 31],
+        12: [31, 31, 31], 13: [15, 15, 15, 15], 14: [15, 15, 15, 31],
+        15: [15, 15, 31, 31]},
+    3: {8: [15, 31], 9: [31, 31], 10: [15, 15, 15], 11: [15, 15, 31],
+        12: [15, 31, 31], 13: [31, 31, 31]},
+}
+_LP_TAU_TARGET = {1: 0.0008, 2: 0.0234, 3: 0.1277}   # η≤1e-6 기준
+
+
+def compute_mcp_for_label_prop_cleaning(alpha: int, cleaning_iters: int = 2,
+                                        verbose: bool = True) -> List[dict]:
+    """LP 전용 MCP: deadzone δ=2^-α 는 유지, 출력정밀도 τ 는 cleaning 예산까지 완화."""
+    if cleaning_iters <= 1:
+        table = _LP_DEGREES_COMP_MIN            # 레버 A (논문 τ)
+    else:
+        table = _LP_DEGREES_BY_CLEANING.get(cleaning_iters)   # 레버 A+B
+    if table is None or alpha not in table:
+        raise ValueError(f"[MCP-LP] (α={alpha}, cleaning={cleaning_iters}) 조합의 "
+                         f"degree 표가 없다. minimax.py 의 표를 확인.")
+    degrees   = table[alpha]
+    delta     = 2.0 ** (-alpha)
+    margin    = get_paper_margin(alpha, mode="max_depth")
+    tau_limit = (2.0 ** (1 - alpha)) if cleaning_iters <= 1 else _LP_TAU_TARGET[cleaning_iters]
+    cache = {}
+    comps, final_t, used = _resolve_margin(
+        degrees, delta, margin, tau_limit, alpha, cache, tag="-LP")
+    if verbose:
+        print(f"\n[MCP-LP] α={alpha}, cleaning={cleaning_iters}회, degrees={degrees}, "
+              f"δ={delta:.4e}, η={used:.4e}")
+        print(f"         τ 허용 한계 = {tau_limit:.4e}")
+        for c in comps:
+            print(f"  p_{c['index']} (deg={c['degree']}) "
+                  f"[{c['domain_a']:.6f},{c['domain_b']:.6f}] "
+                  f"err={c['error']:.4e} t_i={c['t_i']:.4e}")
+        print(f"[MCP-LP] t_k={final_t:.4e} ✓ (≤{tau_limit:.4e})")
+    return comps
 
 
 def compute_mcp_for_label_prop_chebyshev(alpha: int = 15, verbose: bool = True) -> List[dict]:

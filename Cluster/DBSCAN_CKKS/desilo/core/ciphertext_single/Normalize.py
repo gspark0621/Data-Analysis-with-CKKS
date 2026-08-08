@@ -30,9 +30,12 @@
 #   - Bossuat et al. EUROCRYPT 2021 Algorithm 1 정확히 따름
 
 import math
+import os
 from desilofhe import Engine
 from util.keypack import KeyPack
-from core.ciphertext_single.minimax import load_mcp
+from core.ciphertext_single.minimax import (
+    load_mcp, compute_mcp_with_margin_chebyshev, save_mcp,
+)
 from core.ciphertext_single.chebyshev_eval import eval_mcp_full_chebyshev
 from core.ciphertext_single.cleaning import bit_cleaning   # ★ [2026-05c] 작업 A
 
@@ -40,10 +43,52 @@ from core.ciphertext_single.cleaning import bit_cleaning   # ★ [2026-05c] 작�
 _CLEANING_ITERS = 1
 
 
+# ── Normalize α 자동선택 (N 기반, margin 은 그대로 유지) ─────────────────
+#   [margin 유지] threshold = eps² + margin_val (한쪽) 그대로.  eps 안쪽 진짜
+#     이웃은 데드존 밖 → adj=1 확실 → false negative 0 (놓치는 이웃 없음).
+#     이 로직은 margin 을 건드리지 않고 데드존(δ=2^-α)만 좁혀, eps 바깥
+#     false positive 밴드(eps², eps_eff²)를 얇게 만들어 과대계수를 없앤다.
+#   [N 기반] margin 과대계수 ≈ (표본밀도)×2^-α, 정규화 데이터에선 밀도 ∝ N
+#     → α = clamp(⌈log₂N⌉ + C, 15, 20).  Core/LP 와 같은 스케일링.
+#   [C=8] Normalize 는 '연속' dist² 를 eps² 와 비교 → 최소 gap 이 데이터
+#     경계밀도 의존(양자화 아님) → 정확 공식 불가.  밀도경계(twodiamonds)에서
+#     과검출 0 이 되는 최소가 α=18 → C=18-⌈log₂800⌉=8 (보수적 상수).
+_NORM_ALPHA_SAFETY = 8
+_NORM_ALPHA_MIN    = 15
+_NORM_ALPHA_MAX    = 20
+_NORM_DEGREES = {   # 전부 deg≤31, BSGS depth≤5 (=10레벨 ≤ budget10)
+    15: [7, 15, 15, 15, 27],
+    16: [15, 15, 15, 15, 31],
+    17: [7, 15, 15, 15, 15, 31],
+    18: [7, 15, 15, 15, 15, 31],
+    19: [15, 15, 15, 15, 15, 31],
+    20: [7, 15, 15, 15, 15, 31, 31],
+}
+
+
+def _norm_alpha(N: int) -> int:
+    """Normalize α = clamp(⌈log₂N⌉ + C, 15, 20).  margin 은 별도로 유지됨."""
+    a = math.ceil(math.log2(max(int(N), 2))) + _NORM_ALPHA_SAFETY
+    return max(_NORM_ALPHA_MIN, min(_NORM_ALPHA_MAX, a))
+
+
+def _ensure_norm_mcp(N: int, out_dir: str = ".") -> str:
+    """N 의 α 에 맞는 Normalize MCP 를 없으면 생성하고 경로 반환 (Core/LP _ensure 와 동일 패턴)."""
+    a    = _norm_alpha(N)
+    path = os.path.join(out_dir, f"mcp_alpha{a}_norm_cheb.json")
+    if not os.path.exists(path):
+        degs  = _NORM_DEGREES[a]
+        comps = compute_mcp_with_margin_chebyshev(degs, 2.0 ** -a, 2.0 ** -(a + 2), a, verbose=False)
+        save_mcp(comps, path)
+        print(f"[Normalize] N={N} → α={a} MCP 생성 (degrees={degs}, margin 유지)")
+    return path
+
+
 def check_neighbor_closed_interval(
     engine, dist_sq_ct, eps_sq, keypack, dimension,
     bootstrap_interval=3,
-    mcp_path="mcp_alpha15_lp_cheb.json",   # ★ α=15 통일 (Normalize/Core/LP 공유)
+    num_points=None,                       # ★ N: α 자동선택용 (⌈log₂N⌉+8)
+    mcp_path=None,                         # ★ 명시하면 override; None 이면 N 기반
     debug: bool = False,
 ):
     """
@@ -65,9 +110,17 @@ def check_neighbor_closed_interval(
     """
     relin_key  = keypack.relinearization_key
     conj_key   = keypack.conjugation_key
-    boot_key   = keypack.bootstrap_key
+    # ★ [2026-07] 제거: 이 파일은 표준 bootstrap 을 직접 호출하지 않는다.
+    #   (sign_bootstrap → smallbootstrap_key, bit_cleaning 내부 _refresh 는
+    #    cleaning.py 가 처리). full bootstrap_key 는 생성되지 않으므로
+    #    이 할당을 남겨두면 None 이 되어 혼란만 준다.
     slot_count = engine.slot_count
 
+    # ★ N 기반 α 자동선택 (margin 은 아래 threshold 계산에서 그대로 유지)
+    if mcp_path is None:
+        if num_points is None:
+            raise ValueError("[Normalize] num_points 또는 mcp_path 중 하나는 필요합니다.")
+        mcp_path = _ensure_norm_mcp(int(num_points))
     components = load_mcp(mcp_path)
 
     # ── basis 확인 (Chebyshev여야 함) ────────────────────────────────

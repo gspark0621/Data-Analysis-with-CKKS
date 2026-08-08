@@ -17,6 +17,7 @@
 
 import os
 import math
+import gc
 from time import time
 import desilofhe
 from desilofhe import Engine, Ciphertext
@@ -126,8 +127,24 @@ def send_to_server_fhe(
     #     순환상 stride s 인 간선은 min(s, N-s) ≤ k_max 이면 커버되며,
     #     k=1..k_max forward + rotate 역방향이 min(s,N-s) ≤ k_max 를 모두 포함한다.
     _k_upper = k_max if use_kd_propagation else (N // 2)
+    # ★ [2026-07 진단] Normalize 가 표준 bootstrap(13.4GB 키)을 쓰는지 계측
+    from core.ciphertext_single.cleaning import std_boot_count
+    std_boot_count(reset=True)
     print(f"\n[Step 1] Normalize 시작 (k=1..{_k_upper}, eps^2={eps**2:.4f})")
     normalize_start = time()
+
+    # ★ [2026-07 메모리] Step 1 은 다음 두 가지로 GPU 메모리를 소모한다.
+    #   (a) adj_k_list: k_max 개 암호문을 **끝까지 보유**한다(LP 의 adjm_cache 가 필요).
+    #       N=800/k_max=83 이면 신선 암호문 ~28MB × 83 ≈ 2.3GB.
+    #   (b) 루프 중간값: rotated_col / diff_ct / sq_ct / dist_sq_k / adj_Nk 가
+    #       매 반복 dim 회 생성되는데 명시적으로 해제되지 않아, GC 시점에 따라
+    #       여러 세대가 동시에 살아있을 수 있다.
+    #   키가 이미 18.6GB(그중 bootstrap_key 13.4GB)를 점유한 상태라 여유가 ~6GB 뿐이라
+    #   (b) 가 쌓이면 OOM 이 난다.
+    #   ⇒ 아래는 (b) 를 즉시 해제하고 주기적으로 gc 를 돌린다. 알고리즘/정확도 변경 없음.
+    #   ※ 되돌리려면 이 블록을 원래 루프로 교체하면 된다(로직 동일).
+    _MEM_AGGRESSIVE_FREE = True     # False 면 기존 동작(해제 없음)
+    _GC_EVERY = 8                   # 몇 stride 마다 gc.collect()
 
     for k in range(1, _k_upper + 1):
         dist_sq_k = None
@@ -135,30 +152,52 @@ def send_to_server_fhe(
             base_col    = encrypted_columns[d]
             rotated_col = fhe_circular_shift(engine, base_col, k, N, keypack)
             diff_ct     = engine.subtract(base_col, rotated_col)
+            if _MEM_AGGRESSIVE_FREE:
+                del rotated_col
             sq_ct       = engine.square(diff_ct, keypack.relinearization_key)
-            dist_sq_k   = sq_ct if dist_sq_k is None else engine.add(dist_sq_k, sq_ct)
+            if _MEM_AGGRESSIVE_FREE:
+                del diff_ct
+            if dist_sq_k is None:
+                dist_sq_k = sq_ct
+            else:
+                _prev     = dist_sq_k
+                dist_sq_k = engine.add(_prev, sq_ct)
+                if _MEM_AGGRESSIVE_FREE:
+                    del _prev, sq_ct
 
         before_adj = _gpu_used_mb()
         adj_k = check_neighbor_closed_interval(
             engine, dist_sq_k, eps**2, keypack, dim,
-            mcp_path="mcp_alpha15_lp_cheb.json",
+            num_points=N,          # ★ N 기반 α 자동선택(⌈log₂N⌉+8). mcp_path 고정 제거.
         )
+        if _MEM_AGGRESSIVE_FREE:
+            del dist_sq_k               # sign-eval 끝나면 즉시 불필요
         adj_k_list.append(adj_k)   # k=1..N//2 저장
 
         # total_neighbors 누적 (대칭 최적화)
         if 2 * k < N:
             adj_Nk = fhe_circular_shift(engine, adj_k, N - k, N, keypack)
-            total_neighbors_ct = (
-                engine.add(adj_k, adj_Nk)
-                if total_neighbors_ct is None
-                else engine.add(total_neighbors_ct, engine.add(adj_k, adj_Nk))
-            )
+            _pair  = engine.add(adj_k, adj_Nk)
+            if _MEM_AGGRESSIVE_FREE:
+                del adj_Nk
+            if total_neighbors_ct is None:
+                total_neighbors_ct = _pair
+            else:
+                _acc = total_neighbors_ct
+                total_neighbors_ct = engine.add(_acc, _pair)
+                if _MEM_AGGRESSIVE_FREE:
+                    del _acc, _pair
         else:   # k == N//2: double counting 방지
-            total_neighbors_ct = (
-                adj_k
-                if total_neighbors_ct is None
-                else engine.add(total_neighbors_ct, adj_k)
-            )
+            if total_neighbors_ct is None:
+                total_neighbors_ct = adj_k
+            else:
+                _acc = total_neighbors_ct
+                total_neighbors_ct = engine.add(_acc, adj_k)
+                if _MEM_AGGRESSIVE_FREE:
+                    del _acc
+
+        if _MEM_AGGRESSIVE_FREE and (k % _GC_EVERY == 0):
+            gc.collect()
 
         if k % 10 == 0 or k == N // 2:
             _mem_delta(f"adj_k[{k}] 생성 (누적 {k}회 MCP)", before_adj)
@@ -169,6 +208,9 @@ def send_to_server_fhe(
 
     timings["normalize_sec"] = time() - normalize_start
     print(f"[TIME] Normalize: {timings['normalize_sec']:.2f}초")
+    _n_std = std_boot_count(reset=True)
+    print(f"  [진단] Normalize 구간 표준 bootstrap 호출 수 = {_n_std}회"
+          f"  {'→ bootstrap_key 불필요! 생성 지연 가능(13.4GB 확보)' if _n_std == 0 else '→ bootstrap_key 필요'}")
     _print_mem(f"Normalize 완료 (adj_k_list {len(adj_k_list)}개 = k=1..{_k_upper})")
 
     dec_total = np.real(engine.decrypt(total_neighbors_ct, secret_key)[:N])

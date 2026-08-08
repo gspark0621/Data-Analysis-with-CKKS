@@ -82,7 +82,7 @@ def eval_mcp_full_chebyshev(
     """
     relin_key = keypack.relinearization_key
     conj_key  = keypack.conjugation_key
-    boot_key  = keypack.bootstrap_key
+    # boot_key 제거: 위 폴백이 small 키를 직접 참조한다 (2026-07)
 
     current = ct
 
@@ -154,7 +154,12 @@ def eval_mcp_full_chebyshev(
                 keypack.smallbootstrap_key,
             )
         else:
-            current = engine.bootstrap(current, relin_key, conj_key, boot_key)
+            # ★ [2026-07] full bootstrap_key 를 생성하지 않으므로 small 키 형태 사용.
+            #   (_INTER_COMPONENT_BOOTSTRAP='standard' 로 되돌려도 동작하도록 유지)
+            current = engine.bootstrap(
+                current, relin_key, conj_key,
+                keypack.rotation_key, keypack.smallbootstrap_key,
+            )
 
         if debug:
             try:

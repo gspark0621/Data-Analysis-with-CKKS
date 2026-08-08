@@ -29,7 +29,75 @@ from core.ciphertext_single.chebyshev_eval import eval_mcp_full_chebyshev
 from core.ciphertext_single.cleaning import bit_cleaning   # ★ [2026-05c] 작업 A
 
 
-_MCP_CORE_PATH = "mcp_alpha15_lp_cheb.json"   # ★ Normalize/LP와 공유 (Chebyshev, α=15 통일)
+_MCP_CORE_PATH = "mcp_alpha15_lp_cheb.json"   # ★ N-aware 미사용 시 폴백 (α=15 고정)
+
+# ★ [#1-Core 2026-07] N 기반 α 자동 선택.
+#   근거: neighbor_count 는 (FHE 노이즈 이전) 정수, min_pts 도 정수 → 분자
+#     (neighbor_count-(min_pts-0.5)) 는 항상 반정수 → |분자| ≥ 0.5 결정적.
+#     LP 라벨과 동일한 '정수 카운트' 구조 → gap = 0.5/N 은 오직 N 에만 의존.
+#     (Normalize 의 dist_sq 는 연속값이라 이 논리가 적용되지 않음 — 별개 취급 유지.)
+#
+#   ★★★ 중요 경고 (본 파일 상단 이력에서 확인) ★★★
+#     "α=12 Core worst case = 0.5/N ≈ 9.7τ 영역의 안전성 미확인.
+#      sanity check에서 x=4τ FAIL, x=33τ PASS — 9.7τ는 측정 안 됨."
+#     즉 nominal gap/τ 비율(=몇 배 여유)만으로 안전을 판단하면 안 된다 — 실측
+#     sanity_check_chebyshev 가 작은 배수(4τ)에서 이미 실패한 전례가 있다.
+#     따라서 아래 _CORE_ALPHA_SAFETY_BITS 는 "이 정도면 충분하다"는 보장이 아니라
+#     출발점일 뿐이며, 실제 배포 전 반드시
+#       sanity_check_chebyshev(test_x_values=[gap, 2·gap, 4·gap, 8·gap, ...])
+#     로 선택한 α 에서 gap 근방이 PASS 하는지 실측 확인할 것. FAIL 이면
+#     safety_bits 를 올려 gap/τ 비율을 키운 뒤 재검증.
+_CORE_ALPHA_AUTO        = True
+_CORE_ALPHA_SAFETY_BITS = 2      # 실측 경계 gap/δ≈0.2 → s=2 면 [4,8) 로 20~40배 여유.
+#   (LP 는 s=2 로 오차예산 모델 결정. Core 는 절감 이득이 0.06% 미만이므로
+#    굳이 깎지 않고 여유를 크게 둔다 — 원문 주석의 'α=12 미검증 영역' 경고 존중.)
+_CORE_ALPHA_MIN         = 8
+_CORE_ALPHA_MAX         = 16
+
+_MINIMIZE_DEPTH_DEGREES_CORE = {
+    8:  [7, 15, 15],        9:  [7, 7, 7, 13],     10: [7, 7, 13, 15],
+    11: [7, 15, 15, 15],    12: [15, 15, 15, 15],  13: [15, 15, 15, 31],
+    14: [7, 7, 15, 15, 27], 15: [7, 15, 15, 15, 27], 16: [15, 15, 15, 15, 27],
+}
+
+
+# ★ [실측 2026-07] α=13 금지 (sanity_sweep: Core α=13 오차 1e-6~1e-9 vs α=12 1e-12~1e-13).
+_CORE_ALPHA_FORBIDDEN = {}   # ★ 2026-07 해제: α=13 정상화 확인됨(아래)
+
+
+def _core_alpha(N: int) -> int:
+    """N → Core sign 근사 최소 α.  gap=0.5/N, δ=2^-α ≤ gap/(2^safety_bits).
+    실측 파괴 경계 gap/δ≈0.2 → s=1 이면 gap/δ∈[2,4) 로 10~20배 여유."""
+    a = math.ceil(math.log2(2.0 * float(N))) + _CORE_ALPHA_SAFETY_BITS
+    a = max(_CORE_ALPHA_MIN, min(_CORE_ALPHA_MAX, a))
+    return _CORE_ALPHA_FORBIDDEN.get(a, a)
+
+
+def _load_core_mcp(N: int, mcp_path_override: str = None):
+    """N-aware α 로 Core MCP 로드(없으면 생성). override 지정 시 그대로 사용."""
+    if mcp_path_override is not None:
+        return load_mcp(mcp_path_override), mcp_path_override
+    if not _CORE_ALPHA_AUTO:
+        return load_mcp(_MCP_CORE_PATH), _MCP_CORE_PATH
+    alpha = _core_alpha(N)
+    path = f"mcp_alpha{alpha}_lp_cheb.json"   # LP/Core 공통 명명(같은 α면 파일 재사용)
+    try:
+        comps = load_mcp(path)
+        print(f"[Core] N={N} → α={alpha} MCP 로드: {path} "
+              f"(gap=0.5/{N}={0.5/N:.5f}, δ=2^-{alpha}, "
+              f"여유={ (0.5/N)/(2.0**-alpha):.1f}배 — ★sanity_check 로 실측 재확인 권장)")
+    except (FileNotFoundError, OSError):
+        from core.ciphertext_single.minimax import (
+            compute_mcp_for_label_prop_chebyshev, save_mcp,
+        )
+        degrees = _MINIMIZE_DEPTH_DEGREES_CORE.get(alpha)
+        print(f"[Core] N={N} → α={alpha} MCP 생성 (degrees={degrees}) → {path}")
+        comps = compute_mcp_for_label_prop_chebyshev(alpha=alpha, verbose=True)
+        try:
+            save_mcp(comps, path)
+        except Exception as _e:
+            print(f"[Core] ⚠ MCP 저장 실패({_e}) — 메모리 컴포넌트로 진행")
+    return comps, path
 
 # ★ [2026-05c 작업 A] cleaning 반복 횟수.
 #   1회면 0.99839 → 0.9999923 (2^-17, 충분). 2회면 CKKS 한계 (2^-32).
@@ -64,16 +132,17 @@ def identify_core_points_fhe_converted(
       4. (sign+1)/2 → {0,1}
       5. 최종 bootstrap
     """
-    if mcp_path is None:
-        mcp_path = _MCP_CORE_PATH
-
     relin_key  = keypack.relinearization_key
     conj_key   = keypack.conjugation_key
-    boot_key   = keypack.bootstrap_key
+    # ★ [2026-07] 제거: 이 파일은 표준 bootstrap 을 직접 호출하지 않는다.
+    #   (sign_bootstrap → smallbootstrap_key, bit_cleaning 내부 _refresh 는
+    #    cleaning.py 가 처리). full bootstrap_key 는 생성되지 않으므로
+    #    이 할당을 남겨두면 None 이 되어 혼란만 준다.
     slot_count = engine.slot_count
 
+    # ★ [#1-Core] mcp_path 명시 지정 시 그대로 사용(하위호환), 아니면 N-aware 선택.
+    components, mcp_path = _load_core_mcp(N, mcp_path_override=mcp_path)
     print(f"[Server] Core: Chebyshev BSGS MCP 로드 ({mcp_path})")
-    components = load_mcp(mcp_path)
 
     # basis 확인
     basis = components[0].get("basis", "power")

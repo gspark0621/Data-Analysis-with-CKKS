@@ -17,6 +17,7 @@
 
 import os
 import math
+import gc
 from time import time
 import desilofhe
 from desilofhe import Engine, Ciphertext
@@ -75,7 +76,7 @@ def send_to_server_fhe(
     Parameters
     ----------
     k_max : int
-        클라이언트 Ball Tree DFS 구조 분석으로 결정된 값.
+        클라이언트 PCA window 상한으로 결정된 값.
         서버는 이 값을 그대로 사용하며 재계산하지 않음.
         T(k_max) = k_max*(k_max+1)//2 ≥ N → kd_dense 수렴 보장.
     use_kd_propagation : bool
@@ -96,13 +97,7 @@ def send_to_server_fhe(
     if num_sweeps is None:
         num_sweeps = math.ceil(math.log2(N))
     if n_rounds is None:
-        # ★ [2026-07] log₂N 폐기 → 고정 32.
-        #   log₂N은 수렴 보장이 아니었음 (실측: chainlink log₂1000=10 < R=12,
-        #   target log₂770=10 < R=11 → under-merge 오답).
-        #   R = Θ(graph diameter) 이고 diameter를 O(N log N)에 잡는 것은
-        #   연결성분 계산 = DBSCAN 자체 → 자기모순. 따라서 n_rounds는 파라미터.
-        #   32 = 대상 7개 데이터셋 실측 최대 R(=31, chainlink) 의 2의 거듭제곱 올림.
-        n_rounds = 32
+        n_rounds = math.ceil(math.log2(N))   # ★ 작업 B: log₂N round 기본값
 
     T_kmax = k_max * (k_max + 1) // 2
 
@@ -117,43 +112,92 @@ def send_to_server_fhe(
           f"전파방식={'KD-dense' if use_kd_propagation else f'ALL-sweep ({num_sweeps}회)'}")
 
     # ══════════════════════════════════════════════════════════════
-    # Step 1. Normalize: adj_k 계산 (k=1..N//2, 대칭 최적화)
+    # Step 1. Normalize: adj_k 계산 (k=1..k_max, 대칭 최적화)
     # adj_{N-k}[i] = adj_k[(i-k) mod N] = rotate(adj_k, N-k)[i]
-    # → k=1..N//2만 MCP 계산, 역방향은 회전으로 유도
-    # ══════════════════════════════════════════════════════════════
-    print(f"\n[Step 1] Normalize 시작 (k=1..{N//2}, eps^2={eps**2:.4f})")
+    # → k=1..k_max만 MCP 계산, 역방향은 회전으로 유도
+    #
+    # ★ [2026-07] 루프 상한 N//2 → k_max.
+    #   [근거] 1-Lipschitz window 상한: stride > k_max 인 두 점은 |z_i−z_j| > eps
+    #     ⟹ ‖p_i−p_j‖ > eps ⟹ 이웃 아님 ⟹ adj_k = 0. 계산해도 전부 0.
+    #   [검증] 7개 FCPS 전부에서 total_neighbors(k=1..k_max) == total_neighbors(k=1..N//2)
+    #     최대차 0.0000 (Core 판정 불변). k>k_max 의 adj_k 는 합산·회전에 0 만 기여.
+    #   [효과] Normalize MCP 호출 N/2 → k_max.  tetra 62% / moons 80% / chainlink 80% 절감.
+    #     퇴화 케이스(atom 등 등방분포, k_max=N//2)에서는 절감 0 이나 정확성 유지.
+    #   [대칭 유도] 아래 adj_{N-k} = rotate(adj_k, N-k) 는 그대로 유효.
+    #     순환상 stride s 인 간선은 min(s, N-s) ≤ k_max 이면 커버되며,
+    #     k=1..k_max forward + rotate 역방향이 min(s,N-s) ≤ k_max 를 모두 포함한다.
+    _k_upper = k_max if use_kd_propagation else (N // 2)
+    # ★ [2026-07 진단] Normalize 가 표준 bootstrap(13.4GB 키)을 쓰는지 계측
+    from core.ciphertext_single.cleaning import std_boot_count
+    std_boot_count(reset=True)
+    print(f"\n[Step 1] Normalize 시작 (k=1..{_k_upper}, eps^2={eps**2:.4f})")
     normalize_start = time()
 
-    for k in range(1, N // 2 + 1):
+    # ★ [2026-07 메모리] Step 1 은 다음 두 가지로 GPU 메모리를 소모한다.
+    #   (a) adj_k_list: k_max 개 암호문을 **끝까지 보유**한다(LP 의 adjm_cache 가 필요).
+    #       N=800/k_max=83 이면 신선 암호문 ~28MB × 83 ≈ 2.3GB.
+    #   (b) 루프 중간값: rotated_col / diff_ct / sq_ct / dist_sq_k / adj_Nk 가
+    #       매 반복 dim 회 생성되는데 명시적으로 해제되지 않아, GC 시점에 따라
+    #       여러 세대가 동시에 살아있을 수 있다.
+    #   키가 이미 18.6GB(그중 bootstrap_key 13.4GB)를 점유한 상태라 여유가 ~6GB 뿐이라
+    #   (b) 가 쌓이면 OOM 이 난다.
+    #   ⇒ 아래는 (b) 를 즉시 해제하고 주기적으로 gc 를 돌린다. 알고리즘/정확도 변경 없음.
+    #   ※ 되돌리려면 이 블록을 원래 루프로 교체하면 된다(로직 동일).
+    _MEM_AGGRESSIVE_FREE = True     # False 면 기존 동작(해제 없음)
+    _GC_EVERY = 8                   # 몇 stride 마다 gc.collect()
+
+    for k in range(1, _k_upper + 1):
         dist_sq_k = None
         for d in range(dim):
             base_col    = encrypted_columns[d]
             rotated_col = fhe_circular_shift(engine, base_col, k, N, keypack)
             diff_ct     = engine.subtract(base_col, rotated_col)
+            if _MEM_AGGRESSIVE_FREE:
+                del rotated_col
             sq_ct       = engine.square(diff_ct, keypack.relinearization_key)
-            dist_sq_k   = sq_ct if dist_sq_k is None else engine.add(dist_sq_k, sq_ct)
+            if _MEM_AGGRESSIVE_FREE:
+                del diff_ct
+            if dist_sq_k is None:
+                dist_sq_k = sq_ct
+            else:
+                _prev     = dist_sq_k
+                dist_sq_k = engine.add(_prev, sq_ct)
+                if _MEM_AGGRESSIVE_FREE:
+                    del _prev, sq_ct
 
         before_adj = _gpu_used_mb()
         adj_k = check_neighbor_closed_interval(
             engine, dist_sq_k, eps**2, keypack, dim,
             mcp_path="mcp_alpha15_lp_cheb.json",
         )
+        if _MEM_AGGRESSIVE_FREE:
+            del dist_sq_k               # sign-eval 끝나면 즉시 불필요
         adj_k_list.append(adj_k)   # k=1..N//2 저장
 
         # total_neighbors 누적 (대칭 최적화)
         if 2 * k < N:
             adj_Nk = fhe_circular_shift(engine, adj_k, N - k, N, keypack)
-            total_neighbors_ct = (
-                engine.add(adj_k, adj_Nk)
-                if total_neighbors_ct is None
-                else engine.add(total_neighbors_ct, engine.add(adj_k, adj_Nk))
-            )
+            _pair  = engine.add(adj_k, adj_Nk)
+            if _MEM_AGGRESSIVE_FREE:
+                del adj_Nk
+            if total_neighbors_ct is None:
+                total_neighbors_ct = _pair
+            else:
+                _acc = total_neighbors_ct
+                total_neighbors_ct = engine.add(_acc, _pair)
+                if _MEM_AGGRESSIVE_FREE:
+                    del _acc, _pair
         else:   # k == N//2: double counting 방지
-            total_neighbors_ct = (
-                adj_k
-                if total_neighbors_ct is None
-                else engine.add(total_neighbors_ct, adj_k)
-            )
+            if total_neighbors_ct is None:
+                total_neighbors_ct = adj_k
+            else:
+                _acc = total_neighbors_ct
+                total_neighbors_ct = engine.add(_acc, adj_k)
+                if _MEM_AGGRESSIVE_FREE:
+                    del _acc
+
+        if _MEM_AGGRESSIVE_FREE and (k % _GC_EVERY == 0):
+            gc.collect()
 
         if k % 10 == 0 or k == N // 2:
             _mem_delta(f"adj_k[{k}] 생성 (누적 {k}회 MCP)", before_adj)
@@ -164,7 +208,10 @@ def send_to_server_fhe(
 
     timings["normalize_sec"] = time() - normalize_start
     print(f"[TIME] Normalize: {timings['normalize_sec']:.2f}초")
-    _print_mem(f"Normalize 완료 (adj_k_list {len(adj_k_list)}개 = k=1..{N//2})")
+    _n_std = std_boot_count(reset=True)
+    print(f"  [진단] Normalize 구간 표준 bootstrap 호출 수 = {_n_std}회"
+          f"  {'→ bootstrap_key 불필요! 생성 지연 가능(13.4GB 확보)' if _n_std == 0 else '→ bootstrap_key 필요'}")
+    _print_mem(f"Normalize 완료 (adj_k_list {len(adj_k_list)}개 = k=1..{_k_upper})")
 
     dec_total = np.real(engine.decrypt(total_neighbors_ct, secret_key)[:N])
     debug_fhe["total_neighbors"] = np.array(dec_total)
@@ -174,7 +221,8 @@ def send_to_server_fhe(
         dec_total, "Point_ID,Total_Neighbors"
     )
 
-    # adj_k_list 트런케이트: k_max 초과분은 LP에서 불필요 (메모리 절약)
+    # adj_k_list 트런케이트: ★ [2026-07] 루프가 이미 k_max 까지만 생성하므로 보통 no-op.
+    #   (use_kd_propagation=False 인 all_sweep 경로는 N//2 까지 생성 → 이때만 실제 절단)
     if use_kd_propagation and len(adj_k_list) > k_max:
         adj_k_list = adj_k_list[:k_max]
         print(f"  adj_k_list 트런케이트: → {k_max}개 (k_max 이내로 제한)")

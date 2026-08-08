@@ -30,12 +30,12 @@ python: 3.12.10
     - minpts: 3
     - 결과: 군집 4개/정답: 4개(ARI 97.25점)
 3. TwoDiamonds(800개)
-    - max_iter: 10
-    - eps: 0.11
-    - minpts: 4
-    - 결과: 군집 3개/정답: 2개(ARI 95.55점)
+    - round: 16
+    - eps: 0.14
+    - minpts: 6
+    - 결과: 군집 2개/정답: 2개(ARI 99.75점)
 4. Lsun(400개)
-    - max_iter: 3
+    - round: 16
     - eps: 0.5
     - minpts: 4
     - 결과: 군집 3개(ARI 100점)
@@ -45,10 +45,25 @@ python: 3.12.10
     - minpts: 4
     - 결과: 군집 6개(ARI 99.96점 - 이게 맞음. noise로 분류되어야 할 점들이 ground truth에서는 각 cluster로 표현됨(eps 0.25 minpoints 3으로 하면 ARI 100 나옴))
 6. 3_spiral(312개)
-    - max_iter: 3
+    - max_iter: ?
     - eps: 1.4
     - minpts: 3
     - 결과: 군집 3개(ARI 100점)
+7. atom(800개)
+    - max_iter: ?
+    - eps: 20
+    - minpts: 4
+    - 결과: 군집 3개(ARI 100점)
+8. Longsquare(900개)
+    - round: 12
+    - eps: 1.15
+    - minpts: 6
+    - 결과: 군집 6개/정답: 6개(ARI 95.02점)
+8. S1(5000개)
+    - round: 5
+    - eps: 44000
+    - minpts: 50
+    - 결과: 군집 6개/정답: 6개(ARI 95.02점)
 -------------------------------------------
 1. Iris(150개)
     - max_iter: 4

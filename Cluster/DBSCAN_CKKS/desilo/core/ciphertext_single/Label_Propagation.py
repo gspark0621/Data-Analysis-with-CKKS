@@ -46,6 +46,7 @@
 # ─────────────────────────────────────────────────────────────────────────
 
 from __future__ import annotations
+import gc
 import math
 import numpy as np
 from desilofhe import Engine, Ciphertext
@@ -55,12 +56,97 @@ from core.ciphertext_single.chebyshev_eval import eval_mcp_full_chebyshev   # �
 from core.ciphertext_single.cleaning import bit_cleaning, sign_cleaning
 
 
-_MCP_LABEL_PATH = "mcp_alpha15_lp_cheb.json"   # ★ Chebyshev basis
+_MCP_LABEL_PATH = "mcp_alpha15_lp_cheb.json"   # ★ Chebyshev basis (α 고정 모드 폴백)
 # α=15: τ=2^{-15}, degrees=[7,15,15,15,27] (논문 Table 2)
 # Chebyshev BSGS dep(27)=5 → 10레벨 ≤ budget 10 ✓
 
+# ★ [#1 2026-07] N 기반 α 자동 선택.
+#   근거: LP 라벨은 항상 정수(max·adj⊙label 이 정수 보존) → 최소 입력 gap =
+#     1/(_SCALE_INSET·N). 이는 오직 N 에만 의존(eps/min_pts/차원/분포 무관).
+#     N 은 공개값(슬롯 사용량)이라 α 를 N 에서 계산해도 leak 없음.
+#   deadzone δ=2^{-α} ≤ gap  ⟹  α ≥ ⌈log₂(_SCALE_INSET·N)⌉.
+#   ★ docstring 의 drift 모델(=n_calls·|u-v|·2^{-α}/2)이 α=15 를 정당화했으나,
+#     그건 *원시 MCP 오차*를 쓴 보수적 모델이다. 실제 파이프라인은
+#     sign_bootstrap + sign_cleaning 이 뒤따르며, 평문 검증 결과 cleaning 후
+#     유효 sgn 오차 η_eff 는 α 에 (거의) 무관하게 ~1e-4(1회)/~1e-9(2회)로 수렴한다
+#     (2026-05c 에 cleaning 을 추가한 바로 그 이유). 따라서 drift 는 α 무관이고,
+#     하드 제약은 입력 gap 하나뿐 → α = ⌈log₂(1.1N)⌉ + safety 로 낮출 수 있다.
+#   ★ safety_bits: CKKS 노이즈가 deadzone 경계 근처 입력을 δ 밑으로 밀지 않도록
+#     하는 여유. 큰 N(작은 gap)일수록 gap−noise 여유가 줄어드니, gap 이 라벨
+#     비균일 잔차(~5e-4)에 근접하면 2 로 올리고 sanity_check 로 재확인할 것.
+_LP_USE_CLEANING_DEGREES = True   # cleaning 예산 기반 degree 사용(False→논문 Table2)
+_LP_ALPHA_AUTO        = True     # False면 아래 _MCP_LABEL_PATH(α=15) 고정 사용
+_LP_ALPHA_SAFETY_BITS = 1        # ★ 실측 스윕 결과: s=1 (아래 근거)
+#   [s 결정 근거 — ★ sanity_sweep_alpha.py 실측(2026-07)으로 확정]
+#     실측 파괴 경계(1x gap 지점에서 오차>1e-3):
+#       LP  : gap/δ=0.233 FAIL / 0.302 PASS   → 경계 ≈ 0.25
+#       Core: gap/δ=0.166 FAIL / 0.256 PASS   → 경계 ≈ 0.2
+#     s=0 이면 ceil 때문에 gap/δ ∈ [1,2) 자동 보장 → 경계 대비 4~8배 여유(실측 PASS).
+#     s=1 이면 gap/δ ∈ [2,4) → 누적 감쇠(실측 tetra ×0.961, 대형 데이터 최대 ×0.77)로
+#     유효 gap 이 줄어드는 것까지 흡수. 실측 오차 1e-10~1e-13 로 매우 안전.
+#     ⇒ s=1 채택. (s=2 는 chainlink 를 α=13 으로 보내는데 α=13 은 아래 이유로 금지)
+#   [이전 모델의 오류 — 기록]
+#     앞서 CKKS_SYS=1.6e-3 을 가정해 drift 를 계산했으나, 실측 역산 raw≈4.7e-5 로
+#     약 1000배 과대평가였다. 실제 drift 기여는 사실상 0 → s 를 키울 이유가 없었다.
+#   [참고 — 후처리가 gap 기반(assign_clusters_by_gap)이라는 점도 유리하게 작용]
+#     후처리 조건: 클러스터 내부퍼짐 < _GAP_THRESHOLD < 클러스터간 최소간격.
+#     이 판정은 비례감쇠(×c)·균일이동(+c)에 불변 → '총 drift'는 무해하고
+#     오직 *비균일* 성분만 문제 (실측: tetra 총감쇠 15.45 인데 내부퍼짐 0.079).
+#     라벨단위 deadzone D = 2^-α·1.1N = 2^-s  ← s 가 D 를 직접 지배.
+#     모델(tetra 실측 앵커로 교정): 내부퍼짐 ≈ 2.9·(2^-s + √n_max·σ_nonuniform)
+#       s=0 → 2.90 > thr 1.0  ✗      s=1 → 1.47 > 1.0  ✗
+#       s=2 → 0.75 < 1.0  ✓(1.3배)   s=3 → 0.39 < 1.0  ✓(2.6배)
+#     추가로 전파 관점: D<1 이어야 |Δlabel|=1 인 인접 라벨 전파가 deadzone 에
+#     삼켜지지 않음 → s≥1 필수, CKKS 노이즈 여유까지 보면 s=2.
+#   ⇒ α = ⌈log₂(1.1N)⌉ + 2.  hepta 10 / tetra·lsun·moons 11 / target·atom 12 /
+#     chainlink 13.  전부 4컴포넌트(현행 α=15 는 5) — chainlink 만 5 유지.
+#   ★ thr 과의 trade: _GAP_THRESHOLD 를 올리면 s 를 낮출 수 있다(퍼짐<thr<간격).
+#     상한은 '클러스터간 최소간격' — 실측 최소는 atom 의 13 → thr ≤ ~6 권장.
+#     예) thr=4 로 올리면 s=0(α=⌈log₂1.1N⌉)까지 가능 → hepta 3컴포넌트.
+#     단 간격 13 은 경험적 관찰이라(Client_main 주석 §반례) 보수적으로 thr=1 유지 권장.
+_LP_ALPHA_MIN         = 8        # JSON/degree 테이블 하한 (논문 Table 2)
+_LP_ALPHA_MAX         = 16       # 상한
+
+# 논문 Lee et al. Table 2 (comparison, minimize-depth) — _MINIMIZE_DEPTH_DEGREES 미러.
+#   sign_bootstrap 수 = 컴포넌트 수 (#3 적용 후 fhe_sgn당 = len(degrees)).
+_LP_MINIMIZE_DEPTH_DEGREES = {
+    8:  [7, 15, 15],        9:  [7, 7, 7, 13],     10: [7, 7, 13, 15],
+    11: [7, 15, 15, 15],    12: [15, 15, 15, 15],  13: [15, 15, 15, 31],
+    14: [7, 7, 15, 15, 27], 15: [7, 15, 15, 15, 27], 16: [15, 15, 15, 15, 27],
+}
+
+
+# ★ [실측 2026-07] α=13 금지. sanity_sweep 에서 α=13 의 1x 오차가 1e-5~1e-6 으로
+#   이웃 α=12(1e-12~1e-13), α=15(1e-12~1e-14) 대비 **1e4~1e7 배 열등**했다
+#   (LP·Core, N=212/400/770/1000 전 케이스 일관).
+#   ★ 원인 규명(2026-07): 'α=13 이라는 α 자체'가 아니라 **minimax.py 의 오타**였다.
+#     minimax.py `_MINIMIZE_DEPTH_DEGREES[13]` 이 [7,7,7,7,15] 로 되어 있었으나
+#     논문 Table 2(minimize depth) 의 α=13 은 {15,15,15,31} 이다. (나머지 8개 항목은
+#     논문과 완전 일치.) 빈약한 세트라 스펙 2^-13 은 겨우 맞추지만 여유가 없어
+#     cleaning 후에도 1e-5 에 머문 것. minimax.py 는 정정했다.
+#   ★★ 재측정 결과(캐시 삭제 후 3차 스윕): α=13 오차가 1e-5 → **7.5e-13** 으로
+#     8/8 전 케이스에서 이웃 α 와 동급이 되었다(개선 1e4~1e8배). 즉
+#       · 원인은 'α=13' 도 'degree 31' 도 아니고 minimax.py 오타였음이 확정
+#       · degree 31 은 이 Chebyshev BSGS 구현에서 정상 동작 확인
+#     ⇒ 회피 매핑 해제(빈 dict). 이제 α=13 을 정상 사용 가능(4컴포넌트).
+_LP_ALPHA_FORBIDDEN = {}   # ★ 2026-07 해제: α=13 정상화 확인됨(아래)
+
+
+def _lp_alpha(num_points: int) -> int:
+    """N → LP sign 근사 최소 α. deadzone δ=2^{-α} ≤ 1/(_SCALE_INSET·N)."""
+    a = math.ceil(math.log2(_SCALE_INSET * float(num_points))) + _LP_ALPHA_SAFETY_BITS
+    a = max(_LP_ALPHA_MIN, min(_LP_ALPHA_MAX, a))
+    return _LP_ALPHA_FORBIDDEN.get(a, a)
+
 # ★ [2026-05c] fhe_sgn의 sign_cleaning 반복 횟수.
-_SGN_CLEANING_ITERS = 1
+_SGN_CLEANING_ITERS = 1   # 유지(레벨 2). 레버 A 는 cleaning 변경이 불필요하다.
+#   ★ [2026-07] 절감의 출처는 두 가지 독립 레버:
+#     A) 목적함수 교체 — 논문은 depth/곱셈 최소화(컴포넌트 사이 bootstrap 없음)이지만
+#        우리 eval_mcp 는 **컴포넌트마다 sign_bootstrap** 하므로 비용은 컴포넌트 수다.
+#        같은 τ(=2^(1-α))로 컴포넌트 수를 최소화하면 α=9,10,11 에서 4→3개.
+#        τ 가 논문과 동일 → **정확도 저하 위험 0**. 기본 적용.
+#     B) τ 완화 — cleaning 을 2회로 늘려 τ 를 0.023 까지 풀면 α=8,12 에서 1개 더.
+#        레벨을 2 더 쓰므로 필요할 때만. 켜려면 아래를 2 로 바꾸면 표가 자동 전환된다.
 
 # ★ [Phase1-④] sgn 입력 도메인 인셋 계수: label_scale = _SCALE_INSET · N
 #   → sgn 입력 |x| ≤ 1/_SCALE_INSET ≈ 0.909 (Chebyshev 경계 1.0에서 격리)
@@ -78,7 +164,11 @@ _LABEL_MIN_LEVEL = 7
 _HOIST_ADJ_MASKS = True
 
 # ★ [2026-07] 트리-max 레벨 추적 로그 (첫 실행 진단용, 안정화 후 False)
-_TREE_LEVEL_DEBUG = True
+_TREE_LEVEL_DEBUG = False   # ★ [2026-07 메모리] True → False.
+#   트리 단계마다 engine.decrypt 를 2회(packed 진단 + _dbg) 호출한다. packed 는
+#   n_region×N 슬롯을 채운 큰 암호문이라 복호화 버퍼가 매번 새로 잡히고,
+#   라운드가 누적되면 GPU 메모리를 잠식한다(Phase1 Round4 OOM 의 직접 원인 중 하나).
+#   문제 진단이 필요할 때만 True 로.
 
 # ★ 버전 식별자 — 실행 로그에 찍힘. 이게 안 보이면 구버전을 돌리고 있는 것.
 _LP_VERSION = "2026-07-r9-nowrap"
@@ -93,23 +183,79 @@ _LP_VERSION = "2026-07-r9-nowrap"
 _FORCE_GROUP_SIZE = None
 
 _mcp_label_components = None
+_mcp_label_alpha      = None     # 캐시된 컴포넌트의 α (N 바뀌면 무효화)
 
 # ★ [Phase1-③] 라벨 lineage refresh 횟수 카운터 (감사용)
 _label_refresh_count = 0
 
 
-def _get_mcp_label():
-    global _mcp_label_components
-    if _mcp_label_components is None:
-        print(f"  [LabelProp] MCP 로드: {_MCP_LABEL_PATH}")
-        _mcp_label_components = load_mcp(_MCP_LABEL_PATH)
-        basis = _mcp_label_components[0].get("basis", "power")
-        if basis != "chebyshev":
-            raise ValueError(
-                f"[LabelProp] {_MCP_LABEL_PATH} has basis='{basis}', expected 'chebyshev'. "
-                f"JSON 재생성 필요: compute_mcp_for_label_prop_chebyshev() 사용."
+def _get_mcp_label(num_points: int = None):
+    """LP sign MCP 컴포넌트 로드.
+    _LP_ALPHA_AUTO 이고 num_points 가 주어지면 α=_lp_alpha(N) 을 선택해
+    mcp_alpha{α}_lp_cheb.json 을 로드(없으면 생성). 아니면 α=15 고정 파일.
+    """
+    global _mcp_label_components, _mcp_label_alpha
+
+    if _LP_ALPHA_AUTO and num_points is not None:
+        alpha = _lp_alpha(num_points)
+        if _mcp_label_components is not None and _mcp_label_alpha == alpha:
+            return _mcp_label_components
+        path = (f"mcp_alpha{alpha}_lp_clean{_SGN_CLEANING_ITERS}.json"
+                if _LP_USE_CLEANING_DEGREES else f"mcp_alpha{alpha}_lp_cheb.json")
+        try:
+            comps = load_mcp(path)
+            print(f"  [LabelProp] N={num_points} → α={alpha} MCP 로드: {path} "
+                  f"(degrees={[c['degree'] for c in comps]})")
+        except (FileNotFoundError, OSError):
+            # JSON 부재 → 클라이언트측 1회 생성 (Remez, 평문). degrees=Table 2.
+            from core.ciphertext_single.minimax import (
+                compute_mcp_for_label_prop_chebyshev,
+                compute_mcp_for_label_prop_cleaning, save_mcp,
             )
+            if _LP_USE_CLEANING_DEGREES:
+                print(f"  [LabelProp] N={num_points} → α={alpha}, cleaning="
+                      f"{_SGN_CLEANING_ITERS}회 기반 MCP 생성 → {path}")
+                comps = compute_mcp_for_label_prop_cleaning(
+                    alpha=alpha, cleaning_iters=_SGN_CLEANING_ITERS, verbose=True)
+            else:
+                print(f"  [LabelProp] N={num_points} → α={alpha} MCP 생성 "
+                      f"(논문 Table2 degrees={_LP_MINIMIZE_DEPTH_DEGREES.get(alpha)}) → {path}")
+                comps = compute_mcp_for_label_prop_chebyshev(alpha=alpha, verbose=True)
+            try:
+                save_mcp(comps, path)
+            except Exception as _e:
+                print(f"  [LabelProp] ⚠ MCP 저장 실패({_e}) — 메모리 컴포넌트로 진행")
+        _basis_check(comps, path)
+        _mcp_label_components, _mcp_label_alpha = comps, alpha
+        return comps
+
+    # ── 고정 α=15 폴백 경로 ──
+    if _mcp_label_components is None or _mcp_label_alpha != 15:
+        print(f"  [LabelProp] MCP 로드(고정): {_MCP_LABEL_PATH}")
+        _mcp_label_components = load_mcp(_MCP_LABEL_PATH)
+        _mcp_label_alpha = 15
+        _basis_check(_mcp_label_components, _MCP_LABEL_PATH)
     return _mcp_label_components
+
+
+def _basis_check(comps, path):
+    basis = comps[0].get("basis", "power")
+    if basis != "chebyshev":
+        raise ValueError(
+            f"[LabelProp] {path} has basis='{basis}', expected 'chebyshev'. "
+            f"compute_mcp_for_label_prop_chebyshev() 로 생성 필요."
+        )
+
+
+def _lp_gpu_mb() -> float:
+    """현재 GPU 사용량(MB). 라운드별 메모리 증가 추적용."""
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        h = pynvml.nvmlDeviceGetHandleByIndex(0)
+        return pynvml.nvmlDeviceGetMemoryInfo(h).used / (1024 ** 2)
+    except Exception:
+        return 0.0
 
 
 def _dbg(engine, secret_key, ct, tag, num_points, show=6):
@@ -151,10 +297,16 @@ def _optimal_refresh_scale(N: int, n_region: int = 1) -> int:
     n_region>1(패킹)이면 채워진 슬롯 증가로 계수 노름이 √n_region 배 커지므로
     실효 L 을 그만큼 키워 잡는다.
     """
-    a, b = 2.9e-6, 6.3e-10
-    L = float(N) * math.sqrt(max(n_region, 1))
-    S = L * (2.0 * b / a) ** (1.0 / 3.0)
-    return max(1, min(_MAX_REFRESH_SCALE, int(2 ** round(math.log2(max(S, 1.0))))))
+    # ★ 라벨을 (0,1] 스케일로 두면 bootstrap(EvalMod)이 값을 그대로 안전 처리한다.
+    #   scaled refresh(÷S→bootstrap→×S)는 작은 값에 노이즈만 ×S 증폭 → S=1 이 최적.
+    #   [근본원인] aliasing 은 '값 크기' 단독이 아니라 '계수 노름 ≈ √(채운슬롯)·값'.
+    #   라벨 (0,1] 이면 패킹(n_region↑)에도 계수 노름이 임계 아래로 유지 → S 확대 불필요.
+    return 1
+    # --- 구 공식 (라벨 L≈N 가정, 폐기) ---
+    # a, b = 2.9e-6, 6.3e-10
+    # L = float(N) * math.sqrt(max(n_region, 1))
+    # S = L * (2.0 * b / a) ** (1.0 / 3.0)
+    # return max(1, min(_MAX_REFRESH_SCALE, int(2 ** round(math.log2(max(S, 1.0))))))
 
 
 def _scaled_refresh(engine, ct, keypack, S: int = 1):
@@ -168,8 +320,28 @@ def _scaled_refresh(engine, ct, keypack, S: int = 1):
     return ct
 
 
+# ★ [2026-07] True 면 표준 bootstrap 에도 small_bootstrap_key 를 쓴다
+#   (full bootstrap_key 13.4GB 생성 불필요). 문제 시 False 로 원복.
+_USE_SMALL_BOOT_FOR_REFRESH = True
+
+
 def _refresh(engine: Engine, ct: Ciphertext, keypack: KeyPack) -> Ciphertext:
     """일반 bootstrap. ★ 라벨 운반 암호문에는 _ensure_label_level 경유로만 사용."""
+    # ★ [2026-07] small_bootstrap_key 로 전환.
+    #   DesiloFHE 는 engine.bootstrap(ct, relin, conj, rotation, small_bootstrap)
+    #   형태를 지원한다. 'small' 은 EvalSign 전용 키가 아니라 키 변형이므로
+    #   값 보존 bootstrap 에도 쓸 수 있다. 이로써 13.4GB 짜리 full bootstrap_key
+    #   를 아예 생성하지 않아도 된다(GPU 18.6GB → 5.2GB).
+    #   ※ sign_bootstrap 과 bootstrap 은 여전히 다른 연산이다. 라벨처럼 임의
+    #     실수를 나르는 암호문에는 반드시 bootstrap(EvalMod) 을 써야 한다.
+    if _USE_SMALL_BOOT_FOR_REFRESH:
+        return engine.bootstrap(
+            engine.intt(ct),
+            keypack.relinearization_key,
+            keypack.conjugation_key,
+            keypack.rotation_key,
+            keypack.smallbootstrap_key,
+        )
     return engine.bootstrap(
         engine.intt(ct),
         keypack.relinearization_key,
@@ -205,20 +377,25 @@ def fhe_sgn(
       cleaning의 이차 수렴 이득이 보존됨.
     """
     slot_count = engine.slot_count
-    components = _get_mcp_label()
+    components = _get_mcp_label(num_points)   # ★ [#1] N-aware α 선택
 
     result = eval_mcp_full_chebyshev(
         engine, x_ct, components, slot_count, keypack, tag="LP "
     )
-    result = engine.sign_bootstrap(
-        engine.intt(result),
-        keypack.relinearization_key,
-        keypack.conjugation_key,
-        keypack.rotation_key,
-        keypack.smallbootstrap_key,
-    )
-    # ★ ensure_output_level=False: cleaning 직후 표준 bootstrap이 따라오면
-    #   2^-18 → 2^-9.3로 악화 (실측). SB 직후라 레벨 충분 → 후속 refresh 불필요.
+    # ★ [#3 2026-07] 중복 sign_bootstrap 제거.
+    #   eval_mcp_full_chebyshev는 마지막 컴포넌트 뒤에도 sign_bootstrap을 수행하므로
+    #   (chebyshev_eval.py: 컴포넌트 루프가 idx<len-1 가드 없이 매회 SB) 여기서의
+    #   추가 sign_bootstrap(+intt)은 이미 ±1(≈2^-18)인 값을 한 번 더 스쿼시하는 중복.
+    #   - 정확성: eval_mcp 최종 SB 출력은 곧바로 곱셈 가능 형식(같은 파일 domain_b
+    #     정규화가 SB 출력을 intt 없이 multiply함) → sign_cleaning.square 직접 적용 OK.
+    #   - 레벨: eval_mcp 최종 SB가 레벨을 복구하므로 cleaning 진입 레벨 충분
+    #           → ensure_output_level=False 유지 가능.
+    #   - 효과: fhe_sgn당 sign_bootstrap 6→5 → fhe_max 7→6 bootstrap.
+    #   ※ 검증: sanity_check_chebyshev(final_diff < 1e-3) + end-to-end ARI 로 확인할 것.
+    #     만약 형식/레벨 오류 시 폴백: 아래 두 줄 주석 해제(원복).
+    # result = engine.sign_bootstrap(engine.intt(result),
+    #     keypack.relinearization_key, keypack.conjugation_key,
+    #     keypack.rotation_key, keypack.smallbootstrap_key)
     result = sign_cleaning(
         engine, result, keypack,
         n_iters=_SGN_CLEANING_ITERS, slot_count=slot_count,
@@ -700,7 +877,7 @@ def fhe_kd_dense_propagation(
     k_max = min(k_max, N // 2)
     T_kmax = k_max * (k_max + 1) // 2
 
-    label_scale = _SCALE_INSET * float(N)      # ★ [Phase1-④] 인셋
+    label_scale = _SCALE_INSET                 # ★ 라벨 (0,1] 스케일 → |d|≤1, x=d/label_scale 불변
     slot_count  = engine.slot_count
 
     print(f"\n[KD-LP] ══════════════════════════════════════════")
@@ -732,8 +909,9 @@ def fhe_kd_dense_propagation(
                                 n_iters=1, slot_count=slot_count,
                                 ensure_output_level=False)
 
+    _lbl_unit = 1.0 / float(N)   # ★ 라벨 (0,1] 스케일: 패킹시 계수노름↑ → bootstrap aliasing 방지
     id_enc = engine.encode(
-        [float(i + 1) for i in range(N)] + [0.0] * (slot_count - N))
+        [float(i + 1) * _lbl_unit for i in range(N)] + [0.0] * (slot_count - N))
     core_labels_ct = _refresh(engine,
         engine.multiply(core_mask_ct, id_enc), keypack)
 
@@ -801,7 +979,17 @@ def fhe_kd_dense_propagation(
                 core_labels_ct, _ = _tree_max_packed(
                     engine, keypack, packed, nreg, N, label_scale,
                     secret_key=secret_key, tag=f"P1-{pass_name}")
-            print(f"[KD-LP]   (라벨 refresh 누계: {_label_refresh_count})")
+                # ★ [2026-07 메모리] 그룹마다 GC.
+                #   del 로 참조는 끊었지만 CPython 은 **순환 참조**를 즉시 회수하지
+                #   않는다. 특히 _core_cands 는 루프 안에서 정의된 클로저 제너레이터라
+                #   프레임↔셀 순환이 생기고, _pack_candidates 가 슬롯 초과로 break 하면
+                #   제너레이터가 **중단된 채** 프레임에 adjm(암호문)을 붙들고 남는다.
+                #   이 잔재가 라운드마다 쌓여 GPU 메모리가 단조 증가 → Phase1 중반 OOM.
+                #   gc.collect() 로 순환을 끊어 암호문 버퍼를 즉시 반납시킨다.
+                del packed
+                gc.collect()
+            print(f"[KD-LP]   (라벨 refresh 누계: {_label_refresh_count}, "
+                  f"GPU {_lp_gpu_mb():.0f} MB)")   # ★ 라운드별 증가 여부 추적
             _dbg(engine, secret_key, core_labels_ct,
                  f"P1-R{rnd+1}-{pass_name} 완료", N)
 
@@ -836,6 +1024,8 @@ def fhe_kd_dense_propagation(
             border_labels_ct, _ = _tree_max_packed(
                 engine, keypack, packed, nreg, N, label_scale,
                 secret_key=secret_key, tag=f"P2-{pass_name}")
+            del packed
+            gc.collect()      # ★ [2026-07 메모리] Phase1 과 동일 이유
         print(f"[KD-LP]   (라벨 refresh 누계: {_label_refresh_count})")
         _dbg(engine, secret_key, border_labels_ct, f"P2-{pass_name} 완료", N)
 
@@ -844,6 +1034,8 @@ def fhe_kd_dense_propagation(
     final_ct = _scaled_refresh(engine,
         engine.add(core_labels_ct, border_labels_ct), keypack,
         _optimal_refresh_scale(N, 1))
+    # ★ 라벨 스케일 복원: 이후 bootstrap 없음 → 클라이언트/간격판정 [1,N] 그대로
+    final_ct = engine.multiply(final_ct, engine.encode([float(N)] * slot_count))
     print(f"[KD-LP] 라벨 lineage 표준 bootstrap 총계: {_label_refresh_count} "
           f"(+ 최종 1회)  ← 이전 구조 추정치 {fhe_max_cnt * 3}~{fhe_max_cnt * 4}회")
     _dbg(engine, secret_key, final_ct, f"최종 [0,{N}]", N)
@@ -872,7 +1064,7 @@ def fhe_sweep_propagation(
         num_sweeps = math.ceil(math.log2(N))
 
     N_half      = N // 2
-    label_scale = _SCALE_INSET * float(N)      # ★ [Phase1-④]
+    label_scale = _SCALE_INSET                 # ★ 라벨 (0,1] 스케일 (일관성; 순차경로는 패킹 안 함)
     slot_count  = engine.slot_count
 
     print(f"[LP-sweep] N={N}, N_half={N_half}, num_sweeps={num_sweeps}, "
@@ -888,8 +1080,9 @@ def fhe_sweep_propagation(
                                 n_iters=1, slot_count=slot_count,
                                 ensure_output_level=False)
 
+    _lbl_unit = 1.0 / float(N)   # ★ 라벨 (0,1] 스케일: 패킹시 계수노름↑ → bootstrap aliasing 방지
     id_enc = engine.encode(
-        [float(i + 1) for i in range(N)] + [0.0] * (slot_count - N))
+        [float(i + 1) * _lbl_unit for i in range(N)] + [0.0] * (slot_count - N))
     core_labels_ct = _refresh(engine,
         engine.multiply(core_mask_ct, id_enc), keypack)
 
@@ -928,6 +1121,8 @@ def fhe_sweep_propagation(
 
     final_ct = _refresh(engine,
         engine.add(core_labels_ct, border_labels_ct), keypack)
+    # ★ 라벨 스케일 복원 (함수1과 동일)
+    final_ct = engine.multiply(final_ct, engine.encode([float(N)] * slot_count))
     print(f"[LP-sweep] 라벨 lineage 표준 bootstrap 총계: {_label_refresh_count} (+ 최종 1회)")
     _dbg(engine, secret_key, final_ct, f"최종 [0,{N}]", N)
     return final_ct
