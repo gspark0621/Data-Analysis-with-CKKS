@@ -64,7 +64,7 @@ from core.ciphertext_single.minimax import (
 # ─────────────────────────────────────────────────────────────────────────
 _MCP_ALPHA15_CHEB_PATH = "mcp_alpha15_lp_cheb.json"   # Normalize/Core/LP 공유
 
-DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/s1.arff"
+DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/twomoons.arff"
 
 
 # ── MCP 파일 준비 ─────────────────────────────────────────────────────────

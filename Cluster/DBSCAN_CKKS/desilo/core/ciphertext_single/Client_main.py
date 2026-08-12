@@ -68,7 +68,7 @@ from util.keypack import KeyPack
 #     hepta R=3, tetra R=7, lsun R=11, chainlink R=31, target R=26, atom R=6, moons R=29
 #     → 최대 31 → 2의 거듭제곱 올림 = 32 (여유 1). 7개 전부 ARI=1.0 (sklearn 일치).
 #   [한계] 곡률이 큰 매니폴드(나선 등)에는 불충분. 논문 한계 절에 명시할 것.
-_N_ROUNDS = 5
+_N_ROUNDS = 29
 
 # 전파 방식 임계값: 상단 정의로 모든 함수에서 참조 가능
 def _kd_dense_threshold(dim: int) -> int:
