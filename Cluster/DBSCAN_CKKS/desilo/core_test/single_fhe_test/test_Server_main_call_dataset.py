@@ -16,17 +16,18 @@
 #   근거: d차원 공간에서 밀집 구조 신뢰를 위한 최소 이웃 수 = 2d
 # ─────────────────────────────────────────────────────────────────────────
 #
-# [변경 5, 2026-05b] 옵션 B: 전부 α=15 Chebyshev로 통일
-#   - mcp_alpha11.json / mcp_normalize_alpha12.json / mcp_alpha15_lp.json (power basis)
-#     3개 stale 파일 자동 생성 제거. 코드 어디서도 참조 안 됨.
-#   - 단일 파일 mcp_alpha15_lp_cheb.json 만 자동 생성 (Normalize/Core/LP 공유).
-#   - 이유: Core α=12 worst case 안전성 미확인 → α=15에서 77τ 마진 확보.
-#           Chebyshev basis는 high-deg coefficient 폭발 회피.
+# [변경 5, 2026-05b → 2026-09 폐기] 옵션 B(전부 α=15 통일)
+#   - 당시: 단일 파일 mcp_alpha15_lp_cheb.json 을 Normalize/Core/LP 가 공유.
+#   - 현재: 세 모듈 모두 N 기반 가변 α 를 쓴다.
+#       Core      : clamp(⌈log₂2N⌉+2, 8, 16)   → mcp_alpha{α}_lp_cheb.json
+#       LP        : clamp(⌈log₂1.1N⌉+2, 8, 16) → mcp_alpha{α}_lp_clean1.json
+#       Normalize : clamp(⌈log₂N⌉+8, 15, 20)   → mcp_alpha{α}_norm_cheb.json
+#     따라서 α=15 공유 파일은 참조되지 않으며, 이를 만들던 STEP 0 블록을 삭제했다.
 #
 # [변경 6, 2026-05c] 정확도 버그 수정 통합
 #   - 작업 A: Core/Normalize 마지막 일반 bootstrap → bit_cleaning (mask noise 제거)
 #     + LP의 core_mask _refresh 직후 bit_cleaning 추가 (0.714 감쇠 버그 수정)
-#   - 작업 B: LP에 n_rounds=⌈log₂N⌉ 적응적 round (test에서 명시 전달)
+#   - [2026-09] n_rounds = min(⌈1/ε_n⌉, ⌈3N/min_pts⌉−1), Step 2 에서 산출
 #   - 작업 C: verify_convergence.py (FHE 불필요 평문 수렴 검증, 별도 도구)
 #   - sgn 정밀화: fhe_sgn에 sign_cleaning 추가 (fhe_max 라벨 단조하강 수정)
 #   - sweep 폐기 → kd_dense 통일 (prepare_client_ordering 항상 'kd_dense' 반환)
@@ -44,63 +45,41 @@ from sklearn.metrics import adjusted_rand_score
 from core.ciphertext_single.Client_main import (
     setup_fhe_engine,
     prepare_client_ordering,     # ★ Ball Tree + k_max 구조 분석 통합
-    build_ball_tree_order,       # 개별 접근 (디버그용)
-    compute_kmax_from_ball_structure,  # 개별 접근 (디버그용)
     assign_clusters_by_gap,      # ★ [2026-07] 간격 기반 클러스터 판정
-    _N_ROUNDS,                   # ★ [2026-07] 고정 n_rounds
+    n_rounds_from_public,        # ★ [2026-09] 공개 파라미터 기반 n_rounds
 )
 from core.ciphertext_single.Server_main import send_to_server_fhe
 from core.ex.plaintext.Server_main import send_to_server_np
 from core.ciphertext_single.EncryptModule import DimensionalEncryptor
 
 from core.ciphertext_single.minimax import (
-    compute_mcp_for_label_prop_chebyshev,   # ★ Normalize/Core/LP 공유 α=15 Chebyshev
     load_mcp,
     save_mcp,
 )
 
 # ─────────────────────────────────────────────────────────────────────────
-# MCP 파일 경로 (옵션 B: α=15 Chebyshev 단일 파일 공유)
+# [삭제됨 2026-09] _MCP_ALPHA15_CHEB_PATH / _ensure_mcp_files()
 # ─────────────────────────────────────────────────────────────────────────
-_MCP_ALPHA15_CHEB_PATH = "mcp_alpha15_lp_cheb.json"   # Normalize/Core/LP 공유
+#   "α=15 Chebyshev MCP 생성 중 (Normalize 전용)" 로그를 찍으며
+#   mcp_alpha15_lp_cheb.json 을 만들던 STEP 0 블록. 2026-05b "옵션 B(전부 α=15
+#   통일)" 시절의 잔재이고, 현재는 어디서도 쓰이지 않는다:
+#
+#     · Normalize 는 런타임에 Server_main.py:169 → check_neighbor_closed_interval(
+#       num_points=N) → Normalize._ensure_norm_mcp(N) 경로로
+#       **mcp_alpha{_norm_alpha(N)}_norm_cheb.json** 을 연다. 파일 이름 자체가 다르다
+#       (_norm_cheb vs _lp_cheb). α 는 clamp(⌈log₂N⌉+8, 15, 20) 로 N 에 따라 변한다.
+#         hepta(212)→16  tetra/lsun(400)→17  twodiamonds(800)/longsquare(900)→18
+#         s1(5000)→20(clamp)
+#     · mcp_alpha15_lp_cheb.json 은 _CORE_ALPHA_AUTO 또는 _LP_ALPHA_AUTO 가 False 일
+#       때만 쓰이는 공유 파일인데 둘 다 True 이므로 참조되지 않는다.
+#
+#   → Remez 계산 시간만 쓰고 버려지는 죽은 산출물이었고, 로그가 "Normalize 가 고정
+#     α=15 를 쓴다"는 오해를 유발했다. 삭제한다.
+#   (Core/LP 용 α 별 MCP 는 아래 _ensure_mcp_files_for_N(N) 이 N 확정 후 생성하고,
+#    Normalize 용은 런타임에 _ensure_norm_mcp 가 자동 생성한다.)
 
-DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/twomoons.arff"
+DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/s1.arff"
 
-
-# ── MCP 파일 준비 ─────────────────────────────────────────────────────────
-
-def _ensure_mcp_files():
-    """
-    α=15 Chebyshev MCP (Normalize/Core/LP 공유) 자동 생성/확인.
-
-    옵션 B (2026-05b) 정리 결정사항:
-      - 이전: 3개 power basis MCP 자동 생성
-              mcp_alpha11.json            (Core용 α=11, [7,15,15,15])
-              mcp_normalize_alpha12.json  (Normalize용 α=12, [15,15,15,15])
-              mcp_alpha15_lp.json         (LP용 α=15, [7,15,15,15,27])
-      - 현재: Normalize/Core/LP 모두 mcp_alpha15_lp_cheb.json 단일 파일 공유.
-              위 3개 power basis 파일은 더 이상 어디서도 참조되지 않으므로
-              자동 생성 로직 제거. (디스크에 잔재 있어도 동작에 영향 없음.)
-
-    α=15 Chebyshev 검증 결과 (sanity_check_alpha15.py):
-      - Core worst case 77τ (= 0.5/N at N=212): PASS ✓ — 핵심 가정 검증.
-      - 일반 영역 (≥16τ): PASS ✓
-      - Normalize boundary (≈1τ): FAIL — 예상됨, false ±로 흡수.
-      - ±3τ FAIL: 안전 영역이 실측 ~16τ. hepta ARI 실측으로 영향도 판단.
-    """
-    if not os.path.exists(_MCP_ALPHA15_CHEB_PATH):
-        print(f"[MCP] α=15 Chebyshev MCP 생성 중 (Normalize 전용)")
-        print(f"      degrees=[7,15,15,15,27], BSGS depth=5, margin η=2^{{-17}}")
-        print(f"      δ=2^{{-15}}≈3.05e-5, drift(840콜)≈0.39 < 1.0 ✓")
-        comps = compute_mcp_for_label_prop_chebyshev(alpha=15, verbose=True)
-        save_mcp(comps, _MCP_ALPHA15_CHEB_PATH)
-        print(f"[MCP] 저장 → {_MCP_ALPHA15_CHEB_PATH}  "
-              f"err={comps[-1]['error']:.4e}  t_k={comps[-1]['t_i']:.4e}")
-    else:
-        print(f"[MCP] {_MCP_ALPHA15_CHEB_PATH} 존재 → 스킵 (Normalize 전용)")
-
-
-# ── GPU 메모리 유틸 ───────────────────────────────────────────────────────
 
 def _ensure_mcp_files_for_N(N: int):
     """[2026-07] N이 정해진 뒤 Core/LP가 쓸 alpha별 MCP를 미리 생성.
@@ -111,8 +90,14 @@ def _ensure_mcp_files_for_N(N: int):
     alpha 선택 근거 (둘 다 N에만 의존 -> 공개값, 추가 유출 없음):
       LP  : 라벨이 정수 -> 최소 gap = 1/(1.1N)  -> alpha = ceil(log2(1.1N)) + 1
       Core: neighbor_count가 정수 -> gap = 0.5/N -> alpha = ceil(log2(2N)) + 2
-    Normalize만 alpha=15를 유지하는 이유: dist_sq는 연속값이라 '정수 바닥'이 없고
-      최소 gap이 eps 경계 근접도(데이터 분포)에 의존해 공개값으로 하한을 못 잡는다.
+    Normalize 는 여기서 만들지 않는다 — 런타임에 check_neighbor_closed_interval 이
+      Normalize._ensure_norm_mcp(N) 로 mcp_alpha{α}_norm_cheb.json 을 자동 생성한다.
+      α = clamp(⌈log₂N⌉ + 8, 15, 20).
+      [2026-09 정정] 이 docstring 은 예전에 "Normalize 만 alpha=15 를 유지한다"고
+      서술했으나 이는 2026-05b 시절 얘기이고, Normalize 도 이미 N 기반 가변 α 다.
+      Normalize α 를 닫힌 식으로 유도하지 못하는 이유(=dist_sq 가 연속값이라 최소 gap
+      의 공개 하한이 없다)는 여전히 유효하며, 그래서 실측 캘리브레이션 상수 C=8 을
+      쓴다. 다만 α 는 데이터마다 달라진다.
     """
     from core.ciphertext_single.Core import _core_alpha, _CORE_ALPHA_AUTO
     from core.ciphertext_single.Label_Propagation import (
@@ -233,11 +218,10 @@ def main():
     print("  FHE DBSCAN E2E 테스트 (Heap KD-tree depth 전파)")
     print("=" * 60)
 
-    # ── Step 0: MCP 파일 준비 ────────────────────────────────────
-    print("\n[STEP 0] MCP 파일 준비")
-    _ensure_mcp_files()
-
     # ── Step 1: 파라미터 입력 ────────────────────────────────────
+    #   ([2026-09] 기존 STEP 0 의 α=15 MCP 사전생성은 죽은 코드라 삭제.
+    #    Core/LP 용은 N 확정 후 _ensure_mcp_files_for_N(N), Normalize 용은
+    #    런타임에 Normalize._ensure_norm_mcp(N) 이 자동 생성한다.)
     print(f"\n▶ 데이터셋: {DATASET_PATH}")
     eps_val     = float(input("eps 값 > "))
     min_pts_val = int(input("min_pts 값 > "))
@@ -249,11 +233,27 @@ def main():
 
 
     # ── Step 2: 정규화 ───────────────────────────────────────────
+    # ★ [2026-09] 스케일 = max(좌표범위, PC1 span).  Client_main.send_to_server_fhe 와 동일.
+    #   PC1 span 을 포함해야 n_rounds 의 기하항 ⌈1/ε_n⌉ 이 PC1 extent 를 항상 덮는다
+    #   (lsun/longsquare/target/s1 은 PC1 span > 좌표범위).
+    #   max() 이므로 데이터는 [0,1]^d 안에 유지되어 Normalize 의 max_dist_sq=dim 도 보존.
     global_min   = np.min(pts)
     global_max   = np.max(pts)
-    scale_factor = (global_max - global_min) if (global_max - global_min) != 0.0 else 1.0
+    _coord_range = (global_max - global_min) if (global_max - global_min) != 0.0 else 1.0
+    _Xc          = pts - pts.mean(axis=0)
+    _pc1         = _Xc @ np.linalg.svd(_Xc, full_matrices=False)[2][0]
+    _pc1_span    = float(_pc1.max() - _pc1.min())
+    scale_factor = max(_coord_range, _pc1_span) or 1.0
     normalized_pts = (pts - global_min) / scale_factor
     normalized_eps = eps_val / scale_factor
+
+    # ★ [2026-09] n_rounds = min(⌈1/ε_n⌉, ⌈3N/min_pts⌉−1)  — 공개 파라미터만 사용
+    n_rounds_val = n_rounds_from_public(normalized_eps, N, int(min_pts_val))
+    print(f"[스케일] 좌표범위={_coord_range:.4f}  PC1span={_pc1_span:.4f}"
+          f"  → scale={scale_factor:.4f}")
+    print(f"[n_rounds] {n_rounds_val}  "
+          f"(기하 ⌈1/ε_n⌉={math.ceil(1.0/normalized_eps)}, "
+          f"상한 ⌈3N/min_pts⌉-1={math.ceil(3.0*N/max(int(min_pts_val),1))-1})")
 
     # [2026-07] N이 정해졌으니 Core/LP용 alpha별 MCP를 여기서 미리 생성
 
@@ -321,7 +321,7 @@ def main():
     before = _gpu_used_mb()
     # ★ [2026-05c] kd_dense 통일: prepare_client_ordering이 항상 'kd_dense' 반환
     #   → use_kd_propagation=True 고정. num_sweeps는 dead path지만 호환 위해 인자 유지.
-    # ★ [2026-05c 작업 B] n_rounds 명시: log₂N (Server가 None시 동일 처리하나 명시성)
+    # ★ [2026-09] n_rounds 는 Step 2 에서 공개 파라미터로 산출한 값을 명시 전달
     fhe_final_ct, debug_fhe = send_to_server_fhe(
         engine=engine, keypack=keypack, secret_key=secret_key,
         encrypted_columns=encrypted_columns,
@@ -329,7 +329,7 @@ def main():
         k_max=k_max,                                        # Ball Tree 구조 분석 최종값
         use_kd_propagation=(mode == 'kd_dense'),
         num_sweeps=k_max if mode == 'sweep' else None,      # sweep dead path
-        n_rounds=_N_ROUNDS,                                 # ★ [2026-07] Client_main._N_ROUNDS 사용
+        n_rounds=n_rounds_val,                              # ★ [2026-09] n_rounds_from_public 산출값
     )
     
     print(f"\n[k_max] {k_max}  (PCA(PC1) ε-window 상한, 클라이언트 산출)")

@@ -363,17 +363,20 @@ _MINIMIZE_DEPTH_DEGREES = {
     10: [7, 7, 13, 15],
     11: [7, 15, 15, 15],
     12: [15, 15, 15, 15],
-    13: [15, 15, 15, 31],   # ★ [2026-07 정정] 기존 [7,7,7,7,15] 는 논문 Table 2 와
-                            #   불일치(오타). 논문 minimize-depth α=13 = {15,15,15,31}.
-                            #   증상: sanity_sweep 에서 α=13 만 1x 오차 1e-5 (이웃 α=12/15 는
-                            #   1e-12). 스펙 2^-13=1.2e-4 는 만족하나 여유가 없어 이웃 대비
-                            #   10^7 배 열등했다. 다른 8개 항목은 논문과 완전 일치 확인됨.
-                            #   ※ degree 31 은 이 Chebyshev BSGS 구현에서 미검증
-                            #     (논문도 '31 초과는 수치오차' 경고). 정정 후 sanity_sweep 로
-                            #     α=13 재측정 전까지는 호출측의 13→12 회피를 유지할 것.
+    13: [15, 15, 15, 31],   # ★ [2026-07 정정] 기존 [7,7,7,7,15] 는 논문 Table 2 오타였다.
+                            #   정정 후 sanity_sweep 재측정: α=13 오차 1e-5 → 7.5e-13 (이웃 α 동급).
+                            #   degree 31 도 이 Chebyshev BSGS 구현에서 정상 동작 확인.
     14: [7, 7, 15, 15, 27],
     15: [7, 15, 15, 15, 27],
     16: [15, 15, 15, 15, 27],
+    # ── ★ [2026-09] 논문 Table 2 나머지 구간 (Normalize α=17~20 용) ──
+    17: [15, 15, 15, 29, 29],
+    18: [15, 15, 29, 29, 31],
+    19: [15, 29, 31, 31, 31],
+    20: [29, 31, 31, 31, 31],
+    # ── 저 α (참고용, 현재 호출 없음) ──
+    4:  [27],               5:  [7, 13],           6:  [15, 15],
+    7:  [7, 7, 13],
 }
 
 
@@ -931,10 +934,17 @@ def compute_mcp_for_label_prop_cleaning(alpha: int, cleaning_iters: int = 2,
         table = _LP_DEGREES_COMP_MIN            # 레버 A (논문 τ)
     else:
         table = _LP_DEGREES_BY_CLEANING.get(cleaning_iters)   # 레버 A+B
-    if table is None or alpha not in table:
+    if table is not None and alpha in table:
+        degrees = table[alpha]
+    elif alpha in _MINIMIZE_DEPTH_DEGREES:
+        # ★ [2026-09] comp-min 표에 없는 α → 논문 Table 2(minimize depth) 로 폴백.
+        #   논문 τ 는 comp-min 목표와 같거나 더 엄격하므로 정확도상 안전하며,
+        #   컴포넌트가 1개 많아질 뿐이다. (하드 에러로 파이프라인이 죽는 것보다 낫다.)
+        degrees = _MINIMIZE_DEPTH_DEGREES[alpha]
+        print(f"  [MCP-LP] ⚠ comp-min 표에 α={alpha} 없음 → 논문 Table2 폴백 {degrees}")
+    else:
         raise ValueError(f"[MCP-LP] (α={alpha}, cleaning={cleaning_iters}) 조합의 "
                          f"degree 표가 없다. minimax.py 의 표를 확인.")
-    degrees   = table[alpha]
     delta     = 2.0 ** (-alpha)
     margin    = get_paper_margin(alpha, mode="max_depth")
     tau_limit = (2.0 ** (1 - alpha)) if cleaning_iters <= 1 else _LP_TAU_TARGET[cleaning_iters]

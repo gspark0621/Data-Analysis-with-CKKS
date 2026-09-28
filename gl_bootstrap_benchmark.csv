@@ -1,0 +1,8 @@
+shape,batch,rows,cols,fresh_level,mult_steps_to_zero,level_before_bootstrap,level_after_bootstrap,bootstrap_time_sec,status
+"(256, 16, 16)",256,16,16,,,,,,error: AttributeError: 'desilofhe.GLEngine' object has no attribute 'create_relinearization_key'
+"(16, 256, 256)",16,256,256,,,,,,error: AttributeError: 'desilofhe.GLEngine' object has no attribute 'create_relinearization_key'
+"(4, 1024, 1024)",4,1024,1024,,,,,,error: AttributeError: 'desilofhe.GLEngine' object has no attribute 'create_relinearization_key'
+"(256, 32, 32)",256,32,32,,,,,,error: AttributeError: 'desilofhe.GLEngine' object has no attribute 'create_relinearization_key'
+"(16, 512, 512)",16,512,512,,,,,,error: AttributeError: 'desilofhe.GLEngine' object has no attribute 'create_relinearization_key'
+"(4, 2048, 2048)",4,2048,2048,,,,,,error: AttributeError: 'desilofhe.GLEngine' object has no attribute 'create_relinearization_key'
+"(256, 64, 64)",256,64,64,,,,,,error: AttributeError: 'desilofhe.GLEngine' object has no attribute 'create_relinearization_key'

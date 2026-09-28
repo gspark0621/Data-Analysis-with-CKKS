@@ -56,13 +56,18 @@ _CLEANING_ITERS = 1
 _NORM_ALPHA_SAFETY = 8
 _NORM_ALPHA_MIN    = 15
 _NORM_ALPHA_MAX    = 20
-_NORM_DEGREES = {   # 전부 deg≤31, BSGS depth≤5 (=10레벨 ≤ budget10)
+_NORM_DEGREES = {   # ★ [2026-09 정정] 논문 Lee et al. Table 2 "minimize depth" 컬럼 그대로.
+    #   [정정 전 상태] 16:[15,15,15,15,31] / 17,18:[7,15,15,15,15,31] / 19:[15]*5+[31]
+    #     / 20:[7,15,15,15,15,31,31] — 논문과 불일치했고 17,18 은 같은 세트(복붙 흔적).
+    #   [영향] 우리 eval_mcp 는 **컴포넌트마다 sign_bootstrap** 하므로 비용 = 컴포넌트 수.
+    #     정정으로 α=17~20 에서 컴포넌트가 6,6,6,7 → 5,5,5,5 로 줄어든다.
+    #   [레벨] 최대 degree 31 (dep=5 → 10 레벨 = budget 10 ✓). 29 도 dep=5.
     15: [7, 15, 15, 15, 27],
-    16: [15, 15, 15, 15, 31],
-    17: [7, 15, 15, 15, 15, 31],
-    18: [7, 15, 15, 15, 15, 31],
-    19: [15, 15, 15, 15, 15, 31],
-    20: [7, 15, 15, 15, 15, 31, 31],
+    16: [15, 15, 15, 15, 27],
+    17: [15, 15, 15, 29, 29],
+    18: [15, 15, 29, 29, 31],
+    19: [15, 29, 31, 31, 31],
+    20: [29, 31, 31, 31, 31],
 }
 
 
@@ -86,7 +91,6 @@ def _ensure_norm_mcp(N: int, out_dir: str = ".") -> str:
 
 def check_neighbor_closed_interval(
     engine, dist_sq_ct, eps_sq, keypack, dimension,
-    bootstrap_interval=3,
     num_points=None,                       # ★ N: α 자동선택용 (⌈log₂N⌉+8)
     mcp_path=None,                         # ★ 명시하면 override; None 이면 N 기반
     debug: bool = False,

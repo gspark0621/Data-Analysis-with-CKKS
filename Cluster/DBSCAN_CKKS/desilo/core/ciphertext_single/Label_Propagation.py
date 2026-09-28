@@ -76,34 +76,19 @@ _MCP_LABEL_PATH = "mcp_alpha15_lp_cheb.json"   # ★ Chebyshev basis (α 고정 
 #     비균일 잔차(~5e-4)에 근접하면 2 로 올리고 sanity_check 로 재확인할 것.
 _LP_USE_CLEANING_DEGREES = True   # cleaning 예산 기반 degree 사용(False→논문 Table2)
 _LP_ALPHA_AUTO        = True     # False면 아래 _MCP_LABEL_PATH(α=15) 고정 사용
-_LP_ALPHA_SAFETY_BITS = 1        # ★ 실측 스윕 결과: s=1 (아래 근거)
-#   [s 결정 근거 — ★ sanity_sweep_alpha.py 실측(2026-07)으로 확정]
-#     실측 파괴 경계(1x gap 지점에서 오차>1e-3):
-#       LP  : gap/δ=0.233 FAIL / 0.302 PASS   → 경계 ≈ 0.25
-#       Core: gap/δ=0.166 FAIL / 0.256 PASS   → 경계 ≈ 0.2
-#     s=0 이면 ceil 때문에 gap/δ ∈ [1,2) 자동 보장 → 경계 대비 4~8배 여유(실측 PASS).
-#     s=1 이면 gap/δ ∈ [2,4) → 누적 감쇠(실측 tetra ×0.961, 대형 데이터 최대 ×0.77)로
-#     유효 gap 이 줄어드는 것까지 흡수. 실측 오차 1e-10~1e-13 로 매우 안전.
-#     ⇒ s=1 채택. (s=2 는 chainlink 를 α=13 으로 보내는데 α=13 은 아래 이유로 금지)
-#   [이전 모델의 오류 — 기록]
-#     앞서 CKKS_SYS=1.6e-3 을 가정해 drift 를 계산했으나, 실측 역산 raw≈4.7e-5 로
-#     약 1000배 과대평가였다. 실제 drift 기여는 사실상 0 → s 를 키울 이유가 없었다.
-#   [참고 — 후처리가 gap 기반(assign_clusters_by_gap)이라는 점도 유리하게 작용]
-#     후처리 조건: 클러스터 내부퍼짐 < _GAP_THRESHOLD < 클러스터간 최소간격.
-#     이 판정은 비례감쇠(×c)·균일이동(+c)에 불변 → '총 drift'는 무해하고
-#     오직 *비균일* 성분만 문제 (실측: tetra 총감쇠 15.45 인데 내부퍼짐 0.079).
-#     라벨단위 deadzone D = 2^-α·1.1N = 2^-s  ← s 가 D 를 직접 지배.
-#     모델(tetra 실측 앵커로 교정): 내부퍼짐 ≈ 2.9·(2^-s + √n_max·σ_nonuniform)
-#       s=0 → 2.90 > thr 1.0  ✗      s=1 → 1.47 > 1.0  ✗
-#       s=2 → 0.75 < 1.0  ✓(1.3배)   s=3 → 0.39 < 1.0  ✓(2.6배)
-#     추가로 전파 관점: D<1 이어야 |Δlabel|=1 인 인접 라벨 전파가 deadzone 에
-#     삼켜지지 않음 → s≥1 필수, CKKS 노이즈 여유까지 보면 s=2.
-#   ⇒ α = ⌈log₂(1.1N)⌉ + 2.  hepta 10 / tetra·lsun·moons 11 / target·atom 12 /
-#     chainlink 13.  전부 4컴포넌트(현행 α=15 는 5) — chainlink 만 5 유지.
-#   ★ thr 과의 trade: _GAP_THRESHOLD 를 올리면 s 를 낮출 수 있다(퍼짐<thr<간격).
-#     상한은 '클러스터간 최소간격' — 실측 최소는 atom 의 13 → thr ≤ ~6 권장.
-#     예) thr=4 로 올리면 s=0(α=⌈log₂1.1N⌉)까지 가능 → hepta 3컴포넌트.
-#     단 간격 13 은 경험적 관찰이라(Client_main 주석 §반례) 보수적으로 thr=1 유지 권장.
+_LP_ALPHA_SAFETY_BITS = 2        # ★ [2026-09 확정] s=2.
+#   [s 결정 — 두 개의 독립 제약 중 더 강한 쪽을 채택]
+#     (a) MCP 파괴 경계(실측 sanity_sweep): gap/δ ≥ 0.25 면 PASS.
+#         s=0 이어도 ceil 때문에 gap/δ ∈ [1,2) → 이미 4~8배 여유. → s=0 도 통과.
+#     (b) 후처리(gap 판정) 제약: 라벨단위 deadzone D = 2^-α·(_SCALE_INSET·N) = 2^-s.
+#         내부퍼짐 모델(tetra 실측 앵커) ≈ 2.9·(2^-s + √n_max·σ_nonuniform) < thr=1.0
+#           s=0 → 2.90 ✗   s=1 → 1.47 ✗   s=2 → 0.75 ✓(1.3배)   s=3 → 0.39 ✓(2.6배)
+#     ⇒ (b) 가 지배하므로 s=2. α = ⌈log₂(1.1N)⌉ + 2.
+#     hepta 10 / tetra·lsun·moons 11 / target·atom 12 / chainlink 13 / S1 15.
+#   [기록] 이전 코드는 값 1, 주석은 (a)만 근거로 "s=1 채택"이라 쓰고 바로 아래에서
+#     (b)로 "s=2" 라고 결론내는 자기모순 상태였다. (b)가 더 강한 제약이므로 2로 통일.
+#   [trade] _GAP_THRESHOLD(thr)를 올리면 s를 낮출 수 있다(퍼짐<thr<간격).
+#     상한은 '클러스터간 최소간격' ≥ min_pts·c. 보수적으로 thr=1·c 유지 → s=2.
 _LP_ALPHA_MIN         = 8        # JSON/degree 테이블 하한 (논문 Table 2)
 _LP_ALPHA_MAX         = 16       # 상한
 
@@ -116,27 +101,16 @@ _LP_MINIMIZE_DEPTH_DEGREES = {
 }
 
 
-# ★ [실측 2026-07] α=13 금지. sanity_sweep 에서 α=13 의 1x 오차가 1e-5~1e-6 으로
-#   이웃 α=12(1e-12~1e-13), α=15(1e-12~1e-14) 대비 **1e4~1e7 배 열등**했다
-#   (LP·Core, N=212/400/770/1000 전 케이스 일관).
-#   ★ 원인 규명(2026-07): 'α=13 이라는 α 자체'가 아니라 **minimax.py 의 오타**였다.
-#     minimax.py `_MINIMIZE_DEPTH_DEGREES[13]` 이 [7,7,7,7,15] 로 되어 있었으나
-#     논문 Table 2(minimize depth) 의 α=13 은 {15,15,15,31} 이다. (나머지 8개 항목은
-#     논문과 완전 일치.) 빈약한 세트라 스펙 2^-13 은 겨우 맞추지만 여유가 없어
-#     cleaning 후에도 1e-5 에 머문 것. minimax.py 는 정정했다.
-#   ★★ 재측정 결과(캐시 삭제 후 3차 스윕): α=13 오차가 1e-5 → **7.5e-13** 으로
-#     8/8 전 케이스에서 이웃 α 와 동급이 되었다(개선 1e4~1e8배). 즉
-#       · 원인은 'α=13' 도 'degree 31' 도 아니고 minimax.py 오타였음이 확정
-#       · degree 31 은 이 Chebyshev BSGS 구현에서 정상 동작 확인
-#     ⇒ 회피 매핑 해제(빈 dict). 이제 α=13 을 정상 사용 가능(4컴포넌트).
-_LP_ALPHA_FORBIDDEN = {}   # ★ 2026-07 해제: α=13 정상화 확인됨(아래)
+# [기록] 한때 α=13 을 금지했으나, 원인은 α 가 아니라 minimax.py `_MINIMIZE_DEPTH_DEGREES[13]`
+#   오타([7,7,7,7,15] → 논문 Table 2 는 {15,15,15,31})였다. 정정 후 재측정에서 α=13 오차가
+#   1e-5 → 7.5e-13 으로 이웃 α 와 동급이 되어 회피 매핑을 삭제했다. degree 31 도 정상 동작.
 
 
 def _lp_alpha(num_points: int) -> int:
     """N → LP sign 근사 최소 α. deadzone δ=2^{-α} ≤ 1/(_SCALE_INSET·N)."""
     a = math.ceil(math.log2(_SCALE_INSET * float(num_points))) + _LP_ALPHA_SAFETY_BITS
     a = max(_LP_ALPHA_MIN, min(_LP_ALPHA_MAX, a))
-    return _LP_ALPHA_FORBIDDEN.get(a, a)
+    return a
 
 # ★ [2026-05c] fhe_sgn의 sign_cleaning 반복 횟수.
 _SGN_CLEANING_ITERS = 1   # 유지(레벨 2). 레버 A 는 cleaning 변경이 불필요하다.
@@ -268,56 +242,14 @@ def _dbg(engine, secret_key, ct, tag, num_points, show=6):
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# ★ [2026-07] Scaled-refresh — 표준 bootstrap 노이즈의 L³ 의존 완화
+# [삭제됨 2026-09] Scaled-refresh (ct/S → bootstrap → ×S)
 # ══════════════════════════════════════════════════════════════════════════
-#
-# [문제] 표준 bootstrap 노이즈는 메시지 스케일 L 의 3제곱에 비례:
-#     ε_boot(L) ≈ 2.9e-6 + 6.3e-10 · L³        (EvalMod 사인 근사 오차 구조)
-#   라벨 스케일 L=N 이므로 hepta(N=212)에서 ε_boot = 6.0e-3 / refresh.
-#
-# [실측 확인 — 2026-07 hepta]
-#   m=1 (순차식): refresh 513회 → 라벨 32 대신 35.64 = 드리프트 +3.64
-#                 예측 513 × 6.0e-3 = 3.1  → 실측 3.64 (오차 18%) ✓ 모델 일치
-#   m=76 (패킹) : 패킹이 채운 슬롯을 N/32768=0.65% → (m+1)N/32768=49.8% 로 늘림.
-#                 계수 노름 ~√n_filled 배 ≈ 8.8배 → 실효 L ≈ 1866 → ε_boot = 4.09
-#                 refresh 198회 → 드리프트 ~810 → 라벨 붕괴 (실측 212→33.27) ✓
-#
-# [해법] ct/S → bootstrap → ×S.  bootstrap 이 보는 값이 L/S 로 줄어듦:
-#     노이즈 = S · ε_boot(L/S) = S·a + b·L³/S²,   최적 S* = L·(2b/a)^(1/3)
-#     hepta L=212 → S*=16, 86배 | hepta 패킹 → S*=128, 6589배
-#     lsun L=400  → S*=32, 305배 | chainlink → S*=64, 1856배
-#   (메모리의 "S* ≈ 33–64, 370–1372배" 예측과 일치)
-# [비용] 곱 2회(레벨 2) 추가.
-_SCALED_REFRESH = True
-
-
-def _optimal_refresh_scale(N: int, n_region: int = 1) -> int:
-    """S* = L·(2b/a)^(1/3) 를 2의 거듭제곱으로 반올림.
-
-    n_region>1(패킹)이면 채워진 슬롯 증가로 계수 노름이 √n_region 배 커지므로
-    실효 L 을 그만큼 키워 잡는다.
-    """
-    # ★ 라벨을 (0,1] 스케일로 두면 bootstrap(EvalMod)이 값을 그대로 안전 처리한다.
-    #   scaled refresh(÷S→bootstrap→×S)는 작은 값에 노이즈만 ×S 증폭 → S=1 이 최적.
-    #   [근본원인] aliasing 은 '값 크기' 단독이 아니라 '계수 노름 ≈ √(채운슬롯)·값'.
-    #   라벨 (0,1] 이면 패킹(n_region↑)에도 계수 노름이 임계 아래로 유지 → S 확대 불필요.
-    return 1
-    # --- 구 공식 (라벨 L≈N 가정, 폐기) ---
-    # a, b = 2.9e-6, 6.3e-10
-    # L = float(N) * math.sqrt(max(n_region, 1))
-    # S = L * (2.0 * b / a) ** (1.0 / 3.0)
-    # return max(1, min(_MAX_REFRESH_SCALE, int(2 ** round(math.log2(max(S, 1.0))))))
-
-
-def _scaled_refresh(engine, ct, keypack, S: int = 1):
-    """ct/S → 표준 bootstrap → ×S.  S<=1 이거나 레벨 부족이면 기존 _refresh."""
-    if (not _SCALED_REFRESH) or S <= 1 or getattr(ct, "level", 99) < 1:
-        return _refresh(engine, ct, keypack)
-    sc = engine.slot_count
-    ct = engine.multiply(ct, engine.encode([1.0 / S] * sc))
-    ct = _refresh(engine, ct, keypack)
-    ct = engine.multiply(ct, engine.encode([float(S)] * sc))
-    return ct
+#   라벨 스케일을 L=N 에서 (0,1] 로 바꾼 시점(_lbl_unit = 1/N)에 존재 이유가 사라졌다.
+#   bootstrap(EvalMod) 노이즈의 L³ 항은 '계수 노름 ≈ √(채운슬롯)·값' 에서 오는데,
+#   라벨이 (0,1] 이면 패킹으로 슬롯을 채워도 계수 노름이 임계 아래로 유지된다.
+#   실제로 _optimal_refresh_scale() 은 무조건 1 을 반환하고 있었으므로
+#   _SCALED_REFRESH / _MAX_REFRESH_SCALE / _scaled_refresh 는 전부 도달 불가 경로였다.
+#   → 삭제. 라벨 refresh 는 _ensure_label_level → _refresh 단일 경로.
 
 
 # ★ [2026-07] True 면 표준 bootstrap 에도 small_bootstrap_key 를 쓴다
@@ -350,7 +282,7 @@ def _refresh(engine: Engine, ct: Ciphertext, keypack: KeyPack) -> Ciphertext:
     )
 
 
-def _ensure_label_level(engine, ct, keypack, tag="", refresh_scale=1):
+def _ensure_label_level(engine, ct, keypack, tag=""):
     """★ [Phase1-③] 라벨 lineage 유일의 표준 bootstrap 지점.
 
     ct.level < _LABEL_MIN_LEVEL일 때만 refresh. 라벨이 받는 노이즈 주입
@@ -361,7 +293,7 @@ def _ensure_label_level(engine, ct, keypack, tag="", refresh_scale=1):
     lvl = getattr(ct, "level", None)
     if lvl is not None and lvl < _LABEL_MIN_LEVEL:
         _label_refresh_count += 1
-        ct = _scaled_refresh(engine, ct, keypack, refresh_scale)
+        ct = _refresh(engine, ct, keypack)
     return ct
 
 
@@ -716,12 +648,6 @@ def _max_n_region_no_wrap(N: int, slot_count: int) -> int:
     return max(2, r)
 
 
-# ★ [r9] S 상한. hepta(ARI 100)에서 검증된 값은 128 뿐. 256 은 미검증이라 제한.
-#   벤치 실측(bench_slots.py): 16,000 슬롯에서 S=1 오차 100.0 → S=128 오차 0.092 (1091배).
-#   오차의 거의 전부가 균일 편향(비균일 성분 5e-4)이라 라벨 간 간격은 보존된다.
-_MAX_REFRESH_SCALE = 128
-
-
 def _slot_group_size(N: int, k_max: int, slot_count: int) -> int:
     """패킹 가능한 최대 그룹 크기 m.  ★ [r9] 상한 = 감싸기 무오염 조건.
 
@@ -814,8 +740,7 @@ def _tree_max_packed(engine, keypack, packed_ct, n_region, N, label_scale,
               f"예상 fhe_max {math.ceil(math.log2(max(n_region,2)))}회")
     while span > 1:
         half  = (span + 1) // 2
-        cur   = _ensure_label_level(engine, cur, keypack, tag=f"{tag} tree{steps}",
-                                    refresh_scale=_optimal_refresh_scale(N, n_region))
+        cur   = _ensure_label_level(engine, cur, keypack, tag=f"{tag} tree{steps}")
         other = engine.rotate(cur, keypack.rotation_key, -half * N)  # ★ refresh 후 회전
         cur   = fhe_max(engine, cur, other, N, keypack,
                         label_scale=label_scale, secret_key=secret_key)
@@ -932,9 +857,6 @@ def fhe_kd_dense_propagation(
           f"_FORCE_GROUP_SIZE={_FORCE_GROUP_SIZE}")
     _fill = _nreg_est * N / slot_count
     _need = (_nreg_est + math.ceil(_nreg_est / 2.0)) * N
-    print(f"[KD-LP] Scaled-refresh: {_SCALED_REFRESH}  "
-          f"S(패킹 n_region={_nreg_est})={_optimal_refresh_scale(N, _nreg_est)}  "
-          f"S(단일)={_optimal_refresh_scale(N, 1)}  S상한={_MAX_REFRESH_SCALE}")
     print(f"[KD-LP] ★감싸기 검사: (n_region {_nreg_est} + half "
           f"{math.ceil(_nreg_est/2)})×N {N} = {_need}  vs slot_count {slot_count}  "
           f"{'★★★ 오염! 버그' if _need > slot_count else '✓ 안전'}  "
@@ -971,8 +893,7 @@ def fhe_kd_dense_propagation(
                             yield ((_bwd_from_fwd(engine, keypack, fwd, k, N)
                                     if 2 * k < N else None), N - k)
                 core_labels_ct = _ensure_label_level(
-                    engine, core_labels_ct, keypack, tag=f"P1 {pass_name}",
-                    refresh_scale=_optimal_refresh_scale(N, 1))
+                    engine, core_labels_ct, keypack, tag=f"P1 {pass_name}")
                 packed, nreg = _pack_candidates(
                     engine, keypack, core_labels_ct, core_labels_ct,
                     _core_cands(), N, slot_count)
@@ -1015,8 +936,7 @@ def fhe_kd_dense_propagation(
                         del fwd
                         yield bwd, N - k          # bwd=None이면 _pack_candidates가 스킵
             border_labels_ct = _ensure_label_level(
-                engine, border_labels_ct, keypack, tag=f"P2 {pass_name}",
-                refresh_scale=_optimal_refresh_scale(N, 1))
+                engine, border_labels_ct, keypack, tag=f"P2 {pass_name}")
             # base=border 누적,  source=core_labels  (원본 로직과 동일)
             packed, nreg = _pack_candidates(
                 engine, keypack, border_labels_ct, core_labels_ct,
@@ -1030,10 +950,8 @@ def fhe_kd_dense_propagation(
         _dbg(engine, secret_key, border_labels_ct, f"P2-{pass_name} 완료", N)
 
     # ★ [r7] core/border 는 _tree_max_packed 에서 [0,N) 클린 보장됨.
-    #   최종 refresh 도 scaled 로 (라벨 L=N 이므로 S=_optimal_refresh_scale(N,1)).
-    final_ct = _scaled_refresh(engine,
-        engine.add(core_labels_ct, border_labels_ct), keypack,
-        _optimal_refresh_scale(N, 1))
+    final_ct = _refresh(engine,
+        engine.add(core_labels_ct, border_labels_ct), keypack)
     # ★ 라벨 스케일 복원: 이후 bootstrap 없음 → 클라이언트/간격판정 [1,N] 그대로
     final_ct = engine.multiply(final_ct, engine.encode([float(N)] * slot_count))
     print(f"[KD-LP] 라벨 lineage 표준 bootstrap 총계: {_label_refresh_count} "
@@ -1126,16 +1044,3 @@ def fhe_sweep_propagation(
     print(f"[LP-sweep] 라벨 lineage 표준 bootstrap 총계: {_label_refresh_count} (+ 최종 1회)")
     _dbg(engine, secret_key, final_ct, f"최종 [0,{N}]", N)
     return final_ct
-
-
-# ── 하위 호환 alias ──────────────────────────────────────────────────────
-def fhe_doubling_propagation_fhe(engine, keypack, adjacency_ct_list, core_ct,
-                                  num_points, secret_key=None):
-    """deprecated: fhe_sweep_propagation 사용 권장."""
-    print("[WARNING] deprecated → fhe_sweep_propagation 사용하세요.")
-    return fhe_sweep_propagation(
-        engine, keypack, adjacency_ct_list, core_ct, num_points,
-        secret_key=secret_key,
-    )
-
-fhe_doubling_propagation_fhe_debug = fhe_sweep_propagation

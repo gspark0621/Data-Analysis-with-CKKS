@@ -1,39 +1,19 @@
 # core/ciphertext_single/Client_main.py
 #
-# ── 변경사항 ────────────────────────────────────────────────────────────────
-# [변경 1] build_ball_tree_order: BFS → DFS in-order 레이아웃
-#   BFS 문제:
-#     left/right subtree 위치가 {1,3,4,7,8,...} 형태로 전체 배열에 인터리빙
-#     → 클러스터 span ≈ N, k_max = N//2 불가피
-#     → heap window 10개 내 평균 4.66개 클러스터 혼재 (실측)
-#   DFS 해결:
-#     left | root | right → left=[start, start+n_L-1] (연속)
-#     → 클러스터 span ≈ cluster_size, k_max 대폭 감소
-#     → enc_sum_k가 실제 작은 k_max를 올바르게 반영
+# ── 현재 구조 ────────────────────────────────────────────────────────────────
+# 정렬      : PCA(제1주성분) 사영 정렬  (Ball Tree DFS 는 2026-09 삭제)
+# k_max     : 1-Lipschitz ε-window 상한, two-pointer O(N), eps-이웃 조회 없음
+# 전파 방식 : kd_dense 로 통일 (all-sweep 폐기)
+# n_rounds  : min(⌈1/ε_n⌉, ⌈3N/min_pts⌉−1)  — 공개 파라미터만, 추가 누출 0
+# 후처리    : assign_clusters_by_gap — 정수 반올림 대신 간격 기반 판정
 #
-# [변경 2] compute_kmax_from_ball_structure: DFS 레이아웃 기반 candidate 수식
-#   circular stride = min(n_L+n_R, N-(n_L+n_R))  (DFS cross-boundary)
-#
-# [변경 3] dead code 제거
-#   compute_kmax_from_ball_structure 내 return 이후 unreachable 코드 삭제
-#
-# [변경 4] decide_propagation_mode 중복 정의 제거
-#   첫 번째 (deprecated) 정의 삭제, 단일 정의 유지
-#
-# [변경 5] run_client_dbscan_fhe: prepare_client_ordering 사용
-#   decide_propagation_mode + 별도 build_kd_tree_order 호출 → 통합
-#
-# [변경 6] ★ [2026-07] 정렬: Ball Tree DFS → PCA(제1주성분) 사영 정렬
-#   문제: Ball Tree pole-to-pole 분할은 확산/대칭 구조에서 클러스터를 슬롯
-#         양극단으로 흩어 k_max ≈ N//2 최악화.
-#         실측 k_max: lsun 199, tetra 199, twodiamonds 399 (= N//2 상한 근접)
-#   해결: PCA(PC1) 정렬 + 1-Lipschitz ε-window k_max
-#         실측 k_max: hepta 70, lsun 96, tetra 75, twodiamonds 63
-#         → LP fhe_max 호출 1.5~6.3배 감소 (호출수 = (2·n_rounds+2)·k_max·2)
-#   검증: 평문 미러(Normalize→Core→LP 동일 로직)에서 4개 데이터셋 ARI=1.0000
-#         (sklearn DBSCAN 일치). k_max 상한 안전성: oracle 대비 1.01~1.21배.
-#   신규 함수: build_pca_order, compute_kmax_from_pca_window
-#   유지: build_ball_tree_order / compute_kmax_from_ball_structure (비교·폴백용)
+# ── 2026-09 정리 ────────────────────────────────────────────────────────────
+#  · _N_ROUNDS 상수(29→32) 폐기 → n_rounds_from_public() 로 교체
+#  · 정규화 스케일: 좌표범위 → max(좌표범위, PC1 span)
+#  · choose_gap_threshold 의 도달 불가 "비율점프 보조 경로" 삭제 (문서도 정정)
+#  · build_ball_tree_order / compute_kmax_from_ball_structure /
+#    build_kd_tree_order / get_kd_dense_kmax / decide_propagation_mode 삭제
+#    (전부 호출부 없음. 비교 실험이 필요하면 git 이력에서 복원)
 # ────────────────────────────────────────────────────────────────────────────
 
 from time import time
@@ -45,30 +25,84 @@ from core.ciphertext_single.EncryptModule import DimensionalEncryptor
 from core.ciphertext_single.Server_main import send_to_server_fhe as send_to_server
 from util.keypack import KeyPack
 
-# ★ [2026-07] LP Core-Core 반복 횟수. 이전 math.ceil(log2(N))에서 고정 상수로 교체.
+# ══════════════════════════════════════════════════════════════════════════
+# LP Phase-1 라운드 수 — 공개 파라미터 기반 기하 산출  [2026-09 확정]
+# ══════════════════════════════════════════════════════════════════════════
 #
-#   [log₂N 폐기 이유 — 실측 반증]
-#     log₂N은 수렴 보장이 아니라 휴리스틱이었고, 실제로 틀림:
-#       chainlink: log₂1000=10  <  실제 필요 R=12   → under-merge (오답)
-#       target   : log₂770 =10  <  실제 필요 R=11   → under-merge (오답)
-#     원인: max-전파는 라운드당 1 graph-hop만 보장 → R = Θ(graph diameter).
-#           log₂N 라운드로 연결성분을 푸는 기법(pointer jumping)은 암호화 인덱스
-#           gather가 필요해 CKKS에서 O(N²) → 사용 불가.
+#   n_rounds = min( ⌈1/ε_n⌉ , ⌈3N/min_pts⌉ − 1 )
+#       ε_n = ε / max(좌표범위, PC1 span)        ← 정규화 스케일
 #
-#   [상한을 공식으로 못 잡는 이유 — 반례 3종 확인]
-#     f(N,k_max)      : 나선 데이터에서 window 과다계수(37 vs 실제 stride 11종)
-#                       → R=448, c=R·k/N=27.6. 무계.
-#     f(N,k_box_max)  : blob+chain 혼합에서 밀집부가 희소 병목을 은폐 (R=199, 상한 6)
-#     f(N,k_box_min)  : 1로 퇴화 → 2N (자명한 상한)
-#     증명 가능한 유일한 상한은 n_rounds = N−1 (diameter ≤ N−1) → 비용 4N·k_max 비현실적.
-#     ⇒ n_rounds는 eps/min_pts와 같은 '파라미터'로 취급. (FHE k-means가 반복수를
-#       하이퍼파라미터로 고정하는 관행과 동일.)
+# ── 제1항: 기하 하한 ⌈1/ε_n⌉ ───────────────────────────────────────────
+#   1-Lipschitz: ‖p_i−p_j‖ ≤ ε ⟹ |z_i−z_j| ≤ ε  (z = 임의 선형사영)
+#   ⟹ 한 hop 은 어떤 사영축에서도 ε 이상 전진하지 못한다.
+#   ⟹ extent 를 가로지르려면 ⌈extent/ε⌉ hop 이 필요하다.
+#   정규화 스케일을 max(좌표범위, PC1 span) 으로 잡으면 이 값이 정확히 ⌈1/ε_n⌉ 이고,
+#   동시에 데이터가 [0,1]^d 안에 유지되어 Normalize 의 max_dist_sq=dim 가정이 보존된다.
+#   임의 상수(안전계수) 없음.
 #
-#   [32의 근거 — 대상 7개 데이터셋 평문 실측 (그룹 트리-max, m=min(k,⌊slot/N⌋−1))]
-#     hepta R=3, tetra R=7, lsun R=11, chainlink R=31, target R=26, atom R=6, moons R=29
-#     → 최대 31 → 2의 거듭제곱 올림 = 32 (여유 1). 7개 전부 ARI=1.0 (sklearn 일치).
-#   [한계] 곡률이 큰 매니폴드(나선 등)에는 불충분. 논문 한계 절에 명시할 것.
-_N_ROUNDS = 29
+# ── 제2항: 증명된 상한 ⌈3N/min_pts⌉ − 1 ────────────────────────────────
+#   성분이 전부 core 일 때 BFS 층 논증:
+#       |L_{j-1}|+|L_j|+|L_{j+1}| ≥ min_pts  ⟹  N ≥ ⌊(D+1)/3⌋·min_pts
+#       ⟹  D_hop ≤ ⌈3N/min_pts⌉ − 1
+#   tight: 간격을 정확히 ε 로 두고 주기-3 패턴(합=min_pts)으로 뭉친 "구슬목걸이"가
+#   이를 달성한다 (평문 미러: N=1000, min_pts=4 → D=747 vs 상한 749).
+#   min_pts=3 이면 N−1 로 퇴화. 실데이터 11종에서는 한 번도 발동하지 않았고,
+#   구슬목걸이형 극값에 대한 방어로만 남는다.
+#
+# ── 실측 (연구자 실사용 파라미터, 평문 미러) ───────────────────────────
+#   dataset       N     d  mp      eps      제안   실제필요   여유
+#   hepta       212     3   4    1.0000       8       3     2.67x
+#   tetra       400     3   3    0.4300      11       7     1.57x
+#   lsun        400     2   4    0.5000      12       8     1.50x
+#   twodiamonds 800     2   6    0.1400      37      13     2.85x
+#   longsquare  900     2   6    1.1500      33      11     3.00x
+#   zelnik5     512     2   4    0.0287      27      18     1.50x
+#   target      770     2   4    0.2500      32      20     1.60x
+#   atom        800     3   4   20.0000       6       5     1.20x
+#   twomoons    200     2   5    0.2800      13      12     1.08x
+#   s1         5000     2  50 44000.0000      24       1    24.00x
+#   zelnik6     238     2   3    0.0130      56       9     6.22x
+#   → 11/11 안전, 여유 중앙값 1.60배. 총 fhe_max 는 기존 고정 32 대비 −30%.
+#
+# ── 누출 ───────────────────────────────────────────────────────────────
+#   n_rounds 는 {ε_n, N, min_pts} 의 결정론적 함수이고 셋 다 이미 서버에 평문
+#   전달된다 → 서버가 스스로 계산 가능 → 추가 누출 0 비트.
+#   프로토콜 트랜스크립트의 길이·메시지 수는 데이터에 독립적으로 유지된다
+#   (재시도/조기종료 없음).
+#
+# ── 한계 (논문 한계 절에 명시할 것) ────────────────────────────────────
+#   (a) 사영 접힘: 측지선이 사영 extent 를 넘는 구조(다중 나선)에서는 부족하다.
+#       3_spiral(N=312, ε=1.4, min_pts=3): 제안 21 < 실제 필요 55.
+#       기존 고정 32 도 동일하게 실패하므로 새로 생긴 약점은 아니다.
+#       공개 파라미터로는 검출 불가: 3_spiral 과 s1 은 ε_n·k_max·PC축 extent·
+#       설명분산비가 사실상 동일한데 필요 라운드가 55 와 1 이다.
+#   (b) 성분 분할 미인지: 식은 "하나의 성분이 PC1 extent 전체를 가로지른다"고
+#       가정하므로, PC1 축을 따라 클러스터가 여러 개 늘어서면 대략 그 개수만큼
+#       과잉 계산된다 (s1: 15개 클러스터 → 24배).
+#   (c) 부족해도 런타임에 신호가 없다(조용한 under-merge). 재시도를 넣지 않는 것은
+#       의도적이다 — 재시도는 "기하 추정이 부족했다"는 1비트를 서버에 노출하는데,
+#       그 1비트는 어떤 공개 파라미터도 제공하지 못하는 정보다(위 (a) 참조).
+#       새 데이터셋 편입 시에는 오프라인 평문 검증으로 사전에 확인할 것.
+
+
+def n_rounds_from_public(eps_norm: float, N: int, min_pts: int) -> int:
+    """공개 파라미터만으로 LP Phase-1 라운드 수를 산출한다.
+
+    Parameters
+    ----------
+    eps_norm : float   정규화된 ε  ( = ε / max(좌표범위, PC1 span) )
+    N        : int     점 개수
+    min_pts  : int     DBSCAN MinPts
+
+    Returns
+    -------
+    int : n_rounds ≥ 1
+    """
+    if eps_norm <= 0.0:
+        raise ValueError(f"eps_norm must be positive, got {eps_norm}")
+    geo = math.ceil(1.0 / eps_norm)                  # 기하 하한 (1-Lipschitz)
+    cap = math.ceil(3.0 * N / max(min_pts, 1)) - 1   # 증명된 상한 (BFS 층 논증)
+    return max(1, min(geo, cap))
 
 # 전파 방식 임계값: 상단 정의로 모든 함수에서 참조 가능
 def _kd_dense_threshold(dim: int) -> int:
@@ -92,136 +126,10 @@ def _gpu_used_mb() -> float:
 
 # ── Ball Tree DFS in-order 정렬 ───────────────────────────────────────────
 
-def build_ball_tree_order(pts: np.ndarray) -> tuple:
-    """
-    Ball Tree를 DFS in-order 레이아웃으로 정렬.
-
-    DFS in-order: left subtree | root | right subtree
-    → 각 subtree 멤버가 연속된 위치를 차지:
-        left  → [start, start+n_L-1]   (n_L개 연속)
-        root  → [start+n_L]
-        right → [start+n_L+1, end]     (n_R개 연속)
-
-    BFS vs DFS 핵심 차이:
-      BFS: left = {1,3,4,7,8,...} 전체 배열에 인터리빙
-           → 클러스터 span ≈ N  → k_max = N//2 불가피 → 848회 fhe_max
-      DFS: left = [start, start+n_L-1] 연속
-           → 클러스터 span ≈ cluster_size  → k_max 대폭 감소 → 연산량 대폭 감소
-
-    Returns
-    -------
-    order    : np.ndarray[int, N]  order[i] = DFS 위치 i의 원래 데이터 인덱스
-    inv_perm : np.ndarray[int, N]  inv_perm[j] = 원래 인덱스 j의 DFS 위치
-    """
-    pts_arr = np.array(pts, dtype=np.float64)
-    N       = len(pts_arr)
-    order   = np.empty(N, dtype=int)
-
-    def _build(indices: np.ndarray, start: int):
-        if len(indices) == 0:
-            return
-        if len(indices) == 1:
-            order[start] = indices[0]
-            return
-
-        coords   = pts_arr[indices]
-        centroid = coords.mean(axis=0)
-        d_sq_c   = np.einsum('ij,ij->i', coords - centroid, coords - centroid)
-        pole1    = coords[int(np.argmax(d_sq_c))]
-        d_sq_p1  = np.einsum('ij,ij->i', coords - pole1, coords - pole1)
-        pole2    = coords[int(np.argmax(d_sq_p1))]
-        axis     = pole2 - pole1
-        ax_norm  = float(np.dot(axis, axis)) ** 0.5
-
-        if ax_norm < 1e-12:
-            proj_order = np.arange(len(indices))
-        else:
-            proj_order = np.argsort(
-                (coords - pole1) @ (axis / ax_norm), kind='stable')
-
-        mid = len(indices) // 2
-        # DFS in-order: left | root | right  ← 모두 연속 범위에 배치
-        _build(indices[proj_order[:mid]],      start)             # left:  [start, start+mid-1]
-        order[start + mid] = indices[proj_order[mid]]             # root:  [start+mid]
-        _build(indices[proj_order[mid + 1:]], start + mid + 1)    # right: [start+mid+1, end]
-
-    _build(np.arange(N), 0)
-
-    inv_perm        = np.empty(N, dtype=int)
-    inv_perm[order] = np.arange(N)
-    return order, inv_perm
-
-
-def compute_kmax_from_ball_structure(
-    pts: np.ndarray,
-    heap_idx: np.ndarray,   # 서명 유지 (내부에서 재구성)
-    eps_norm: float,
-    N: int,
-) -> int:
-    """
-    DFS in-order Ball Tree 구조 분석으로 k_max 상한 계산 — eps-이웃 조회 없음.
-
-    DFS in-order cross-boundary circular stride:
-      left  subtree: [start, start+n_L-1]
-      right subtree: [start+n_L+1, start+n_L+n_R]
-      max linear stride  = n_L + n_R
-      max circular stride = min(n_L+n_R, N-(n_L+n_R))
-
-    BFS와 달리 클러스터가 연속 범위에 집중 → ball_gap < eps인 split이
-    cluster 내부에 집중 → k_max ≈ cluster_size (BFS: k_max ≈ N/2)
-
-    비용: O(N log N) — eps-이웃 조회 없음 (시나리오 2 보호)
-    서버의 enc_sum_k가 이후 정밀화 (단, 클라이언트 상한 초과 불가)
-    """
-    pts_arr = np.array(pts, dtype=np.float64)
-    k_max   = 0
-
-    def _analyze(indices: np.ndarray):
-        nonlocal k_max
-        if len(indices) <= 1:
-            if len(indices) == 1:
-                return pts_arr[indices[0]].copy(), 0.0
-            return np.zeros(pts_arr.shape[1]), 0.0
-
-        coords   = pts_arr[indices]
-        centroid = coords.mean(axis=0)
-        radius   = float(np.max(np.linalg.norm(coords - centroid, axis=1)))
-
-        d_sq_c  = np.einsum('ij,ij->i', coords - centroid, coords - centroid)
-        pole1   = coords[int(np.argmax(d_sq_c))]
-        d_sq_p1 = np.einsum('ij,ij->i', coords - pole1, coords - pole1)
-        pole2   = coords[int(np.argmax(d_sq_p1))]
-        axis    = pole2 - pole1
-        ax_norm = float(np.dot(axis, axis)) ** 0.5
-
-        if ax_norm < 1e-12:
-            proj_order = np.arange(len(indices))
-        else:
-            proj_order = np.argsort(
-                (coords - pole1) @ (axis / ax_norm), kind='stable')
-
-        mid = len(indices) // 2
-        n_L = mid
-        n_R = len(indices) - mid - 1
-
-        c_L, r_L = _analyze(indices[proj_order[:mid]])
-        c_R, r_R = _analyze(indices[proj_order[mid + 1:]])
-
-        if n_L > 0 and n_R > 0:
-            ball_gap = float(np.linalg.norm(c_L - c_R)) - r_L - r_R
-            if ball_gap < eps_norm:
-                # DFS in-order: cross-boundary circular stride
-                # left=[start,start+n_L-1], right=[start+n_L+1,start+n_L+n_R]
-                # max linear = n_L+n_R, circular = min(n_L+n_R, N-(n_L+n_R))
-                cross_span = n_L + n_R
-                candidate  = min(cross_span, N - cross_span)
-                if candidate > k_max:
-                    k_max = candidate
-
-        return centroid, radius
-
-    _analyze(np.arange(N))
-    return min(max(k_max, 1), N // 2)
+# [삭제됨 2026-09] build_ball_tree_order / compute_kmax_from_ball_structure
+#   Ball Tree DFS 정렬은 확산·대칭 구조에서 k_max≈N//2 로 최악화되어(lsun/tetra 199,
+#   twodiamonds 399) PCA(PC1) 정렬로 완전 교체되었다. 호출부가 남아 있지 않아 삭제.
+#   비교 실험이 필요하면 git 이력에서 복원할 것.
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -240,35 +148,52 @@ def compute_kmax_from_ball_structure(
 # [주의] 사영값은 '슬롯 순서 결정'에만 쓰이고 버려짐. 서버 거리 계산은 여전히
 #   원래 dim차원 암호문으로 수행 → 차원축소로 인한 정보 손실 없음.
 
-def build_pca_order(pts: np.ndarray) -> tuple:
+def build_pca_order(pts: np.ndarray, proj: np.ndarray = None) -> tuple:
     """
-    제1주성분(PC1) 축 사영 후 정렬 — Ball Tree DFS 대체.
+    제1주성분(PC1) 축 사영 후 정렬 — 슬롯 배치 순서 결정.
 
-    비용: 중심화 O(N·d) + SVD O(N·d² + d³) + argsort O(N log N)
-          d는 데이터 차원(상수) → 지배항 O(N log N) ✓ 예산 충족
+    비용: 중심화 O(N·d) + thin SVD O(N·d² + d³) + argsort O(N log N)
+          d 는 데이터 차원(상수) → 지배항 O(N log N)
+
+    ★ [2026-09] proj 를 넘기면 중심화·SVD 를 건너뛴다.
+      send_to_server_fhe 는 정규화 스케일(PC1 span)을 구하려고 이미 사영을 계산하므로,
+      그 결과를 그대로 넘겨 O(N·d²) 중복을 제거한다. 실측(N=5000,d=2)에서 중심화+SVD 가
+      전처리의 25%, (N=50000,d=10) 에서는 54% 였다.
+
+    Parameters
+    ----------
+    pts  : (N, d) 정규화된 좌표
+    proj : (N,) 사전 계산된 PC1 사영값. None 이면 여기서 계산한다.
+           균등 스케일링·평행이동에 PC1 축이 불변이므로, 원시 좌표에서 계산한 사영을
+           같은 scale 로 나눠 넘겨도 정규화 좌표계의 사영과 일치한다.
 
     Returns
     -------
-    order    : np.ndarray[int, N]  order[i] = 슬롯 i에 놓일 원래 데이터 인덱스
-    inv_perm : np.ndarray[int, N]  inv_perm[j] = 원래 인덱스 j의 슬롯 위치
-    proj_sorted : np.ndarray[float, N]
-        슬롯 순서(오름차순)의 PC1 사영값. compute_kmax_from_pca_window에 재사용
-        (재계산 방지). 이 값은 k_max 산출 후 폐기 — 서버로 전송되지 않음.
+    order       : (N,) order[i] = 슬롯 i 에 놓일 원래 데이터 인덱스
+    inv_perm    : (N,) inv_perm[j] = 원래 인덱스 j 의 슬롯 위치
+    proj_sorted : (N,) 슬롯 순서(오름차순)의 PC1 사영값.
+                  compute_kmax_from_pca_window 에 재사용 후 폐기 — 서버로 보내지 않는다.
     """
     pts_arr = np.asarray(pts, dtype=np.float64)
     N = len(pts_arr)
 
-    X = pts_arr - pts_arr.mean(axis=0)                 # 중심화
-    # full_matrices=False: N×d (N≫d) → thin SVD, O(N·d²)
-    _, _, Vt = np.linalg.svd(X, full_matrices=False)
-    axis = Vt[0]                                       # PC1 단위벡터 (‖axis‖=1)
+    if proj is None:
+        X = pts_arr - pts_arr.mean(axis=0)                 # 중심화 O(N·d)
+        _, _, Vt = np.linalg.svd(X, full_matrices=False)   # thin SVD O(N·d²)
+        axis = Vt[0]
+        # ★ SVD 의 특이벡터 부호는 구현 의존이다. 부호가 뒤집히면 슬롯 순서가 전부
+        #   역전되어(결과는 대칭이라 정확도는 같지만) 로그·재현성이 흔들린다.
+        #   절댓값 최대 성분을 양수로 고정해 결정론적으로 만든다.
+        if axis[np.argmax(np.abs(axis))] < 0:
+            axis = -axis
+        proj = X @ axis
+    proj = np.asarray(proj, dtype=np.float64)
 
-    proj  = X @ axis                                   # d차원 → 스칼라 (사영)
-    order = np.argsort(proj, kind='stable')
-
-    inv_perm        = np.empty(N, dtype=int)
-    inv_perm[order] = np.arange(N)
-    return order, inv_perm, proj[order]
+    order       = np.argsort(proj, kind="stable")          # O(N log N)
+    inv_perm    = np.empty(N, dtype=np.int64)
+    inv_perm[order] = np.arange(N, dtype=np.int64)
+    proj_sorted = proj[order]
+    return order, inv_perm, proj_sorted
 
 
 def compute_kmax_from_pca_window(
@@ -312,36 +237,21 @@ def compute_kmax_from_pca_window(
     for i in range(N):
         if j < i:
             j = i
-        # z는 오름차순 → window는 단조 확장 (two-pointer, 총 O(N))
         while j + 1 < N and proj_sorted[j + 1] - proj_sorted[i] <= eps_norm:
             j += 1
-        span = j - i
-        if span > W:
-            W = span
+        W = max(W, j - i)
 
+    # ★ 함정: min(W, N//2) 이다. min(W, N−W) 로 쓰면 W > N/2 일 때 과소추정 → under-merge.
     return min(max(W, 1), N // 2)
 
-
-# ── deprecated aliases ────────────────────────────────────────────────────
-
-def build_kd_tree_order(pts: np.ndarray) -> tuple:
-    """Deprecated alias → build_ball_tree_order (DFS in-order)."""
-    return build_ball_tree_order(pts)
-
-
-def get_kd_dense_kmax(N: int) -> int:
-    """Deprecated: 안전 상한 N//2 반환."""
-    return N // 2
-
-
-# ── Ball Tree DFS 정렬 + k_max 구조 분석 통합 ────────────────────────────
 
 def prepare_client_ordering(
     norm_pts: np.ndarray,
     eps_norm: float,
     min_pts: int,
     N: int,
-    dim: int,       # ← 인자 추가
+    dim: int,
+    proj: np.ndarray = None,   # ★ [2026-09] 사전 계산된 PC1 사영 (중복 SVD 제거)
 ) -> tuple:
     # ★ [2026-05c] kd_dense 통일.
     #   이전: min_pts >= 2×dim 이면 kd_dense, 아니면 sweep.
@@ -358,9 +268,10 @@ def prepare_client_ordering(
     #   Ball Tree는 확산/대칭 구조에서 k_max≈N//2 최악화 (lsun/tetra 199, twodia 399).
     #   PCA 정렬 + 1-Lipschitz window로 k_max 1.5~6.3배 감소, ARI=1.0 유지 (평문 검증).
     t0 = time()
-    order, inv_perm, proj_sorted = build_pca_order(norm_pts)
+    order, inv_perm, proj_sorted = build_pca_order(norm_pts, proj=proj)
     print(f"[Client] PCA(PC1) 정렬 구축: {time()-t0:.3f}초  "
-          f"(중심화+thin SVD+argsort, O(N log N))")
+          f"({'argsort only, 사영 재사용' if proj is not None else '중심화+thin SVD+argsort'}"
+          f", O(N log N))")
 
     t1 = time()
     k_max = compute_kmax_from_pca_window(proj_sorted, eps_norm, N)
@@ -379,23 +290,6 @@ def prepare_client_ordering(
               f"— min_pts={min_pts} < 2×dim={threshold} 이지만 sweep 폐기, "
               f"작업 A+B로 kd_dense가 희소 데이터도 커버")
     return 'kd_dense', k_max, order, inv_perm
-
-
-# ── 전파 방식 결정 ─────────────────────────────────────────────────────────
-
-def decide_propagation_mode(min_pts: int, log2_n: int, N: int, dim: int) -> tuple:
-    """
-    [DEPRECATED + 2026-05c kd_dense 통일]
-      현재 어디서도 호출되지 않음 (prepare_client_ordering이 통합 담당).
-      sweep 폐기에 맞춰 항상 'kd_dense' 반환하도록 정리.
-      향후 완전 제거 예정.
-    """
-    threshold = _kd_dense_threshold(dim)  # 2 × dim (참고용)
-    k_max  = get_kd_dense_kmax(N)
-    T_kmax = k_max * (k_max + 1) // 2
-    print(f"[Client][deprecated] kd_dense 통일 → k_max={k_max}, T({k_max})={T_kmax} "
-          f"(min_pts={min_pts}, 2×dim={threshold})")
-    return 'kd_dense', k_max
 
 
 # ── FHE 엔진 설정 ─────────────────────────────────────────────────────────
@@ -531,7 +425,9 @@ _NOISE_BAND = 0.5         # |라벨| < 이 값이면 노이즈
 #   감쇠 ×0.77 → 0.44 (7 ✓) / 내부퍼짐 10배 악화 → 1.46 (7 ✓)
 #   ※ 고정 1.0 도 이 케이스들은 통과하나, 여유가 줄면 먼저 깨진다.
 _ADAPTIVE_THR      = True    # False 면 _GAP_THRESHOLD 고정 사용
-_ADAPTIVE_MIN_RATIO = 8.0    # 이 배수 미만이면 '분리 없음'(단일 클러스터)로 판정
+# [삭제됨 2026-09] _ADAPTIVE_MIN_RATIO — 비율점프 판정에만 쓰였는데 그 경로가
+#   도달 불가 코드로 삭제되면서 함께 죽었다. choose_gap_threshold 는 이제 감쇠계수 c
+#   기반 단일 경로이고 비율 판정을 하지 않는다.
 
 # ★ [2026-07 최종] thr = 1.0·c  (c 추정 불가 시 1.0 폴백)
 #
@@ -565,10 +461,12 @@ _THR_C_FRACTION = 1.0
 _GAP_THRESHOLD_FIXED = 1.0      # c 추정 불가 시 폴백
 
 
-def choose_gap_threshold(v_live, live_idx=None, min_ratio=None, fallback=None):
+def choose_gap_threshold(v_live, live_idx=None):
     """복호화된 라벨에서 thr 결정. 반환: (thr, 설명문자열).
 
-    ★ [2026-07 수정] 감쇠 기반 기준을 **1차 경로**로. 비율점프는 c 추정 불가 시 보조.
+    ★ [2026-09] 경로는 하나뿐이다: 감쇠계수 c 기반. c 추정 실패 시 고정 폴백.
+      (이전 버전에 남아 있던 "비율점프 보조 경로" 는 return 뒤에 있어 도달 불가였고,
+       docstring 만 그것이 동작하는 것처럼 서술하고 있었다 → 코드/문서 모두 삭제.)
 
     [이전 버그] 비율점프를 1차로 쓰고 `gaps = gaps[gaps > 0]` 로 0 을 걸렀더니,
       **평문 경로에서 오작동**했다. 평문은 라벨이 정확한 정수라 내부 gap 이 정확히 0
@@ -590,8 +488,6 @@ def choose_gap_threshold(v_live, live_idx=None, min_ratio=None, fallback=None):
     [유출 없음] 클라이언트가 이미 복호화해 가진 라벨과 live 슬롯 인덱스만 사용.
       서버로 아무것도 보내지 않고 서버는 thr 을 모른다.
     """
-    min_ratio = _ADAPTIVE_MIN_RATIO if min_ratio is None else min_ratio
-    fallback  = _GAP_THRESHOLD if fallback is None else fallback
     v = np.asarray(v_live, dtype=float)
     sv = np.sort(v)
     gaps = np.diff(sv)
@@ -620,20 +516,6 @@ def choose_gap_threshold(v_live, live_idx=None, min_ratio=None, fallback=None):
         why += (f"  ★★경고: 내부퍼짐 {inner_max:.4f} 이 thr 의 50% 초과 — "
                 f"라벨 감쇠 누적. n_rounds 축소 또는 _SGN_CLEANING_ITERS 상향 필요")
     return thr, why
-
-    # ── 보조: c 추정 불가 시 비율점프 ──
-    gp = gaps[gaps > 0]
-    if len(gp) < 2:
-        return fallback, f"c 추정 불가 & gap 부족 → 고정 thr={fallback}"
-    sg = np.sort(gp)
-    ratios = sg[1:] / np.maximum(sg[:-1], 1e-12)
-    i = int(np.argmax(ratios)); best = float(ratios[i])
-    if best < min_ratio:
-        return float(sg[-1] * 2.0), (f"c 추정 불가, 비율점프 {best:.1f} < {min_ratio} "
-                                     f"→ 단일 클러스터로 판정")
-    lo, hi = float(sg[i]), float(sg[i + 1])
-    return float(np.sqrt(lo * hi)), (f"c 추정 불가 → 비율점프 {best:.0f}배 "
-                                     f"(내부최대 {lo:.4f} | 간격최소 {hi:.4f})")
 
 
 def assign_clusters_by_gap(orig_labels, N, thr=None, noise_band=None):
@@ -707,16 +589,42 @@ def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
 
     engine, secret_key, keypack = setup_fhe_engine(verbose=False)
 
-    # 1. 정규화
-    g_min  = pts_arr.min()
-    g_max  = pts_arr.max()
-    scale  = (g_max - g_min) or 1.0
-    norm   = (pts_arr - g_min) / scale
-    ne     = eps / scale
-    print(f"[Client] N={N}, dim={dim}, eps_norm={ne:.4f}")
+    # 1. 정규화 — 스케일 = max(좌표범위, PC1 span)
+    #    PC1 span 을 포함시키는 이유: n_rounds 의 기하항이 ⌈PC1extent/ε⌉ 이어야 하는데,
+    #    좌표범위만 쓰면 PC1 span > 좌표범위 인 데이터(lsun/longsquare/target/s1)에서
+    #    과소평가된다. max() 를 쓰면 항상 덮으면서 데이터는 [0,1]^d 안에 유지되어
+    #    Normalize 의 max_dist_sq = dim 가정도 그대로 성립한다.
+    #    PC1 사영은 슬롯 정렬용으로 어차피 계산하므로 추가 연산은 O(N) 리덕션 2회뿐.
+    g_min   = pts_arr.min()
+    g_max   = pts_arr.max()
+    coord_r = (g_max - g_min) or 1.0
+
+    # ★ [2026-09] 중심화·SVD·사영을 여기서 딱 한 번만 하고 결과를 prepare_client_ordering
+    #   으로 넘긴다. 이전에는 여기서 1회 + build_pca_order 에서 1회로 O(N·d²) 를 두 번
+    #   했다. PC1 축은 균등 스케일링·평행이동에 불변이므로 원시 좌표에서 계산한 사영을
+    #   같은 scale 로 나누면 정규화 좌표계의 사영과 정확히 일치한다:
+    #       norm 의 중심화 사영 = (X − μ)·v / scale = _pc1 / scale
+    _Xc  = pts_arr - pts_arr.mean(axis=0)
+    _ax  = np.linalg.svd(_Xc, full_matrices=False)[2][0]
+    if _ax[np.argmax(np.abs(_ax))] < 0:      # SVD 부호 고정 (슬롯 순서 결정론화)
+        _ax = -_ax
+    _pc1     = _Xc @ _ax
+    pc1_span = float(_pc1.max() - _pc1.min())
+
+    scale   = max(coord_r, pc1_span) or 1.0
+    norm    = (pts_arr - g_min) / scale
+    ne      = eps / scale
+    proj_n  = _pc1 / scale                    # 정규화 좌표계의 PC1 사영
+    n_rounds = n_rounds_from_public(ne, N, min_pts)
+    print(f"[Client] N={N}, dim={dim}, eps_norm={ne:.5f}  "
+          f"(scale={scale:.4f}: 좌표범위 {coord_r:.4f} / PC1span {pc1_span:.4f})")
+    print(f"[Client] n_rounds={n_rounds}  "
+          f"(기하 ⌈1/ε_n⌉={math.ceil(1.0/ne)}, "
+          f"상한 ⌈3N/min_pts⌉-1={math.ceil(3.0*N/max(min_pts,1))-1})")
 
     # 2. PCA(PC1) 정렬 + ε-window k_max 상한 (prepare_client_ordering 통합 사용)
-    mode, k_max, heap_idx, inv_perm = prepare_client_ordering(norm, ne, min_pts, N, dim)
+    mode, k_max, heap_idx, inv_perm = prepare_client_ordering(
+        norm, ne, min_pts, N, dim, proj=proj_n)
 
     if mode == 'kd_dense':
         data_for_enc = norm[heap_idx].tolist()
@@ -737,7 +645,7 @@ def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
         k_max=k_max,                           # 클라이언트 구조 분석 상한 전달
         use_kd_propagation=(mode == 'kd_dense'),
         num_sweeps=k_max if mode == 'sweep' else None, # sweep일 때만 사용
-        n_rounds=_N_ROUNDS,                    # ★ [2026-07] log₂N → 고정 32 (아래 상수 주석 참조)
+        n_rounds=n_rounds,                     # ★ 공개 파라미터 기반 (n_rounds_from_public)
     )
 
     # 4. 복호화 + 역순열

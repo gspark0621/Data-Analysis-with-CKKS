@@ -1,3 +1,0 @@
-numpy==2.4.1
-desilofhe
-pytest==9.0.2

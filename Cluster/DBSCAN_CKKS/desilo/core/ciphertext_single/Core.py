@@ -61,8 +61,8 @@ _MINIMIZE_DEPTH_DEGREES_CORE = {
 }
 
 
-# ★ [실측 2026-07] α=13 금지 (sanity_sweep: Core α=13 오차 1e-6~1e-9 vs α=12 1e-12~1e-13).
-_CORE_ALPHA_FORBIDDEN = {}   # ★ 2026-07 해제: α=13 정상화 확인됨(아래)
+# [기록] 한때 α=13 을 금지했으나 원인은 minimax.py 의 degree 표 오타였고, 정정 후
+#   α=13 오차가 이웃 α 와 동급(1e-13)임을 확인해 회피 매핑을 삭제했다.
 
 
 def _core_alpha(N: int) -> int:
@@ -70,7 +70,7 @@ def _core_alpha(N: int) -> int:
     실측 파괴 경계 gap/δ≈0.2 → s=1 이면 gap/δ∈[2,4) 로 10~20배 여유."""
     a = math.ceil(math.log2(2.0 * float(N))) + _CORE_ALPHA_SAFETY_BITS
     a = max(_CORE_ALPHA_MIN, min(_CORE_ALPHA_MAX, a))
-    return _CORE_ALPHA_FORBIDDEN.get(a, a)
+    return a
 
 
 def _load_core_mcp(N: int, mcp_path_override: str = None):
@@ -111,7 +111,6 @@ def identify_core_points_fhe_converted(
     min_pts: float,
     N: int,
     keypack: KeyPack,
-    bootstrap_interval: int = 3,
     mcp_path: str = None,
     debug: bool = False,
     **kwargs
