@@ -3,12 +3,25 @@
 # ── 현재 구조 ────────────────────────────────────────────────────────────────
 # 정렬      : PCA(제1주성분) 사영 정렬  (Ball Tree DFS 는 2026-09 삭제)
 # k_max     : 1-Lipschitz ε-window 상한, two-pointer O(N), eps-이웃 조회 없음
-# 전파 방식 : kd_dense 로 통일 (all-sweep 폐기)
-# n_rounds  : min(⌈1/ε_n⌉, ⌈3N/min_pts⌉−1)  — 공개 파라미터만, 추가 누출 0
+# 전파 방식 : kd_dense 단일 경로 (all-sweep 은 2026-05c 폐기, 2026-10 코드 삭제)
+# n_rounds  : ★[2026-10] 클라이언트가 grid(셀 한 변 ε_n/2)로 산출해 암호문과 함께 전송
+#             (GridRounds.compute_grid_rounds). 서버의 n_rounds_from_public 은 미전달 시 대비용.
 # 후처리    : assign_clusters_by_gap — 정수 반올림 대신 간격 기반 판정
 #
+# ── 2026-10 변경 ────────────────────────────────────────────────────────────
+#  · n_rounds 를 클라이언트 grid 방식으로 산출: n = max(1, max_g ⌈(Λ_g + s√d)/ε_n⌉)
+#      셀 한 변 s = ε_n/2,  Λ_g = 셀 묶음 g 의 측지 지름(셀 그래프 최단 거리 최댓값, 정확값)
+#      가지치기 Dijkstra(BoundingDiameters)로 계산 — 결과는 모든 셀 Dijkstra 와 동일
+#    점 사이 거리 비교 없음, α·margin 등 서버 파라미터 미사용. 상한 ⌈1/ε_n⌉ 로 자르지 않음.
+#    서버에는 n_rounds 정수 하나가 추가로 드러난다.
+#  · PC1 부호 규칙: '절댓값 최대 성분 양수' → '음수' (S1 등 이전 32라운드 실행과 같은 방향)
+#  · sweep 잔재 삭제: _kd_dense_threshold(Sander 2×dim), mode 반환값, mode 분기,
+#    send_to_server 의 use_kd_propagation / num_sweeps 인자.
+#    prepare_client_ordering(norm_pts, eps_norm, N, proj=None) → (k_max, order, inv_perm)
+#    (min_pts·dim 인자는 sweep 판정에만 쓰였으므로 함께 제거)
+#
 # ── 2026-09 정리 ────────────────────────────────────────────────────────────
-#  · _N_ROUNDS 상수(29→32) 폐기 → n_rounds_from_public() 로 교체
+#  · _N_ROUNDS 상수(29→32) 폐기 → n_rounds_from_public() 로 교체, 이후 서버로 이관
 #  · 정규화 스케일: 좌표범위 → max(좌표범위, PC1 span)
 #  · choose_gap_threshold 의 도달 불가 "비율점프 보조 경로" 삭제 (문서도 정정)
 #  · build_ball_tree_order / compute_kmax_from_ball_structure /
@@ -23,96 +36,23 @@ import desilofhe
 import pynvml
 from core.ciphertext_single.EncryptModule import DimensionalEncryptor
 from core.ciphertext_single.Server_main import send_to_server_fhe as send_to_server
+from core.ciphertext_single.GridRounds import compute_grid_rounds
 from util.keypack import KeyPack
 
 # ══════════════════════════════════════════════════════════════════════════
-# LP Phase-1 라운드 수 — 공개 파라미터 기반 기하 산출  [2026-09 확정]
+# [2026-10] LP Phase-1 라운드 수 → 클라이언트 grid 산출 (GridRounds.compute_grid_rounds)
 # ══════════════════════════════════════════════════════════════════════════
-#
-#   n_rounds = min( ⌈1/ε_n⌉ , ⌈3N/min_pts⌉ − 1 )
-#       ε_n = ε / max(좌표범위, PC1 span)        ← 정규화 스케일
-#
-# ── 제1항: 기하 하한 ⌈1/ε_n⌉ ───────────────────────────────────────────
-#   1-Lipschitz: ‖p_i−p_j‖ ≤ ε ⟹ |z_i−z_j| ≤ ε  (z = 임의 선형사영)
-#   ⟹ 한 hop 은 어떤 사영축에서도 ε 이상 전진하지 못한다.
-#   ⟹ extent 를 가로지르려면 ⌈extent/ε⌉ hop 이 필요하다.
-#   정규화 스케일을 max(좌표범위, PC1 span) 으로 잡으면 이 값이 정확히 ⌈1/ε_n⌉ 이고,
-#   동시에 데이터가 [0,1]^d 안에 유지되어 Normalize 의 max_dist_sq=dim 가정이 보존된다.
-#   임의 상수(안전계수) 없음.
-#
-# ── 제2항: 증명된 상한 ⌈3N/min_pts⌉ − 1 ────────────────────────────────
-#   성분이 전부 core 일 때 BFS 층 논증:
-#       |L_{j-1}|+|L_j|+|L_{j+1}| ≥ min_pts  ⟹  N ≥ ⌊(D+1)/3⌋·min_pts
-#       ⟹  D_hop ≤ ⌈3N/min_pts⌉ − 1
-#   tight: 간격을 정확히 ε 로 두고 주기-3 패턴(합=min_pts)으로 뭉친 "구슬목걸이"가
-#   이를 달성한다 (평문 미러: N=1000, min_pts=4 → D=747 vs 상한 749).
-#   min_pts=3 이면 N−1 로 퇴화. 실데이터 11종에서는 한 번도 발동하지 않았고,
-#   구슬목걸이형 극값에 대한 방어로만 남는다.
-#
-# ── 실측 (연구자 실사용 파라미터, 평문 미러) ───────────────────────────
-#   dataset       N     d  mp      eps      제안   실제필요   여유
-#   hepta       212     3   4    1.0000       8       3     2.67x
-#   tetra       400     3   3    0.4300      11       7     1.57x
-#   lsun        400     2   4    0.5000      12       8     1.50x
-#   twodiamonds 800     2   6    0.1400      37      13     2.85x
-#   longsquare  900     2   6    1.1500      33      11     3.00x
-#   zelnik5     512     2   4    0.0287      27      18     1.50x
-#   target      770     2   4    0.2500      32      20     1.60x
-#   atom        800     3   4   20.0000       6       5     1.20x
-#   twomoons    200     2   5    0.2800      13      12     1.08x
-#   s1         5000     2  50 44000.0000      24       1    24.00x
-#   zelnik6     238     2   3    0.0130      56       9     6.22x
-#   → 11/11 안전, 여유 중앙값 1.60배. 총 fhe_max 는 기존 고정 32 대비 −30%.
-#
-# ── 누출 ───────────────────────────────────────────────────────────────
-#   n_rounds 는 {ε_n, N, min_pts} 의 결정론적 함수이고 셋 다 이미 서버에 평문
-#   전달된다 → 서버가 스스로 계산 가능 → 추가 누출 0 비트.
-#   프로토콜 트랜스크립트의 길이·메시지 수는 데이터에 독립적으로 유지된다
-#   (재시도/조기종료 없음).
-#
-# ── 한계 (논문 한계 절에 명시할 것) ────────────────────────────────────
-#   (a) 사영 접힘: 측지선이 사영 extent 를 넘는 구조(다중 나선)에서는 부족하다.
-#       3_spiral(N=312, ε=1.4, min_pts=3): 제안 21 < 실제 필요 55.
-#       기존 고정 32 도 동일하게 실패하므로 새로 생긴 약점은 아니다.
-#       공개 파라미터로는 검출 불가: 3_spiral 과 s1 은 ε_n·k_max·PC축 extent·
-#       설명분산비가 사실상 동일한데 필요 라운드가 55 와 1 이다.
-#   (b) 성분 분할 미인지: 식은 "하나의 성분이 PC1 extent 전체를 가로지른다"고
-#       가정하므로, PC1 축을 따라 클러스터가 여러 개 늘어서면 대략 그 개수만큼
-#       과잉 계산된다 (s1: 15개 클러스터 → 24배).
-#   (c) 부족해도 런타임에 신호가 없다(조용한 under-merge). 재시도를 넣지 않는 것은
-#       의도적이다 — 재시도는 "기하 추정이 부족했다"는 1비트를 서버에 노출하는데,
-#       그 1비트는 어떤 공개 파라미터도 제공하지 못하는 정보다(위 (a) 참조).
-#       새 데이터셋 편입 시에는 오프라인 평문 검증으로 사전에 확인할 것.
-
-
-def n_rounds_from_public(eps_norm: float, N: int, min_pts: int) -> int:
-    """공개 파라미터만으로 LP Phase-1 라운드 수를 산출한다.
-
-    Parameters
-    ----------
-    eps_norm : float   정규화된 ε  ( = ε / max(좌표범위, PC1 span) )
-    N        : int     점 개수
-    min_pts  : int     DBSCAN MinPts
-
-    Returns
-    -------
-    int : n_rounds ≥ 1
-    """
-    if eps_norm <= 0.0:
-        raise ValueError(f"eps_norm must be positive, got {eps_norm}")
-    geo = math.ceil(1.0 / eps_norm)                  # 기하 하한 (1-Lipschitz)
-    cap = math.ceil(3.0 * N / max(min_pts, 1)) - 1   # 증명된 상한 (BFS 층 논증)
-    return max(1, min(geo, cap))
-
-# 전파 방식 임계값: 상단 정의로 모든 함수에서 참조 가능
-def _kd_dense_threshold(dim: int) -> int:
-    """
-    Sander et al. (1998) 권장 min_pts = 2 × dim.
-    dim차원 공간에서 밀집 구조를 신뢰할 수 있는 최소 이웃 수.
-    """
-    return 2 * dim
-
-
+#   이전(2026-09): n_rounds = min(⌈1/ε_n⌉, ⌈3N/min_pts⌉−1) 를 서버가 공개값만으로 산출.
+#     → ⌈1/ε_n⌉ 은 '데이터 전체 scale' 기준이라 클러스터 사이 빈 공간만큼 과잉
+#       (zelnik6 56 vs 필요 10, S1 24 vs 1, longsquare 33 vs 11).
+#       공개값만으로는 클러스터 크기를 알 수 없고(불가능성), RGG 근거는 우리 밀도에서 공허.
+#   현재: 클라이언트가 셀(ε_n/2) 점유 정보로 셀 묶음(클러스터를 통째로 품는 덩어리)을 만들고,
+#     묶음마다 측지 지름 Λ_g 를 정확히 구해 n = max(1, max_g ⌈(Λ_g + s√d)/ε_n⌉) 를
+#     암호문과 함께 보낸다 (one-way 유지). 가정 A(hop 마다 ε_n 전진) 아래에서 FHE 가 평문과
+#     똑같이 재현한 모든 클러스터의 전파 완료가 보장된다 (2026-10 증명 시리즈).
+#     · 점 사이 거리 비교 없음 → DBSCAN 범위 질의를 하지 않는다.
+#     · 누출: n_rounds 정수 하나 (가장 큰 셀 묶음의 측지 지름 / ε_n 수준).
+#     · 서버 n_rounds_from_public 은 n_rounds 미전달 시의 대비 경로로 남긴다.
 
 
 def _gpu_used_mb() -> float:
@@ -182,9 +122,10 @@ def build_pca_order(pts: np.ndarray, proj: np.ndarray = None) -> tuple:
         _, _, Vt = np.linalg.svd(X, full_matrices=False)   # thin SVD O(N·d²)
         axis = Vt[0]
         # ★ SVD 의 특이벡터 부호는 구현 의존이다. 부호가 뒤집히면 슬롯 순서가 전부
-        #   역전되어(결과는 대칭이라 정확도는 같지만) 로그·재현성이 흔들린다.
-        #   절댓값 최대 성분을 양수로 고정해 결정론적으로 만든다.
-        if axis[np.argmax(np.abs(axis))] < 0:
+        #   역전되어 로그·재현성이 흔들리고, 두 클러스터에 걸친 border 점의 max-label
+        #   귀속도 반대로 바뀐다. 절댓값 최대 성분을 '음수'로 고정해 결정론적으로 만든다.
+        #   [2026-10] 양수 → 음수: S1 등 이전(부호 고정 전) 32라운드 실행과 같은 방향.
+        if axis[np.argmax(np.abs(axis))] > 0:
             axis = -axis
         proj = X @ axis
     proj = np.asarray(proj, dtype=np.float64)
@@ -248,21 +189,15 @@ def compute_kmax_from_pca_window(
 def prepare_client_ordering(
     norm_pts: np.ndarray,
     eps_norm: float,
-    min_pts: int,
     N: int,
-    dim: int,
     proj: np.ndarray = None,   # ★ [2026-09] 사전 계산된 PC1 사영 (중복 SVD 제거)
 ) -> tuple:
-    # ★ [2026-05c] kd_dense 통일.
-    #   이전: min_pts >= 2×dim 이면 kd_dense, 아니면 sweep.
-    #   문제: all-sweep은 mask damping이 누적 곱셈으로 라벨을 0으로 소멸시켜
-    #         iris 등에서 -1 완전 붕괴. hepta도 dim=3,min_pts=4 → 2×dim=6 미만이라
-    #         의도치 않게 sweep으로 빠짐 (관측된 버그).
-    #   결정: 작업 A(mask=1.0) + 작업 B(log₂N round)로 kd_dense가 모든 경우 커버.
-    #         sweep 폐기. mode는 항상 'kd_dense'.
-    #         (min_pts < 2×dim 인 희소 데이터도 kd_dense + 적응적 round로 처리;
-    #          작업 C 검증에서 min_pts=4 데이터들이 kd_dense로 수렴 확인.)
-    threshold = _kd_dense_threshold(dim)  # 2 × dim (참고용 로그만)
+    """PCA(PC1) 슬롯 정렬 + ε-window k_max.  반환: (k_max, order, inv_perm).
+
+    ★ [2026-10] sweep 삭제로 mode 반환값과 min_pts·dim 인자를 제거했다.
+      (이력: 2026-05c 까지는 min_pts ≥ 2×dim 이면 kd_dense, 아니면 sweep 이었고,
+       sweep 은 mask damping 누적으로 iris 등에서 라벨이 소멸해 폐기되었다.)
+    """
 
     # ★ [2026-07] Ball Tree DFS → PCA(PC1) 정렬 교체.
     #   Ball Tree는 확산/대칭 구조에서 k_max≈N//2 최악화 (lsun/tetra 199, twodia 399).
@@ -282,14 +217,7 @@ def prepare_client_ordering(
     if k_max >= N // 2:
         print(f"         ⚠ k_max가 안전값({N//2})에 도달 — PC1 분산 부족(등방 분포) 의심. "
               f"정확성은 유지되나 LP 연산 이득 소멸.")
-    if min_pts >= threshold:
-        print(f"[Client] 전파 방식: KD-dense "
-              f"(min_pts={min_pts} ≥ 2×dim={threshold}, Sander et al. 1998)")
-    else:
-        print(f"[Client] 전파 방식: KD-dense (통일) "
-              f"— min_pts={min_pts} < 2×dim={threshold} 이지만 sweep 폐기, "
-              f"작업 A+B로 kd_dense가 희소 데이터도 커버")
-    return 'kd_dense', k_max, order, inv_perm
+    return k_max, order, inv_perm
 
 
 # ── FHE 엔진 설정 ─────────────────────────────────────────────────────────
@@ -577,9 +505,9 @@ def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
       2. prepare_client_ordering:
            - PCA(PC1) 사영 정렬  ★ [2026-07] Ball Tree DFS에서 교체
            - ε-window k_max 상한 계산 (1-Lipschitz, eps-이웃 조회 없음)
-      3. 암호화 → 서버 전송
-         서버가 enc_sum_k로 k_max 정밀화 (클라이언트 상한 이내)
-      4. 복호화 → inv_perm 적용 → 원래 순서 복원
+      3. grid(셀 ε_n/2) 로 n_rounds 산출  ★ [2026-10]
+      4. 암호화 → 서버 전송 (k_max, n_rounds 함께)
+      5. 복호화 → inv_perm 적용 → 원래 순서 복원
     """
     start   = time()
     pts_arr = np.array(pts, dtype=np.float64)
@@ -606,7 +534,7 @@ def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
     #       norm 의 중심화 사영 = (X − μ)·v / scale = _pc1 / scale
     _Xc  = pts_arr - pts_arr.mean(axis=0)
     _ax  = np.linalg.svd(_Xc, full_matrices=False)[2][0]
-    if _ax[np.argmax(np.abs(_ax))] < 0:      # SVD 부호 고정 (슬롯 순서 결정론화)
+    if _ax[np.argmax(np.abs(_ax))] > 0:      # SVD 부호 고정: 최대 성분 음수 [2026-10]
         _ax = -_ax
     _pc1     = _Xc @ _ax
     pc1_span = float(_pc1.max() - _pc1.min())
@@ -615,37 +543,29 @@ def run_client_dbscan_fhe(pts: list, eps: float, min_pts: int):
     norm    = (pts_arr - g_min) / scale
     ne      = eps / scale
     proj_n  = _pc1 / scale                    # 정규화 좌표계의 PC1 사영
-    n_rounds = n_rounds_from_public(ne, N, min_pts)
     print(f"[Client] N={N}, dim={dim}, eps_norm={ne:.5f}  "
           f"(scale={scale:.4f}: 좌표범위 {coord_r:.4f} / PC1span {pc1_span:.4f})")
-    print(f"[Client] n_rounds={n_rounds}  "
-          f"(기하 ⌈1/ε_n⌉={math.ceil(1.0/ne)}, "
-          f"상한 ⌈3N/min_pts⌉-1={math.ceil(3.0*N/max(min_pts,1))-1})")
+    # ★ [2026-10] n_rounds: 클라이언트 grid(셀 ε_n/2) 산출 → 암호문과 함께 전송
+    #   pc1 은 각 묶음의 첫 Dijkstra 출발 셀(전파 소스 근처)을 고르는 데만 쓰임 (결과 불변)
+    n_rounds, grid_info = compute_grid_rounds(norm, ne, min_pts, pc1=proj_n)
 
     # 2. PCA(PC1) 정렬 + ε-window k_max 상한 (prepare_client_ordering 통합 사용)
-    mode, k_max, heap_idx, inv_perm = prepare_client_ordering(
-        norm, ne, min_pts, N, dim, proj=proj_n)
+    k_max, heap_idx, inv_perm = prepare_client_ordering(norm, ne, N, proj=proj_n)
 
-    if mode == 'kd_dense':
-        data_for_enc = norm[heap_idx].tolist()
-        T_kmax = k_max * (k_max + 1) // 2
-        print(f"[Client] Heap(DFS in-order) 정렬 완료  k_max={k_max}, T({k_max})={T_kmax}")
-    else:
-        data_for_enc = norm.tolist()
-        print(f"[Client] 정렬 없음 (sweep 방식)")
+    data_for_enc = norm[heap_idx].tolist()
+    T_kmax = k_max * (k_max + 1) // 2
+    print(f"[Client] PC1 정렬 순서로 재배치 완료  k_max={k_max}, T({k_max})={T_kmax}")
 
     # 3. 암호화 → 서버
     encryptor = DimensionalEncryptor(engine, keypack)
     enc_cols  = encryptor.encrypt_data(data_for_enc, dim)
 
     enc_result, _ = send_to_server(
-        engine=engine, keypack=keypack, secret_key=secret_key,
+        engine=engine, keypack=keypack,
         encrypted_columns=enc_cols,
         num_points=N, eps=ne, min_pts=min_pts,
         k_max=k_max,                           # 클라이언트 구조 분석 상한 전달
-        use_kd_propagation=(mode == 'kd_dense'),
-        num_sweeps=k_max if mode == 'sweep' else None, # sweep일 때만 사용
-        n_rounds=n_rounds,                     # ★ 공개 파라미터 기반 (n_rounds_from_public)
+        n_rounds=n_rounds,                     # ★ [2026-10] 클라이언트 grid 산출값
     )
 
     # 4. 복호화 + 역순열

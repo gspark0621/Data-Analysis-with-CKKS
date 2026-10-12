@@ -10,10 +10,8 @@
 #   변경: 클라이언트 PCA window 상한 결과를 최종값으로 사용.
 #         서버는 수신한 k_max를 그대로 사용하며 재계산하지 않음.
 #
-# [변경 4] min_pts 분기 기준: 고정값 4 → 2×dim (Sander et al. 1998) ← 신규
-#   기존: min_pts >= 4 → kd_dense
-#   변경: min_pts >= 2×dim → kd_dense
-#   근거: d차원 공간에서 밀집 구조 신뢰를 위한 최소 이웃 수 = 2d
+# [변경 4] (2026-10 삭제) min_pts 로 kd_dense/sweep 을 고르던 분기(4 → 2×dim).
+#   sweep 경로가 코드에서 사라져 분기 자체가 없다. LP 는 항상 kd_dense.
 # ─────────────────────────────────────────────────────────────────────────
 #
 # [변경 5, 2026-05b → 2026-09 폐기] 옵션 B(전부 α=15 통일)
@@ -28,9 +26,14 @@
 #   - 작업 A: Core/Normalize 마지막 일반 bootstrap → bit_cleaning (mask noise 제거)
 #     + LP의 core_mask _refresh 직후 bit_cleaning 추가 (0.714 감쇠 버그 수정)
 #   - [2026-09] n_rounds = min(⌈1/ε_n⌉, ⌈3N/min_pts⌉−1), Step 2 에서 산출
+#   - [2026-10] n_rounds 를 클라이언트 grid(셀 ε_n/2, 측지 지름)로 산출해 명시 전달 (GridRounds)
+#               send_to_server_fhe 의 디버그 키 인자명 secret_key → debug_secret_key 로 정정
 #   - 작업 C: verify_convergence.py (FHE 불필요 평문 수렴 검증, 별도 도구)
 #   - sgn 정밀화: fhe_sgn에 sign_cleaning 추가 (fhe_max 라벨 단조하강 수정)
 #   - sweep 폐기 → kd_dense 통일 (prepare_client_ordering 항상 'kd_dense' 반환)
+#   - [2026-10] sweep 코드 삭제: prepare_client_ordering(norm_pts, eps_norm, N) 은
+#               (k_max, order, inv_perm) 를 반환하고, send_to_server_fhe 의
+#               use_kd_propagation / num_sweeps 인자는 없어졌다.
 # ────────────────────────────────────────────────────────────────────────────
 
 import os
@@ -46,9 +49,9 @@ from core.ciphertext_single.Client_main import (
     setup_fhe_engine,
     prepare_client_ordering,     # ★ Ball Tree + k_max 구조 분석 통합
     assign_clusters_by_gap,      # ★ [2026-07] 간격 기반 클러스터 판정
-    n_rounds_from_public,        # ★ [2026-09] 공개 파라미터 기반 n_rounds
 )
 from core.ciphertext_single.Server_main import send_to_server_fhe
+from core.ciphertext_single.GridRounds import compute_grid_rounds
 from core.ex.plaintext.Server_main import send_to_server_np
 from core.ciphertext_single.EncryptModule import DimensionalEncryptor
 
@@ -247,13 +250,14 @@ def main():
     normalized_pts = (pts - global_min) / scale_factor
     normalized_eps = eps_val / scale_factor
 
-    # ★ [2026-09] n_rounds = min(⌈1/ε_n⌉, ⌈3N/min_pts⌉−1)  — 공개 파라미터만 사용
-    n_rounds_val = n_rounds_from_public(normalized_eps, N, int(min_pts_val))
-    print(f"[스케일] 좌표범위={_coord_range:.4f}  PC1span={_pc1_span:.4f}"
-          f"  → scale={scale_factor:.4f}")
-    print(f"[n_rounds] {n_rounds_val}  "
-          f"(기하 ⌈1/ε_n⌉={math.ceil(1.0/normalized_eps)}, "
-          f"상한 ⌈3N/min_pts⌉-1={math.ceil(3.0*N/max(int(min_pts_val),1))-1})")
+    # ★ [2026-10] n_rounds: 클라이언트 grid(셀 ε_n/2) 산출 → 서버로 명시 전달
+    #   n = max(1, max_g ⌈(Λ_g + s√d)/ε_n⌉).  점 사이 거리 비교 없음, 상한 ⌈1/ε_n⌉ 없음.
+    #   pc1 은 첫 Dijkstra 출발 셀 선택에만 쓰임 (부호·결과 무관). build_pca_order 와 같은 부호 규칙 적용.
+    _ax_g = np.linalg.svd(_Xc, full_matrices=False)[2][0]
+    if _ax_g[np.argmax(np.abs(_ax_g))] > 0:
+        _ax_g = -_ax_g
+    n_rounds_grid, grid_info = compute_grid_rounds(
+        normalized_pts, normalized_eps, int(min_pts_val), pc1=(_Xc @ _ax_g) / scale_factor)
 
     # [2026-07] N이 정해졌으니 Core/LP용 alpha별 MCP를 여기서 미리 생성
 
@@ -266,19 +270,15 @@ def main():
 
     # ── Step 3+4: Ball Tree 정렬 + k_max 구조 분석 (eps-이웃 조회 없음) ──
     print("\n[Ball Tree] BFS level-order 정렬 + k_max 구조 분석...")
-    mode, k_max, heap_idx, inv_perm = prepare_client_ordering(
-        normalized_pts, normalized_eps, int(min_pts_val), N, dimension  # ← dim 추가
+    k_max, heap_idx, inv_perm = prepare_client_ordering(
+        normalized_pts, normalized_eps, N
     )
 
-    if mode == 'kd_dense':
-        ball_sorted_pts = normalized_pts[heap_idx]
-        save_heap_order_csv(f"debug_heap_order_N{N}.csv", heap_idx, inv_perm, N)
-        T_kmax = k_max * (k_max + 1) // 2
-        print(f"  → k_max={k_max}  T({k_max})={T_kmax}  "
-            f"{'✓ ≥' if T_kmax >= N else '⚠ <'} N={N}")
-    else:
-        ball_sorted_pts = normalized_pts
-        print(f"  → sweep 방식 (num_sweeps={k_max})")
+    ball_sorted_pts = normalized_pts[heap_idx]
+    save_heap_order_csv(f"debug_heap_order_N{N}.csv", heap_idx, inv_perm, N)
+    T_kmax = k_max * (k_max + 1) // 2
+    print(f"  → k_max={k_max}  T({k_max})={T_kmax}  "
+        f"{'✓ ≥' if T_kmax >= N else '⚠ <'} N={N}")
 
 
     # ── Step 5: 평문 DBSCAN (원래 순서 기준, 비교 기준) ──────────
@@ -301,7 +301,7 @@ def main():
     print(f"▶ Plaintext: {time()-pt_start:.2f}초\n")
 
     # ── Step 6: FHE DBSCAN (Heap 정렬 데이터) ────────────────────
-    print(f"================ FHE ({mode}) ========================")
+    print("================ FHE (kd_dense) ========================")
     _print_mem("Engine 초기화 전")
 
     engine, secret_key, keypack = setup_fhe_engine(verbose=True)
@@ -319,17 +319,14 @@ def main():
     # 서버 연산 (Phase 1: Normalize+Core+enc_sum_k, Phase 2: Label Prop)
     # 서버가 enc_sum_k 계산 후 k_max 자동 정밀화
     before = _gpu_used_mb()
-    # ★ [2026-05c] kd_dense 통일: prepare_client_ordering이 항상 'kd_dense' 반환
-    #   → use_kd_propagation=True 고정. num_sweeps는 dead path지만 호환 위해 인자 유지.
-    # ★ [2026-09] n_rounds 는 Step 2 에서 공개 파라미터로 산출한 값을 명시 전달
+    # ★ [2026-10] sweep 삭제 → use_kd_propagation / num_sweeps 인자 없음 (항상 kd_dense)
+    # ★ [2026-10] n_rounds 는 Step 2 에서 grid 로 산출한 값을 명시 전달
     fhe_final_ct, debug_fhe = send_to_server_fhe(
-        engine=engine, keypack=keypack, secret_key=secret_key,
+        engine=engine, keypack=keypack, debug_secret_key=secret_key,
         encrypted_columns=encrypted_columns,
         num_points=N, eps=normalized_eps, min_pts=float(min_pts_val),
-        k_max=k_max,                                        # Ball Tree 구조 분석 최종값
-        use_kd_propagation=(mode == 'kd_dense'),
-        num_sweeps=k_max if mode == 'sweep' else None,      # sweep dead path
-        n_rounds=n_rounds_val,                              # ★ [2026-09] n_rounds_from_public 산출값
+        k_max=k_max,                                        # PCA(PC1) ε-window 상한
+        n_rounds=n_rounds_grid,                             # ★ [2026-10] grid 산출값
     )
     
     print(f"\n[k_max] {k_max}  (PCA(PC1) ε-window 상한, 클라이언트 산출)")

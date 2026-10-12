@@ -1,5 +1,15 @@
 # core/ciphertext_single/Label_Propagation.py
 #
+# ── 변경사항 (2026-10: ALL-strides sweep 경로 삭제) ─────────────────────────
+#   삭제: fhe_sweep_propagation (min_pts < 4 폴백), 그 전용 헬퍼
+#         _propagate_one_stride_core, _propagate_one_stride_border.
+#   이유: LP 는 fhe_kd_dense_propagation 하나만 쓴다. Phase 1 라운드 수
+#         n_rounds 는 클라이언트 GridRounds.compute_grid_rounds 가 계산해
+#         암호문과 함께 보낸다 (Server_main [변경 5]). sweep 쪽 num_sweeps
+#         (=⌈log₂N⌉) 경로는 더 이상 어디서도 호출되지 않는다.
+#   영향: 이 모듈에서 fhe_sweep_propagation 을 import 하던 코드는 ImportError.
+#         Server_main 의 import/분기도 같은 날 제거함.
+#
 # ── 변경사항 (2026-06 Phase 1: 라벨 노이즈 주입 경로 제거) ─────────────────
 # [배경] hepta 런 분석: 라벨 raw 값이 160~166 띠로 비단조 압축 (C5 212→165.8,
 #   C3 106→161.5 상승). 원인 분해:
@@ -484,97 +494,18 @@ def _build_adjm_cache(engine, keypack, adj_k_half_list, dest_mask_ct,
     return cache
 
 
-# ── 헬퍼: stride 하나 전파 (Core-Core) ────────────────────────────────────
-
-def _propagate_one_stride_core(
-    engine, keypack, adjm_cache, adj_k_half_list,
-    core_labels_ct, core_mask_ct,
-    k, N, label_scale,
-    secret_key=None,
-):
-    """Core-Core 전파: stride k, Forward + Backward.
-
-    ★ [Phase1] 변경:
-      - neighbor = adjm ⊙ s_label (adjm은 사전계산, dest mask 포함)
-      - neighbor refresh 제거, post-max ×core_mask + refresh 제거
-      - 방향 시작 전 라벨 lineage 레벨 가드만 수행
-    """
-    relin_key = keypack.relinearization_key
-
-    if adjm_cache is not None:
-        adjm_fwd = adjm_cache[k - 1]
-    else:
-        adjm_fwd = _build_adjm_fwd(
-            engine, keypack, adj_k_half_list[k - 1],
-            core_mask_ct, core_mask_ct, k, N)
-    # ★ [Phase1c] bwd는 저장하지 않고 대칭성으로 유도 (메모리 절반)
-    adjm_bwd = _bwd_from_fwd(engine, keypack, adjm_fwd, k, N) if 2 * k < N else None
-
-    # Forward: label[i] ← max(label[i], adjm_fwd[i] × label[(i+k)%N])
-    core_labels_ct = _ensure_label_level(engine, core_labels_ct, keypack,
-                                         tag=f"core k={k} fwd")
-    s_label_k  = fhe_circular_shift(engine, core_labels_ct, k, N, keypack)
-    neighbor_k = engine.multiply(adjm_fwd, s_label_k, relin_key)
-    core_labels_ct = fhe_max(engine, core_labels_ct, neighbor_k,
-                             N, keypack, label_scale=label_scale,
-                             secret_key=secret_key)
-
-    # Backward: label[i] ← max(label[i], adjm_bwd[i] × label[(i-k)%N])
-    if adjm_bwd is not None:
-        core_labels_ct = _ensure_label_level(engine, core_labels_ct, keypack,
-                                             tag=f"core k={k} bwd")
-        s_label_Nk  = fhe_circular_shift(engine, core_labels_ct, N - k, N, keypack)
-        neighbor_Nk = engine.multiply(adjm_bwd, s_label_Nk, relin_key)
-        core_labels_ct = fhe_max(engine, core_labels_ct, neighbor_Nk,
-                                 N, keypack, label_scale=label_scale,
-                                 secret_key=secret_key)
-
-    return core_labels_ct
-
-
-# ── 헬퍼: stride 하나 전파 (Core→Border) ─────────────────────────────────
-
-def _propagate_one_stride_border(
-    engine, keypack, adj_k_half_list,
-    border_labels_ct, non_core_ct, core_labels_ct, core_mask_ct,
-    k, N, label_scale,
-    secret_key=None,
-):
-    """Core→Border 전파: stride k, Forward + Backward.
-
-    ★ [Phase1] Phase 2는 2 pass뿐이므로 캐시 없이 즉석 계산하되,
-      dest mask(non_core)를 candidate에 접어 post-max ×non_core + refresh 제거.
-    """
-    relin_key = keypack.relinearization_key
-
-    adjm_fwd, adjm_bwd = _build_adjm_border_pair(
-        engine, keypack, adj_k_half_list[k - 1],
-        non_core_ct, core_mask_ct, k, N)
-
-    # Forward
-    border_labels_ct = _ensure_label_level(engine, border_labels_ct, keypack,
-                                           tag=f"border k={k} fwd")
-    s_label_k   = fhe_circular_shift(engine, core_labels_ct, k, N, keypack)
-    candidate_k = engine.multiply(adjm_fwd, s_label_k, relin_key)
-    border_labels_ct = fhe_max(engine, border_labels_ct, candidate_k,
-                               N, keypack, label_scale=label_scale,
-                               secret_key=secret_key)
-
-    # Backward
-    if adjm_bwd is not None:
-        border_labels_ct = _ensure_label_level(engine, border_labels_ct, keypack,
-                                               tag=f"border k={k} bwd")
-        s_label_Nk   = fhe_circular_shift(engine, core_labels_ct, N - k, N, keypack)
-        candidate_Nk = engine.multiply(adjm_bwd, s_label_Nk, relin_key)
-        border_labels_ct = fhe_max(engine, border_labels_ct, candidate_Nk,
-                                   N, keypack, label_scale=label_scale,
-                                   secret_key=secret_key)
-
-    return border_labels_ct
+# ══════════════════════════════════════════════════════════════════════════
+# [삭제됨 2026-10] 순차식 stride 헬퍼 _propagate_one_stride_core / _border
+# ══════════════════════════════════════════════════════════════════════════
+#   ALL-strides sweep(fhe_sweep_propagation, min_pts < 4 폴백) 전용이었다.
+#   kd_dense 경로는 같은 1-stride 갱신  label ← max(label, adjm ⊙ shift(label, k))
+#   을 _pack_candidates + _tree_max_packed 로 수행하고 이 헬퍼들을 호출하지
+#   않으므로 sweep 삭제와 함께 제거.
 
 
 # ══════════════════════════════════════════════════════════════════════════
-# KD-tree dense stride 라벨 전파 (kd_dense, min_pts ≥ 4)
+# KD-tree dense stride 라벨 전파 (kd_dense) — ★ [2026-10] 유일한 LP 경로
+#   (이전에는 min_pts ≥ 4 일 때만 이 경로, 그 외는 sweep 폴백이었다. sweep 삭제.)
 # ══════════════════════════════════════════════════════════════════════════
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -673,7 +604,7 @@ def _pack_candidates(engine, keypack, base_ct, source_ct,
     Phase1: base = source = core_labels_ct
     Phase2: base = border_labels_ct,  source = core_labels_ct   ← 서로 다름
 
-    ★ [레벨 회계] 원본 _propagate_one_stride_core 와 동일하게 유지:
+    ★ [레벨 회계] 구 순차식 헬퍼(_propagate_one_stride_core, 2026-10 삭제)와 동일하게 유지:
         s_lab = fhe_circular_shift(source)        → level(source) − 1
         cand  = multiply(adjm, s_lab, relin)      → min(adjm, source−1) − 1
       여기에 base 영역 마스킹 1회만 추가:
@@ -889,7 +820,8 @@ def fhe_kd_dense_propagation(
                         if pass_name == "forward":
                             yield fwd, k
                         else:
-                            # 원본 _propagate_one_stride_core 와 동일: 2k ≥ N 이면 backward 없음
+                            # 2k ≥ N (k ≤ N//2 이므로 k = N/2) 이면 i+k ≡ i−k (mod N)
+                            # → forward 와 같은 stride 라 backward 없음
                             yield ((_bwd_from_fwd(engine, keypack, fwd, k, N)
                                     if 2 * k < N else None), N - k)
                 core_labels_ct = _ensure_label_level(
@@ -956,91 +888,5 @@ def fhe_kd_dense_propagation(
     final_ct = engine.multiply(final_ct, engine.encode([float(N)] * slot_count))
     print(f"[KD-LP] 라벨 lineage 표준 bootstrap 총계: {_label_refresh_count} "
           f"(+ 최종 1회)  ← 이전 구조 추정치 {fhe_max_cnt * 3}~{fhe_max_cnt * 4}회")
-    _dbg(engine, secret_key, final_ct, f"최종 [0,{N}]", N)
-    return final_ct
-
-
-# ══════════════════════════════════════════════════════════════════════════
-# ALL strides sweep (fallback, min_pts < 4)
-# ══════════════════════════════════════════════════════════════════════════
-
-def fhe_sweep_propagation(
-    engine: Engine,
-    keypack: KeyPack,
-    adj_k_half_list: list,
-    core_ct: Ciphertext,
-    num_points: int,
-    secret_key=None,
-    num_sweeps: int = None,
-) -> Ciphertext:
-    """ALL strides sweep 기반 라벨 전파 (fallback). [Phase1 동일 재구성 적용]"""
-    global _label_refresh_count
-    _label_refresh_count = 0
-
-    N = num_points
-    if num_sweeps is None:
-        num_sweeps = math.ceil(math.log2(N))
-
-    N_half      = N // 2
-    label_scale = _SCALE_INSET                 # ★ 라벨 (0,1] 스케일 (일관성; 순차경로는 패킹 안 함)
-    slot_count  = engine.slot_count
-
-    print(f"[LP-sweep] N={N}, N_half={N_half}, num_sweeps={num_sweeps}, "
-          f"label_scale={label_scale:.1f}  [Phase1 재구성]")
-
-    core_mask_ct = _refresh(engine, core_ct, keypack)
-    core_mask_ct = bit_cleaning(engine, core_mask_ct, keypack,
-                                n_iters=1, slot_count=slot_count,
-                                ensure_output_level=False)
-    non_core_ct  = engine.subtract(engine.encode([1.0] * slot_count), core_mask_ct)
-    non_core_ct  = _refresh(engine, non_core_ct, keypack)
-    non_core_ct  = bit_cleaning(engine, non_core_ct, keypack,
-                                n_iters=1, slot_count=slot_count,
-                                ensure_output_level=False)
-
-    _lbl_unit = 1.0 / float(N)   # ★ 라벨 (0,1] 스케일: 패킹시 계수노름↑ → bootstrap aliasing 방지
-    id_enc = engine.encode(
-        [float(i + 1) * _lbl_unit for i in range(N)] + [0.0] * (slot_count - N))
-    core_labels_ct = _refresh(engine,
-        engine.multiply(core_mask_ct, id_enc), keypack)
-
-    _dbg(engine, secret_key, core_labels_ct, "초기 core_labels", N)
-
-    adjm_cache = None
-    if _HOIST_ADJ_MASKS:
-        adjm_cache = _build_adjm_cache(
-            engine, keypack, adj_k_half_list, core_mask_ct,
-            core_mask_ct, N_half, N, tag="sweep Core-Core")
-
-    for sweep in range(num_sweeps):
-        print(f"[LP-sweep] P1 Sweep {sweep+1}/{num_sweeps}")
-        for k in range(1, N_half + 1):
-            core_labels_ct = _propagate_one_stride_core(
-                engine, keypack, adjm_cache, adj_k_half_list,
-                core_labels_ct, core_mask_ct,
-                k, N, label_scale, secret_key=secret_key,
-            )
-        print(f"[LP-sweep]   (라벨 refresh 누계: {_label_refresh_count})")
-        _dbg(engine, secret_key, core_labels_ct, f"P1 Sweep{sweep+1} 완료", N)
-
-    border_labels_ct = _refresh(engine,
-        engine.multiply(engine.encode([0.0] * slot_count), non_core_ct), keypack)
-
-    for sweep in range(num_sweeps):
-        print(f"[LP-sweep] P2 Sweep {sweep+1}/{num_sweeps}")
-        for k in range(1, N_half + 1):
-            border_labels_ct = _propagate_one_stride_border(
-                engine, keypack, adj_k_half_list,
-                border_labels_ct, non_core_ct, core_labels_ct, core_mask_ct,
-                k, N, label_scale, secret_key=secret_key,
-            )
-        print(f"[LP-sweep]   (라벨 refresh 누계: {_label_refresh_count})")
-        _dbg(engine, secret_key, border_labels_ct, f"P2 Sweep{sweep+1} 완료", N)
-
-    final_ct = _refresh(engine,
-        engine.add(core_labels_ct, border_labels_ct), keypack)
-    # ★ 라벨 스케일 복원 (함수1과 동일)
-    final_ct = engine.multiply(final_ct, engine.encode([float(N)] * slot_count))
-    print(f"[LP-sweep] 라벨 lineage 표준 bootstrap 총계: {_label_refresh_count} (+ 최종 1회)")
     _dbg(engine, secret_key, final_ct, f"최종 [0,{N}]", N)
     return final_ct
