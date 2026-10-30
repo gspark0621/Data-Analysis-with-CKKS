@@ -12,12 +12,8 @@ python: 3.12.10
 1. Original_DBSCAN directory의 test_main실행
     - 1. python3 -m Original_DBSCAN.test_main
 
-### test_{} 사용볍
-1. core_test directory의 test_{}을 실행
-    - 1. pyenv activate dbscan(dbscan 이름의 python 가상환경 실행)
-    - 2. DBSCAN_CKKS/desilo로 이동
-    - 3. python3 -m core_test.test_normalize
-
+### pip install
+- pip install numpy scikit-learn pynvml 
 ### Dataset 별 DBSCAN parameter
 1. hepta(212개)
     - max_iter:3

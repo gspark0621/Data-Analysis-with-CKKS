@@ -1,5 +1,10 @@
 # core/ciphertext_single/Core.py
 #
+# [2026-10] 중복 sign_bootstrap 제거
+#   eval_mcp_full_chebyshev 가 마지막 성분 뒤에도 sign_bootstrap 을 하므로, 여기서 한 번 더
+#   하던 것은 중복이었다(LP fhe_sgn 은 2026-07 에 같은 이유로 제거, Normalize 도 2026-10 제거).
+#   이제 SB 출력 → (sign+1)/2 → bit_cleaning.
+#
 # [2026-05c 작업 A] 마지막 일반 bootstrap → bit_cleaning 교체
 #   측정 확정: sign_bootstrap 직후 0.999996(깨끗) → 일반 bootstrap이 0.99839로 악화.
 #   bit_cleaning h(x)=3x²-2x³ 로 noise 주입 없이 정리 (Drucker Lemma 1, {0,1} 도메인).
@@ -42,15 +47,30 @@ _MCP_CORE_PATH = "mcp_alpha15_lp_cheb.json"   # ★ N-aware 미사용 시 폴백
 #      sanity check에서 x=4τ FAIL, x=33τ PASS — 9.7τ는 측정 안 됨."
 #     즉 nominal gap/τ 비율(=몇 배 여유)만으로 안전을 판단하면 안 된다 — 실측
 #     sanity_check_chebyshev 가 작은 배수(4τ)에서 이미 실패한 전례가 있다.
-#     따라서 아래 _CORE_ALPHA_SAFETY_BITS 는 "이 정도면 충분하다"는 보장이 아니라
-#     출발점일 뿐이며, 실제 배포 전 반드시
+#     따라서 아래 α 는 "이 정도면 충분하다"는 보장이 아니라 출발점일 뿐이며,
+#     실제 배포 전 반드시
 #       sanity_check_chebyshev(test_x_values=[gap, 2·gap, 4·gap, 8·gap, ...])
 #     로 선택한 α 에서 gap 근방이 PASS 하는지 실측 확인할 것. FAIL 이면
-#     safety_bits 를 올려 gap/τ 비율을 키운 뒤 재검증.
+#     _CORE_EPS_ADJ 를 올려(= 오차 상한을 보수적으로 잡아) α 를 키운 뒤 재검증.
+#     ★ [2026-10] α 를 2비트 깎았으므로 이 실측 확인이 이전보다 중요해졌다.
 _CORE_ALPHA_AUTO        = True
-_CORE_ALPHA_SAFETY_BITS = 2      # 실측 경계 gap/δ≈0.2 → s=2 면 [4,8) 로 20~40배 여유.
-#   (LP 는 s=2 로 오차예산 모델 결정. Core 는 절감 이득이 0.06% 미만이므로
-#    굳이 깎지 않고 여유를 크게 둔다 — 원문 주석의 'α=12 미검증 영역' 경고 존중.)
+
+# ★ [2026-10] α 를 '안전 비트'가 아니라 count 오차 상한에서 유도한다.
+#   판정 조건:  |x| ≥ δ  ⟺  |분자| ≥ δN.
+#   분자 = (반정수) + e 이고 |반정수| ≥ 0.5 이므로 |분자| ≥ 0.5 − |e|. 따라서
+#       |e| ≤ 0.5 − N·2^−α        ⟺        α ≥ log2( N / (0.5 − |e|) )
+#   여기서 좌변은 가정이 아니라 α 가 결정하는 '허용 count 오차'이다.
+#   count 는 자기 자신(평문 상수 +1) + 최대 2·k_max 개의 0/1 지시자 합이므로
+#       |e| ≤ 2·k_max·ε_adj + ε_sum
+#   ε_adj = SB 직후 adj 한 칸이 {0,1} 에서 벗어나는 양(CKKS 노이즈 바닥, 실측 1건 ≈ 4e-6).
+#   ε_sum = 회전 합산 + 1/N 곱의 노이즈 (미측정 → ε_adj 보수값에 흡수한다고 본다).
+#   k_max 는 Core 로 전달되지 않으므로 최악의 경우 k_max = N 을 쓴다(실제 k_max < N).
+#
+#   결과: 현재 벤치마크 전체에서 α = ⌈log2 2N⌉ 과 일치하며,
+#     2N 이 2의 거듭제곱일 때(N=512,1024,4096,8192)만 자동으로 +1 비트가 붙는다.
+#     ⌈log2 2N⌉ 을 그대로 쓰면 그 경우 허용 오차가 정확히 0 이 되므로 이 보정이 필요하다.
+#   이전(2026-09): α = ⌈log2 2N⌉ + 2 (= ⌈log2 8N⌉). 이는 ε_adj 를 실측의 약 100배로
+#     잡은 것과 같은 값이며, 해당 여유가 필요하면 _CORE_EPS_ADJ 를 4e-4 로 올리면 된다.
 _CORE_ALPHA_MIN         = 8
 _CORE_ALPHA_MAX         = 16
 
@@ -65,10 +85,15 @@ _MINIMIZE_DEPTH_DEGREES_CORE = {
 #   α=13 오차가 이웃 α 와 동급(1e-13)임을 확인해 회피 매핑을 삭제했다.
 
 
-def _core_alpha(N: int) -> int:
-    """N → Core sign 근사 최소 α.  gap=0.5/N, δ=2^-α ≤ gap/(2^safety_bits).
-    실측 파괴 경계 gap/δ≈0.2 → s=1 이면 gap/δ∈[2,4) 로 10~20배 여유."""
-    a = math.ceil(math.log2(2.0 * float(N))) + _CORE_ALPHA_SAFETY_BITS
+def _core_alpha(N: int, k_max: int = None) -> int:
+    """N → Core sign 근사 최소 α (유도식, 위 주석 참조).
+
+        α ≥ log2( N / (0.5 − |e|) ),    |e| ≤ 2·k_max·ε_adj + ε_sum
+
+    k_max 를 모르면 최악의 경우 k_max = N 으로 둔다.
+    |e| ≥ 0.5 이면 반정수 구조로는 어떤 α 로도 보장할 수 없다(에러).
+    """
+    a = math.ceil(math.log2(float(N) / 0.5))
     a = max(_CORE_ALPHA_MIN, min(_CORE_ALPHA_MAX, a))
     return a
 
@@ -126,10 +151,9 @@ def identify_core_points_fhe_converted(
 
     Pipeline:
       1. x = (totalNeighbors - (min_pts-0.5)) / N  → x ∈ [-1,1]
-      2. Chebyshev MCP 평가 (sign 근사)
-      3. sign_bootstrap
-      4. (sign+1)/2 → {0,1}
-      5. 최종 bootstrap
+      2. Chebyshev MCP 평가 (sign 근사, 성분마다 sign_bootstrap — 마지막 성분 포함)
+      3. (sign+1)/2 → {0,1}
+      4. bit_cleaning 1회
     """
     relin_key  = keypack.relinearization_key
     conj_key   = keypack.conjugation_key
@@ -167,20 +191,19 @@ def identify_core_points_fhe_converted(
           f"< 0.5/N={0.5/N:.5f} ✓ (여유 {(0.5/N)/mcp_delta:.1f}배)")
 
     # ── Chebyshev BSGS MCP 평가 ──────────────────────────────────────
+    #   ★ eval_mcp_full_chebyshev 는 마지막 성분 뒤에도 sign_bootstrap 을 수행한다.
+    #     출력은 레벨이 복구된 ±1 값이고 intt 없이 곧바로 곱셈할 수 있다.
     current_x = eval_mcp_full_chebyshev(
         engine, current_x, components, slot_count, keypack,
         tag="Core ", debug=debug,
     )
 
-    # ── sign_bootstrap ────────────────────────────────────────────────
-    print(f"  - [Core] sign_bootstrap...")
-    current_x = engine.sign_bootstrap(
-        engine.intt(current_x),
-        keypack.relinearization_key,
-        keypack.conjugation_key,
-        keypack.rotation_key,
-        keypack.smallbootstrap_key,
-    )
+    # ── ★ [2026-10] 중복 sign_bootstrap 제거 ─────────────────────────
+    #   이전에는 여기서 engine.sign_bootstrap(engine.intt(current_x), ...) 을 한 번 더
+    #   호출했다. 정수 count 는 보장 deadzone 의 4배 이상 바깥(gap/δ ∈ [4,8))이라
+    #   이미 포화된 값에 SB 를 다시 거는 중복이었고, 남은 ±1 근처 오차의 제곱 감소는
+    #   아래 bit_cleaning 이 0/1 도메인에서 해 준다.
+    #   평문 계산(α=12): 실효 경계 0.084δ → 0.128δ 로 넓어지지만 정수 count 는 ≥ 4δ 라 무관.
 
     # ── (sign + 1) / 2 → {0, 1} ──────────────────────────────────────
     half_pt        = engine.encode([0.5] * slot_count)
@@ -188,7 +211,7 @@ def identify_core_points_fhe_converted(
 
     # ── ★ [2026-05c 작업 A] 마지막 일반 bootstrap → bit_cleaning 교체 ──
     #
-    #   [측정으로 확정된 문제]
+    #   [측정으로 확정된 문제]  (※ 측정 당시 구조: MCP → SB 추가 1회 → 일반 bootstrap)
     #     sign_bootstrap 직후 core_indicator는 깨끗함 (측정A: 0.999996, ~2^-18).
     #     기존 engine.bootstrap(일반)이 noise를 *주입*하여 0.99839 (~2^-9.3)로 악화 (측정B).
     #     이 0.99839가 LP에서 mask로 누적 곱해져 라벨 damping → 과분할 (ARI 66).

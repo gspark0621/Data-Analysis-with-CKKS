@@ -81,7 +81,7 @@ from core.ciphertext_single.minimax import (
 #   (Core/LP 용 α 별 MCP 는 아래 _ensure_mcp_files_for_N(N) 이 N 확정 후 생성하고,
 #    Normalize 용은 런타임에 _ensure_norm_mcp 가 자동 생성한다.)
 
-DATASET_PATH = "/home/junhyung/study/Data_Analysis_with_CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/s1.arff"
+DATASET_PATH = "/home/junhyung/study/Data-Analysis-with-CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/s1.arff"
 
 
 def _ensure_mcp_files_for_N(N: int):
@@ -410,7 +410,7 @@ def main():
     else:                     print("  => ❌ 군집 구조 붕괴")
 
     # ── Step 10: 최종 결과 저장 ──────────────────────────────────
-    output_filename = f"longsquare_fhe_heap_result_eps{eps_val}_min{min_pts_val}.csv"
+    output_filename = f"fhe_heap_result_eps{eps_val}_min{min_pts_val}.csv"
     try:
         with open(output_filename, 'w', encoding='utf-8') as f:
             axis_headers = [f"x{i+1}" for i in range(dimension)]

@@ -1,5 +1,14 @@
 # core/ciphertext_single/Normalize.py
 #
+# [2026-10] 두 가지 수정
+#   (1) 스케일 bound = 1.05·dim 으로 고정 (이전: 1.05·max(threshold, dim−threshold)).
+#       eps_n 이 작아 이전 값도 사실상 1.05·dim 이었고(twodiamonds 2.0992 vs 2.1),
+#       이제 bound 가 threshold 와 무관해져 margin_val = δ·bound 로 바로 정의된다.
+#       보장 deadzone 이 정확히 [eps², eps² + 2·margin_val] 이 된다.
+#   (2) 중복 sign_bootstrap 제거. eval_mcp_full_chebyshev 가 마지막 성분 뒤에도
+#       sign_bootstrap 을 하므로, 여기서 한 번 더 하던 것은 중복이었다
+#       (LP fhe_sgn 은 2026-07 에 같은 이유로 제거). 이제 SB 출력 → 0/1 변환 → bit_cleaning.
+#
 # [2026-05c 작업 A] 마지막 일반 bootstrap → bit_cleaning 교체
 #   adj_k가 Server에서 합산되므로 noise 누적이 N(밀도)에 비례 → 빅데이터 ARI 위험.
 #   bit_cleaning으로 이웃당 결손 0.00161 → 7.8e-6 (200배↓).
@@ -41,6 +50,15 @@ from core.ciphertext_single.cleaning import bit_cleaning   # ★ [2026-05c] 작�
 
 # ★ [2026-05c 작업 A] cleaning 반복 횟수 (Core와 동일 정책).
 _CLEANING_ITERS = 1
+
+# ★ [2026-10] sgn 입력 스케일 계수: bound = _NORM_INSET · dim.
+#   좌표가 [0,1]^dim 이라 dist² ∈ [0, dim] 이고, threshold ≤ dim 이면
+#   |x| = |dist² − threshold| / bound ≤ 1/_NORM_INSET (= 0.952).
+#   역할: 정의역 끝 ±1 에서 떼어 놓기. MCP 는 x 가 1 을 ~1e-6 만 넘어도
+#   부호가 뒤집힌다(평문 계산: α=16 1.7e-6, α=18 4.3e-7) → 먼 쌍이 이웃으로 세어짐.
+#   margin_val = δ·bound 이므로 dist² = eps² 인 진짜 이웃은 정확히 x = −δ
+#   (논문 보장 구간 [δ,1] 이 닫힌구간이라 FN=0 보장 성립).
+_NORM_INSET = 1.05
 
 
 # ── Normalize α 자동선택 (N 기반, margin 은 그대로 유지) ─────────────────
@@ -106,11 +124,10 @@ def check_neighbor_closed_interval(
       worst case 안전 영역: α=12 대비 8배 좁아져 데이터/eps 의존성 거의 제거.
 
     Pipeline:
-      1. x = (dist² - threshold) / bound  → x ∈ [-1, 1]
-      2. Chebyshev BSGS MCP 평가 (sign 근사)
-      3. sign_bootstrap
-      4. (-sign + 1) / 2 → {1:이웃, 0:비이웃}
-      5. 최종 bootstrap
+      1. x = (dist² - threshold) / bound,  bound = 1.05·dim  → |x| ≤ 1/1.05
+      2. Chebyshev BSGS MCP 평가 (sign 근사, 성분마다 sign_bootstrap — 마지막 성분 포함)
+      3. (-sign + 1) / 2 → {1:이웃, 0:비이웃}
+      4. bit_cleaning 1회
     """
     relin_key  = keypack.relinearization_key
     conj_key   = keypack.conjugation_key
@@ -137,8 +154,10 @@ def check_neighbor_closed_interval(
 
     mcp_delta    = components[0]["domain_a"]
     max_dist_sq  = float(dimension)
-    approx_bound = max_dist_sq * 1.05
-    margin_val   = mcp_delta * approx_bound
+    # ★ [2026-10] bound = 1.05·dim (데이터 무관 상수). margin_val = δ·bound.
+    #   이전의 approx_bound(=1.05·dim)와 같은 값이라 margin_val 은 변하지 않는다.
+    bound        = _NORM_INSET * max_dist_sq
+    margin_val   = mcp_delta * bound
 
     print(f"  [Normalize] basis=chebyshev, dim={dimension}, eps_sq={eps_sq:.6f}")
     print(f"  [Normalize] mcp_delta={mcp_delta:.6f} (= 2^{math.log2(mcp_delta):.2f})")
@@ -149,30 +168,34 @@ def check_neighbor_closed_interval(
     threshold_pt = engine.encode([eps_sq + margin_val] * slot_count)
     x = engine.subtract(dist_sq_ct, threshold_pt)
 
-    x_min_abs    = eps_sq + margin_val
-    x_max_abs    = max_dist_sq - (eps_sq + margin_val)
-    bound        = max(x_min_abs, x_max_abs) * 1.05
+    # ★ [2026-10] 이전: bound = 1.05·max(threshold, dim − threshold).
+    #   threshold > dim 이면 x 가 −1/1.05 아래로 내려갈 수 있다(eps 가 상자 대각선보다
+    #   큰 퇴화 경우 — 모든 쌍이 이웃). 그런 입력은 정의역 밖이므로 경고만 남긴다.
+    if eps_sq + margin_val > max_dist_sq:
+        print(f"  [Normalize] ⚠ threshold={eps_sq+margin_val:.4f} > dim={max_dist_sq} "
+              f"— eps 가 정규화 상자 대각선보다 큼. x 가 정의역 [−1,1] 밖으로 나갈 수 있음.")
     scale_factor = 1.0 / bound
 
-    print(f"  [Normalize] bound={bound:.6f}, scale={scale_factor:.6f}")
+    print(f"  [Normalize] bound={bound:.6f} (= {_NORM_INSET}·dim), scale={scale_factor:.6f}")
 
     current_x = engine.multiply(x, engine.encode([scale_factor] * slot_count))
 
     # ── Chebyshev BSGS MCP 평가 (Bossuat Algorithm 1) ────────────────
+    #   ★ eval_mcp_full_chebyshev 는 마지막 성분 뒤에도 sign_bootstrap 을 수행한다
+    #     (chebyshev_eval.py: 성분 루프마다 SB). 출력은 레벨이 복구된 ±1 값이고
+    #     intt 없이 곧바로 곱셈할 수 있다(LP fhe_sgn 과 같은 사용법).
     current_x = eval_mcp_full_chebyshev(
         engine, current_x, components, slot_count, keypack,
         tag="Normalize ", debug=debug,
     )
 
-    # ── sign_bootstrap ────────────────────────────────────────────────
-    print(f"  - [Normalize] sign_bootstrap...")
-    current_x = engine.sign_bootstrap(
-        engine.intt(current_x),
-        keypack.relinearization_key,
-        keypack.conjugation_key,
-        keypack.rotation_key,
-        keypack.smallbootstrap_key,
-    )
+    # ── ★ [2026-10] 중복 sign_bootstrap 제거 ─────────────────────────
+    #   이전에는 여기서 engine.sign_bootstrap(engine.intt(current_x), ...) 을 한 번 더
+    #   호출했다. 바로 앞 SB 출력에 SB 를 다시 거는 중복이었고, 그 정리(±1 근처 오차
+    #   제곱 감소)는 아래 bit_cleaning 이 0/1 도메인에서 같은 차수로 해 준다.
+    #   효과: adj_k 1개당 sign_bootstrap 1회 감소 (Normalize 는 k_max 번 호출).
+    #   평문 계산: 보장 deadzone(|x|<δ) 밖 출력은 그대로이고, 실효 경계만
+    #   α=16 0.045δ→0.069δ, α=18 0.043δ→0.067δ 로 약간 넓어진다.
 
     # ── (-sign + 1) / 2 → {1:이웃, 0:비이웃} ─────────────────────────
     m05_pt = engine.encode([-0.5] * slot_count)
@@ -193,6 +216,10 @@ def check_neighbor_closed_interval(
     #   [레벨 자동 처리 ★]
     #     bit_cleaning 내부가 ciphertext.level 확인 → 부족 시 _refresh.
     #     (iter 진입 전 level<2, 완료 후 level<3 일 때 자동 bootstrap.)
+    #     SB 직후 레벨은 다음 MCP 성분(최대 degree 31, 10레벨)을 돌릴 만큼 복구되므로
+    #     0/1 변환 + cleaning 1회 뒤에도 3 이상이 남아 _refresh 는 발동하지 않는다
+    #     (레벨 예산으로 추론. Server_main 의 "[진단] Normalize 구간 표준 bootstrap
+    #      호출 수" 가 0 이면 확인된 것).
     #     adj_k는 Server에서 합산(add)/회전(rotate)에 쓰이고(레벨 소비 無),
     #     LP 곱셈 전 _refresh되므로 이중 안전.
     print(f"  - [Normalize] bit_cleaning (n_iters={_CLEANING_ITERS}, 일반 bootstrap 대체)...")

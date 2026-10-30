@@ -595,20 +595,19 @@ eps 값 > min_pts 값 >
 [TIME] Normalize: 1690.16초
   [진단] Normalize 구간 표준 bootstrap 호출 수 = 0회  → bootstrap_key 불필요! 생성 지연 가능(13.4GB 확보)
   [MEM][Server] Normalize 완료 (adj_k_list 76개 = k=1..76)        used=6234 MB
-
+  
 [DEBUG] total_neighbors (앞 10개): [14. 19. 15. 12. 20. 18. 14. 18. 17. 14.]
 ✅ 저장 완료: debug_normalize_eps0.1271_min4.csv
 
 [Step 2] Core Point 판별 시작
-[Core] N=212 → α=11 MCP 로드: mcp_alpha11_lp_cheb.json (gap=0.5/212=0.00236, δ=2^-11, 여유=4.8배 — ★sanity_check 로 실측 재확인 권장)
-[Server] Core: Chebyshev BSGS MCP 로드 (mcp_alpha11_lp_cheb.json)
-[Server] Core: degrees=[7, 15, 15, 15], sign_err=5.9070e-04
+[Core] N=212 → α=9 MCP 로드: mcp_alpha9_lp_cheb.json (gap=0.5/212=0.00236, δ=2^-9, 여유=1.2배 — ★sanity_check 로 실측 재확인 권장)
+[Server] Core: Chebyshev BSGS MCP 로드 (mcp_alpha9_lp_cheb.json)
+[Server] Core: degrees=[7, 7, 7, 13], sign_err=2.6697e-03
 [Server] Core: N=212, min_pts=4.0, scale=1/212=4.7170e-03
-[Server] Core: delta=4.88281e-04 (= 2^-11.00) < 0.5/N=0.00236 ✓ (여유 4.8배)
-  - [Core] sign_bootstrap...
+[Server] Core: delta=1.95312e-03 (= 2^-9.00) < 0.5/N=0.00236 ✓ (여유 1.2배)
   - [Core] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] identify_core_points_fhe() 완료                  delta=+12 MB  (used=6246 MB)
-[TIME] Core: 17.64초
+  [MEM][Server] identify_core_points_fhe() 완료                  delta=+12 MB  (used=6190 MB)
+[TIME] Core: 13.76초
 [DEBUG] Core 마스크 (앞 10개): [1. 1. 1. 1. 1. 1. 1. 1. 1. 1.]
   → Core 포인트: 212/212
 ✅ 저장 완료: debug_core_eps0.1271_min4.csv
@@ -635,69 +634,69 @@ eps 값 > min_pts 값 >
 [KD-LP] (그룹 수 1는 순차 반복 횟수이며 암호문 수가 아님)
 [KD-LP] Phase1: Core-Core Round1/4 (forward)
   [LabelProp] N=212 → α=10 MCP 로드: mcp_alpha10_lp_clean1.json (degrees=[15, 31, 31])
-[KD-LP]   (라벨 refresh 누계: 2, GPU 7204 MB)
+[KD-LP]   (라벨 refresh 누계: 2, GPU 7148 MB)
   [DBG] P1-R1-forward 완료: min=0.0849  max=1.0000  mean=0.6004
          [0.0849, 0.1132, 0.1132, 0.1179, 0.132, 0.1273]
 [KD-LP] Phase1: Core-Core Round1/4 (backward)
-[KD-LP]   (라벨 refresh 누계: 6, GPU 7208 MB)
+[KD-LP]   (라벨 refresh 누계: 6, GPU 7152 MB)
   [DBG] P1-R1-backward 완료: min=0.0847  max=0.9998  mean=0.6059
          [0.0847, 0.113, 0.113, 0.1177, 0.1318, 0.1318]
 [KD-LP] Phase1: Core-Core Round2/4 (forward)
-[KD-LP]   (라벨 refresh 누계: 9, GPU 7208 MB)
+[KD-LP]   (라벨 refresh 누계: 9, GPU 7152 MB)
   [DBG] P1-R2-forward 완료: min=0.1742  max=0.9997  mean=0.6314
          [0.1742, 0.1742, 0.1742, 0.1742, 0.1742, 0.1742]
 [KD-LP] Phase1: Core-Core Round2/4 (backward)
-[KD-LP]   (라벨 refresh 누계: 12, GPU 7208 MB)
+[KD-LP]   (라벨 refresh 누계: 12, GPU 7152 MB)
   [DBG] P1-R2-backward 완료: min=0.1739  max=0.9994  mean=0.6317
          [0.1739, 0.1739, 0.1739, 0.1739, 0.1739, 0.1739]
 [KD-LP] Phase1: Core-Core Round3/4 (forward)
-[KD-LP]   (라벨 refresh 누계: 15, GPU 7208 MB)
+[KD-LP]   (라벨 refresh 누계: 15, GPU 7152 MB)
   [DBG] P1-R3-forward 완료: min=0.1738  max=0.9993  mean=0.6336
          [0.1738, 0.1738, 0.1738, 0.1738, 0.1738, 0.1738]
 [KD-LP] Phase1: Core-Core Round3/4 (backward)
-[KD-LP]   (라벨 refresh 누계: 18, GPU 7208 MB)
+[KD-LP]   (라벨 refresh 누계: 18, GPU 7152 MB)
   [DBG] P1-R3-backward 완료: min=0.1736  max=0.9991  mean=0.6334
          [0.1736, 0.1736, 0.1736, 0.1736, 0.1736, 0.1736]
 [KD-LP] Phase1: Core-Core Round4/4 (forward)
-[KD-LP]   (라벨 refresh 누계: 21, GPU 7208 MB)
+[KD-LP]   (라벨 refresh 누계: 21, GPU 7152 MB)
   [DBG] P1-R4-forward 완료: min=0.1735  max=0.9989  mean=0.6333
          [0.1735, 0.1735, 0.1735, 0.1735, 0.1735, 0.1735]
 [KD-LP] Phase1: Core-Core Round4/4 (backward)
-[KD-LP]   (라벨 refresh 누계: 24, GPU 7208 MB)
+[KD-LP]   (라벨 refresh 누계: 24, GPU 7152 MB)
   [DBG] P1-R4-backward 완료: min=0.1732  max=0.9987  mean=0.6330
          [0.1732, 0.1732, 0.1732, 0.1732, 0.1732, 0.1732]
 [KD-LP] Phase2: Core→Border (forward)
 [KD-LP]   (라벨 refresh 누계: 27)
-  [DBG] P2-forward 완료: min=-0.0000  max=0.0000  mean=-0.0000
-         [0.0, 0.0, -0.0, 0.0, 0.0, 0.0]
+  [DBG] P2-forward 완료: min=-0.0000  max=0.0000  mean=0.0000
+         [0.0, -0.0, 0.0, -0.0, -0.0, 0.0]
 [KD-LP] Phase2: Core→Border (backward)
 [KD-LP]   (라벨 refresh 누계: 30)
   [DBG] P2-backward 완료: min=-0.0000  max=0.0000  mean=0.0000
-         [-0.0, -0.0, 0.0, 0.0, 0.0, 0.0]
+         [-0.0, 0.0, -0.0, -0.0, -0.0, 0.0]
 [KD-LP] 라벨 lineage 표준 bootstrap 총계: 30 (+ 최종 1회)  ← 이전 구조 추정치 210~280회
-  [DBG] 최종 [0,212]: min=36.7248  max=211.7250  mean=134.2059
-         [36.7254, 36.7259, 36.7258, 36.7254, 36.7259, 36.7255]
-  [MEM][Server] Label Propagation 완료                           delta=+12 MB  (used=6258 MB)
-[TIME] Label_Propagation: 2976.54초
+  [DBG] 최종 [0,212]: min=36.7249  max=211.7252  mean=134.2058
+         [36.7254, 36.7252, 36.725, 36.7251, 36.7249, 36.7254]
+  [MEM][Server] Label Propagation 완료                           delta=+12 MB  (used=6202 MB)
+[TIME] Label_Propagation: 2935.89초
 
-[DEBUG] 최종 라벨 (Heap 순서, 앞 10개): [36.73 36.73 36.73 36.73 36.73 36.73 36.73 36.73 36.73 36.73]
-  범위: min=36.72, max=211.72  (정상: [0,212])
+[DEBUG] 최종 라벨 (Heap 순서, 앞 10개): [36.73 36.73 36.73 36.73 36.72 36.73 36.73 36.73 36.73 36.73]
+  범위: min=36.72, max=211.73  (정상: [0,212])
   ※ 클라이언트에서 inv_perm 적용 후 원래 순서 복원
 ✅ 저장 완료: debug_labelprop_final_eps0.1271_min4.csv
-  [MEM][Server] send_to_server_fhe() 완료                        used=6258 MB
+  [MEM][Server] send_to_server_fhe() 완료                        used=6202 MB
 
 [k_max] 76  (PCA(PC1) ε-window 상한, 클라이언트 산출)
-  [MEM] decrypt                                        delta=+0 MB  (used=5308 MB)
-[FHE] [Client] 적응형 thr: thr=0.9987 | 내부최대 0.0003, 분리 6곳 | 감쇠 c≈0.9987
-[Client] 간격판정: thr=0.998702750209094 → 클러스터 7개, 노이즈 0개
-[Client]   내부 최대 간격 0.0003 < thr 0.998702750209094 < 사이 최소 간격 16.9991   여유 55899배
-▶ FHE: 4684.49초
+  [MEM] decrypt                                        delta=+0 MB  (used=5252 MB)
+[FHE] [Client] 적응형 thr: thr=0.9987 | 내부최대 0.0005, 분리 6곳 | 감쇠 c≈0.9987
+[Client] 간격판정: thr=0.9987036483711542 → 클러스터 7개, 노이즈 0개
+[Client]   내부 최대 간격 0.0005 < thr 0.9987036483711542 < 사이 최소 간격 16.9986   여유 33525배
+▶ FHE: 4341.37초
 
 ================ 소요 시간 =====================
-Normalize         : 1690.16초
-Core              : 17.64초
-Label_Propagation : 2976.54초
-합계              : 4684.35초
+Normalize         : 1391.60초
+Core              : 13.76초
+Label_Propagation : 2935.89초
+합계              : 4341.25초
 
 ✅ 타이밍 저장: debug_timings_eps1.0_min4.txt
 ✅ 디버깅 파일: debug_fhe_vs_np_eps1.0_min4.csv
@@ -711,4 +710,4 @@ Label_Propagation : 2976.54초
 📊 [ARI] 실제 정답 vs 평문: 100.00점 / 100점
 📊 [ARI] 평문 vs FHE:       100.00점 / 100점
   => 🎉 대성공!
-✅ 결과 저장: longsquare_fhe_heap_result_eps1.0_min4.csv
+✅ 결과 저장: fhe_heap_result_eps1.0_min4.csv
