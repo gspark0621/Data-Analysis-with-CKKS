@@ -22,9 +22,9 @@ python: 3.12.10
     - 결과: 군집 7개(ARI 100점)
 2. tetra(400개)
     - max_iter: 4
-    - eps: 0.43
-    - minpts: 3
-    - 결과: 군집 4개/정답: 4개(ARI 97.25점)
+    - eps: 0.819
+    - minpts: 45
+    - 결과: 군집 4개/정답: 4개(ARI 100점)
 3. TwoDiamonds(800개)
     - round: 16
     - eps: 0.14

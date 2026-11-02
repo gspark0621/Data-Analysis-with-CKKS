@@ -16,10 +16,12 @@
 #
 # [변경 5, 2026-05b → 2026-09 폐기] 옵션 B(전부 α=15 통일)
 #   - 당시: 단일 파일 mcp_alpha15_lp_cheb.json 을 Normalize/Core/LP 가 공유.
-#   - 현재: 세 모듈 모두 N 기반 가변 α 를 쓴다.
-#       Core      : clamp(⌈log₂2N⌉+2, 8, 16)   → mcp_alpha{α}_lp_cheb.json
-#       LP        : clamp(⌈log₂1.1N⌉+2, 8, 16) → mcp_alpha{α}_lp_clean1.json
-#       Normalize : clamp(⌈log₂N⌉+8, 15, 20)   → mcp_alpha{α}_norm_cheb.json
+#   - 현재: 세 모듈 모두 N 기반 가변 α 를 쓴다. (기준: 각 모듈의 실제 코드)
+#       Core      : clamp(⌈log₂2N⌉, 8, 16)      → mcp_alpha{α}_lp_cheb.json
+#       LP        : clamp(⌈log₂1.1N⌉+2, 8, 16)  → mcp_alpha{α}_lp_clean1.json
+#       Normalize : clamp(⌈log₂N⌉+8, 15, 20)    → mcp_alpha{α}_norm_cheb.json
+#     [2026-10 정정] Core 를 ⌈log₂2N⌉+2 로 적어 두었으나 실제 코드(Core._core_alpha)는
+#       ⌈log₂2N⌉ 이다. 서술을 코드에 맞췄다.
 #     따라서 α=15 공유 파일은 참조되지 않으며, 이를 만들던 STEP 0 블록을 삭제했다.
 #
 # [변경 6, 2026-05c] 정확도 버그 수정 통합
@@ -34,6 +36,14 @@
 #   - [2026-10] sweep 코드 삭제: prepare_client_ordering(norm_pts, eps_norm, N) 은
 #               (k_max, order, inv_perm) 를 반환하고, send_to_server_fhe 의
 #               use_kd_propagation / num_sweeps 인자는 없어졌다.
+#
+# [변경 7, 2026-10] Round 입력 추가 — DBSCAN 파라미터(eps, min_pts)와 함께 입력받는다.
+#   - 양의 정수 입력 → 그 값을 n_rounds 로 그대로 서버에 전달 (grid 산출 생략).
+#   - y 입력        → 기존 grid 기반 산출(GridRounds.compute_grid_rounds)로 진행.
+#   - 그 외 입력(빈 값, 0 이하, 소수, 다른 문자)은 다시 묻는다.
+#   ※ 입력값이 실제 필요 라운드보다 작으면 런타임 신호 없이 under-merge 될 수 있다
+#     (Server_main 의 n_rounds 한계 (c) 와 같은 성질). 서버가 받는 것은 어느 쪽이든
+#     n_rounds 정수 하나다.
 # ────────────────────────────────────────────────────────────────────────────
 
 import os
@@ -81,7 +91,7 @@ from core.ciphertext_single.minimax import (
 #   (Core/LP 용 α 별 MCP 는 아래 _ensure_mcp_files_for_N(N) 이 N 확정 후 생성하고,
 #    Normalize 용은 런타임에 _ensure_norm_mcp 가 자동 생성한다.)
 
-DATASET_PATH = "/home/junhyung/study/Data-Analysis-with-CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/s1.arff"
+DATASET_PATH = "/home/junhyung/study/Data-Analysis-with-CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/tetra.arff"
 
 
 def _ensure_mcp_files_for_N(N: int):
@@ -91,8 +101,10 @@ def _ensure_mcp_files_for_N(N: int):
     시간과 로그가 FHE 연산 로그에 섞여 읽기 어렵다.
 
     alpha 선택 근거 (둘 다 N에만 의존 -> 공개값, 추가 유출 없음):
-      LP  : 라벨이 정수 -> 최소 gap = 1/(1.1N)  -> alpha = ceil(log2(1.1N)) + 1
-      Core: neighbor_count가 정수 -> gap = 0.5/N -> alpha = ceil(log2(2N)) + 2
+      LP  : 라벨이 정수 -> 최소 gap = 1/(1.1N)  -> alpha = clamp(ceil(log2(1.1N)) + 2, 8, 16)
+      Core: neighbor_count가 정수 -> gap = 0.5/N -> alpha = clamp(ceil(log2(2N)), 8, 16)
+      [2026-10 정정] 이전 서술(LP +1, Core +2)은 실제 코드와 달랐다. 위 식은
+        Label_Propagation._lp_alpha / Core._core_alpha 의 실제 계산과 같다.
     Normalize 는 여기서 만들지 않는다 — 런타임에 check_neighbor_closed_interval 이
       Normalize._ensure_norm_mcp(N) 로 mcp_alpha{α}_norm_cheb.json 을 자동 생성한다.
       α = clamp(⌈log₂N⌉ + 8, 15, 20).
@@ -190,6 +202,38 @@ def load_arff_to_pts_with_labels(filepath: str):
     return np.array(pts, dtype=np.float64), np.array(true_labels, dtype=int)
 
 
+# ── Round 입력 ([변경 7]) ────────────────────────────────────────────────
+
+_ROUND_PROMPT = "Round 값 (양의 정수 / 정할 수 없으면 y 입력 → grid 기반 자동 산출) > "
+
+
+def parse_round_input(text: str):
+    """Round 입력 해석.
+
+    반환: 양의 정수 → 그 정수,  'y'(대소문자 무관) → None (grid 기반 산출로 진행).
+    그 외(빈 값, 0 이하, 소수, 다른 문자)는 ValueError.
+    """
+    s = str(text).strip()
+    if s.lower() == "y":
+        return None
+    try:
+        n = int(s)
+    except ValueError:
+        raise ValueError(f"양의 정수 또는 y 를 입력하세요 (입력값: '{s}')") from None
+    if n < 1:
+        raise ValueError(f"Round 는 1 이상이어야 합니다 (입력값: {n})")
+    return n
+
+
+def prompt_round_input(prompt: str = _ROUND_PROMPT):
+    """올바른 값이 들어올 때까지 Round 입력을 받는다. 반환은 parse_round_input 과 같다."""
+    while True:
+        try:
+            return parse_round_input(input(prompt))
+        except ValueError as e:
+            print(f"  ⚠ {e}")
+
+
 # ── 결과 저장 유틸 ────────────────────────────────────────────────────────
 
 def save_timings_txt(filename, timings_dict):
@@ -225,10 +269,16 @@ def main():
     #   ([2026-09] 기존 STEP 0 의 α=15 MCP 사전생성은 죽은 코드라 삭제.
     #    Core/LP 용은 N 확정 후 _ensure_mcp_files_for_N(N), Normalize 용은
     #    런타임에 Normalize._ensure_norm_mcp(N) 이 자동 생성한다.)
+    #   ★ [변경 7] Round 도 여기서 함께 입력받는다.
+    #     정수 → 그 값을 n_rounds 로 사용 (Step 2 의 grid 산출 생략)
+    #     y    → Step 2 에서 grid 기반으로 산출
     print(f"\n▶ 데이터셋: {DATASET_PATH}")
     eps_val     = float(input("eps 값 > "))
     min_pts_val = int(input("min_pts 값 > "))
-    print(f"\n▶ eps={eps_val}, min_pts={min_pts_val}\n")
+    round_val   = prompt_round_input()          # 정수 또는 None(= y, grid 산출)
+    _round_txt  = (f"{round_val} (입력값)" if round_val is not None
+                   else "y → grid 기반 산출")
+    print(f"\n▶ eps={eps_val}, min_pts={min_pts_val}, n_rounds={_round_txt}\n")
 
     pts, true_labels = load_arff_to_pts_with_labels(DATASET_PATH)
     N         = len(pts)
@@ -250,14 +300,21 @@ def main():
     normalized_pts = (pts - global_min) / scale_factor
     normalized_eps = eps_val / scale_factor
 
-    # ★ [2026-10] n_rounds: 클라이언트 grid(셀 ε_n/2) 산출 → 서버로 명시 전달
+    # ★ [변경 7] n_rounds: Step 1 의 Round 입력이 정수면 그 값을 그대로 쓰고 grid 는 건너뛴다.
+    #   y 를 입력한 경우에만 아래 grid(셀 ε_n/2) 산출로 넘어간다. 어느 쪽이든 서버로 명시 전달.
     #   n = max(1, max_g ⌈(Λ_g + s√d)/ε_n⌉).  점 사이 거리 비교 없음, 상한 ⌈1/ε_n⌉ 없음.
     #   pc1 은 첫 Dijkstra 출발 셀 선택에만 쓰임 (부호·결과 무관). build_pca_order 와 같은 부호 규칙 적용.
-    _ax_g = np.linalg.svd(_Xc, full_matrices=False)[2][0]
-    if _ax_g[np.argmax(np.abs(_ax_g))] > 0:
-        _ax_g = -_ax_g
-    n_rounds_grid, grid_info = compute_grid_rounds(
-        normalized_pts, normalized_eps, int(min_pts_val), pc1=(_Xc @ _ax_g) / scale_factor)
+    if round_val is not None:
+        n_rounds_val = round_val
+        n_rounds_src = "사용자 입력"
+        print(f"[Client] n_rounds={n_rounds_val} (사용자 입력 — grid 기반 산출 생략)")
+    else:
+        _ax_g = np.linalg.svd(_Xc, full_matrices=False)[2][0]
+        if _ax_g[np.argmax(np.abs(_ax_g))] > 0:
+            _ax_g = -_ax_g
+        n_rounds_val, grid_info = compute_grid_rounds(
+            normalized_pts, normalized_eps, int(min_pts_val), pc1=(_Xc @ _ax_g) / scale_factor)
+        n_rounds_src = "grid 산출"
 
     # [2026-07] N이 정해졌으니 Core/LP용 alpha별 MCP를 여기서 미리 생성
 
@@ -320,16 +377,17 @@ def main():
     # 서버가 enc_sum_k 계산 후 k_max 자동 정밀화
     before = _gpu_used_mb()
     # ★ [2026-10] sweep 삭제 → use_kd_propagation / num_sweeps 인자 없음 (항상 kd_dense)
-    # ★ [2026-10] n_rounds 는 Step 2 에서 grid 로 산출한 값을 명시 전달
+    # ★ [변경 7] n_rounds 는 Step 1 의 입력값, 또는 y 일 때 Step 2 에서 grid 로 산출한 값을 명시 전달
     fhe_final_ct, debug_fhe = send_to_server_fhe(
         engine=engine, keypack=keypack, debug_secret_key=secret_key,
         encrypted_columns=encrypted_columns,
         num_points=N, eps=normalized_eps, min_pts=float(min_pts_val),
         k_max=k_max,                                        # PCA(PC1) ε-window 상한
-        n_rounds=n_rounds_grid,                             # ★ [2026-10] grid 산출값
+        n_rounds=n_rounds_val,                              # ★ [변경 7] 입력값 또는 grid 산출값
     )
-    
+
     print(f"\n[k_max] {k_max}  (PCA(PC1) ε-window 상한, 클라이언트 산출)")
+    print(f"[n_rounds] {n_rounds_val}  ({n_rounds_src})")
 
     # 복호화 (Heap 순서)
     before = _gpu_used_mb()

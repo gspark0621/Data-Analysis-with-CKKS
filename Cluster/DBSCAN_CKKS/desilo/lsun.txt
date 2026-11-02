@@ -3,29 +3,13 @@
 ============================================================
 
 ▶ 데이터셋: /home/junhyung/study/Data-Analysis-with-CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/lsun.arff
-eps 값 > min_pts 값 > 
-▶ eps=0.5, min_pts=4
+eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력 → grid 기반 자동 산출) > 
+▶ eps=0.5, min_pts=4, n_rounds=8 (입력값)
 
-[Client/grid] cell=ε_n/2  cells=154 (kept 154)  groups=2 (max 91 cells)  Dijkstra=6/154  → n_rounds=11  (참고 ⌈1/ε_n⌉=12, 14.2 ms)
+[Client] n_rounds=8 (사용자 입력 — grid 기반 산출 생략)
 
 [MCP] N=400 기반 alpha별 MCP 준비
-      Core: alpha=10 (gap=0.5/400=0.001250) 생성 -> mcp_alpha10_lp_cheb.json
-
-[MCP-LP-Cheb] α=10, degrees=[7, 7, 13, 15], δ=9.765625e-04
-              margin η = 2^-13.00 (Table 3 max_depth)
-              τ=2^{-10}=0.000977, drift=12.305 ✗ UNSAFE
-              max_deg=15, BSGS dep=4, 레벨 소비=8/10 ✓
-  [MCP-Cheb] ⚠ 지정 η=1.2207e-04 는 스펙 위반 (t_k=1.9639e-03 > 1.9531e-03).
-            논문 §3.5 처방대로 유효 최대 η=1.1679e-04 를 찾아 90%=1.0511e-04 로 자동 하향 → t_k=1.9293e-03  (α=10, degrees=[7, 7, 13, 15])
-
-[MCP-Cheb] degrees=[7, 7, 13, 15], δ=9.765625e-04, η=1.051091e-04
-           안전 임계값 t_k ≤ 1.9531e-03
-  p_1 (deg=7)  [0.00097656, 1.00000000]  err=9.8850e-01, t_i=9.8860e-01
-  p_2 (deg=7)  [0.01139565, 1.98860435]  err=9.3477e-01, t_i=9.3488e-01
-  p_3 (deg=13)  [0.06512327, 1.93487673]  err=5.0321e-01, t_i=5.0331e-01
-  p_4 (deg=15)  [0.49668626, 1.50331374]  err=1.8242e-03, t_i=1.9293e-03
-[MCP-Cheb] 완료  t_k=1.9293e-03  ✓ SAFE (≤1.9531e-03)
-[MCP] 저장: mcp_alpha10_lp_cheb.json
+      Core: alpha=10 -> mcp_alpha10_lp_cheb.json 존재, 스킵
       LP:   alpha=11 -> mcp_alpha11_lp_clean1.json 존재, 스킵
 데이터: 400개, 2차원  정규화 eps=0.088690
 ⚠️  400개 → 긴 시간 소요 예상
@@ -61,10 +45,10 @@ eps 값 > min_pts 값 >
   [MEM][Encrypt] encrypt dim[0]                            delta=+30 MB  (used=5152 MB)
   [MEM][Encrypt] encrypt dim[1]                            delta=+28 MB  (used=5180 MB)
   [MEM] encrypt_data Ball-sorted (2개)                  delta=+58 MB  (used=5180 MB)
-[Server] n_rounds=11 (클라이언트 grid 산출값 수신)
+[Server] n_rounds=8 (클라이언트 grid 산출값 수신)
   [MEM][Server] send_to_server_fhe() 진입                        used=5180 MB
   N=400  dim=2  eps^2=0.0079  min_pts=4.0
-  k_max=105  T(k_max)=5565  전파방식=KD-dense  n_rounds=11
+  k_max=105  T(k_max)=5565  전파방식=KD-dense  n_rounds=8
 
 [Step 1] Normalize 시작 (k=1..105, eps^2=0.0079)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.007866
@@ -707,7 +691,7 @@ eps 값 > min_pts 값 >
   [Normalize] eps_effective=0.08878 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-[TIME] Normalize: 1919.70초
+[TIME] Normalize: 1916.42초
   [진단] Normalize 구간 표준 bootstrap 호출 수 = 0회  → bootstrap_key 불필요! 생성 지연 가능(13.4GB 확보)
   [MEM][Server] Normalize 완료 (adj_k_list 105개 = k=1..105)      used=6498 MB
 
@@ -728,14 +712,14 @@ eps 값 > min_pts 값 >
 ✅ 저장 완료: debug_core_eps0.0887_min4.csv
 
 [Step 3] Label Propagation 시작
-  방식: KD-dense  k=1..105, n_rounds=11
-  T(105)=5565 ≥ N=400  (fhe_max≈5040회)
+  방식: KD-dense  k=1..105, n_rounds=8
+  T(105)=5565 ≥ N=400  (fhe_max≈3780회)
 
 [KD-LP] ══════════════════════════════════════════
 [KD-LP] KD-tree dense stride 전파 (k=1..105)  [Phase1 재구성]
-[KD-LP] N=400, k_max=105, n_rounds=11, label_scale=1.1 (인셋 1.1)
+[KD-LP] N=400, k_max=105, n_rounds=8, label_scale=1.1 (인셋 1.1)
 [KD-LP] T(105)=5565  ✓ ≥ N
-[KD-LP] fhe_max: 288회 (Phase1 264 + Phase2 24)  [순차식이면 5040회 → 17.5배 감소]
+[KD-LP] fhe_max: 216회 (Phase1 192 + Phase2 24)  [순차식이면 3780회 → 17.5배 감소]
 [KD-LP] 라벨 레벨 가드 임계: 7 (budget=10 가정)
 [KD-LP] ══════════════════════════════════════════
 
@@ -747,127 +731,104 @@ eps 값 > min_pts 값 >
 [KD-LP] 그룹 트리-max: m=53 (슬롯 용량 ⌊32768/400⌋−1=80, k_max=105) → 2그룹 × 2방향
 [KD-LP] 암호문 회계: adj_k_half_list 105 + adjm_cache 105 + packed 1 + adjm 1 + 임시 ~3 ≈ 215개
 [KD-LP] (그룹 수 2는 순차 반복 횟수이며 암호문 수가 아님)
-[KD-LP] Phase1: Core-Core Round1/11 (forward)
+[KD-LP] Phase1: Core-Core Round1/8 (forward)
   [LabelProp] N=400 → α=11 MCP 로드: mcp_alpha11_lp_clean1.json (degrees=[31, 31, 31])
 [KD-LP]   (라벨 refresh 누계: 5, GPU 7816 MB)
   [DBG] P1-R1-forward 완료: min=-0.0000  max=0.9998  mean=0.6366
          [0.0323, 0.0323, 0.0423, 0.0448, 0.0448, 0.0498]
-[KD-LP] Phase1: Core-Core Round1/11 (backward)
+[KD-LP] Phase1: Core-Core Round1/8 (backward)
 [KD-LP]   (라벨 refresh 누계: 11, GPU 7816 MB)
   [DBG] P1-R1-backward 완료: min=-0.0001  max=0.9996  mean=0.6498
          [0.0321, 0.0321, 0.0421, 0.0446, 0.0446, 0.0496]
-[KD-LP] Phase1: Core-Core Round2/11 (forward)
+[KD-LP] Phase1: Core-Core Round2/8 (forward)
 [KD-LP]   (라벨 refresh 누계: 17, GPU 7816 MB)
   [DBG] P1-R2-forward 완료: min=-0.0000  max=0.9993  mean=0.6842
          [0.0618, 0.0618, 0.0718, 0.0718, 0.0718, 0.0843]
-[KD-LP] Phase1: Core-Core Round2/11 (backward)
+[KD-LP] Phase1: Core-Core Round2/8 (backward)
 [KD-LP]   (라벨 refresh 누계: 23, GPU 7816 MB)
   [DBG] P1-R2-backward 완료: min=-0.0002  max=0.9991  mean=0.6865
          [0.0616, 0.0616, 0.0716, 0.0716, 0.0716, 0.0841]
-[KD-LP] Phase1: Core-Core Round3/11 (forward)
+[KD-LP] Phase1: Core-Core Round3/8 (forward)
 [KD-LP]   (라벨 refresh 누계: 29, GPU 7816 MB)
   [DBG] P1-R3-forward 완료: min=-0.0000  max=0.9987  mean=0.6980
          [0.0987, 0.0987, 0.1112, 0.1112, 0.1112, 0.1212]
-[KD-LP] Phase1: Core-Core Round3/11 (backward)
+[KD-LP] Phase1: Core-Core Round3/8 (backward)
 [KD-LP]   (라벨 refresh 누계: 35, GPU 7816 MB)
   [DBG] P1-R3-backward 완료: min=-0.0002  max=0.9985  mean=0.6980
          [0.0985, 0.0985, 0.111, 0.111, 0.111, 0.121]
-[KD-LP] Phase1: Core-Core Round4/11 (forward)
+[KD-LP] Phase1: Core-Core Round4/8 (forward)
 [KD-LP]   (라벨 refresh 누계: 41, GPU 7816 MB)
   [DBG] P1-R4-forward 완료: min=-0.0000  max=0.9981  mean=0.7089
          [0.1306, 0.1306, 0.1356, 0.1356, 0.1356, 0.1431]
-[KD-LP] Phase1: Core-Core Round4/11 (backward)
+[KD-LP] Phase1: Core-Core Round4/8 (backward)
 [KD-LP]   (라벨 refresh 누계: 47, GPU 7816 MB)
   [DBG] P1-R4-backward 완료: min=-0.0002  max=0.9978  mean=0.7088
-         [0.1303, 0.1303, 0.1354, 0.1353, 0.1353, 0.1428]
-[KD-LP] Phase1: Core-Core Round5/11 (forward)
+         [0.1303, 0.1303, 0.1354, 0.1354, 0.1354, 0.1429]
+[KD-LP] Phase1: Core-Core Round5/8 (forward)
 [KD-LP]   (라벨 refresh 누계: 53, GPU 7816 MB)
-  [DBG] P1-R5-forward 완료: min=-0.0000  max=0.9974  mean=0.7208
+  [DBG] P1-R5-forward 완료: min=-0.0001  max=0.9974  mean=0.7208
          [0.1524, 0.1524, 0.1574, 0.1574, 0.1574, 0.1649]
-[KD-LP] Phase1: Core-Core Round5/11 (backward)
+[KD-LP] Phase1: Core-Core Round5/8 (backward)
 [KD-LP]   (라벨 refresh 누계: 59, GPU 7816 MB)
   [DBG] P1-R5-backward 완료: min=-0.0002  max=0.9972  mean=0.7206
          [0.1522, 0.1522, 0.1572, 0.1572, 0.1572, 0.1647]
-[KD-LP] Phase1: Core-Core Round6/11 (forward)
+[KD-LP] Phase1: Core-Core Round6/8 (forward)
 [KD-LP]   (라벨 refresh 누계: 65, GPU 7816 MB)
   [DBG] P1-R6-forward 완료: min=-0.0001  max=0.9967  mean=0.7306
-         [0.1842, 0.1842, 0.1892, 0.1892, 0.1892, 0.2392]
-[KD-LP] Phase1: Core-Core Round6/11 (backward)
+         [0.1842, 0.1842, 0.1893, 0.1893, 0.1893, 0.2392]
+[KD-LP] Phase1: Core-Core Round6/8 (backward)
 [KD-LP]   (라벨 refresh 누계: 71, GPU 7816 MB)
   [DBG] P1-R6-backward 완료: min=-0.0002  max=0.9965  mean=0.7305
          [0.184, 0.184, 0.189, 0.189, 0.189, 0.239]
-[KD-LP] Phase1: Core-Core Round7/11 (forward)
+[KD-LP] Phase1: Core-Core Round7/8 (forward)
 [KD-LP]   (라벨 refresh 누계: 77, GPU 7816 MB)
   [DBG] P1-R7-forward 완료: min=-0.0001  max=0.9961  mean=0.7384
          [0.2761, 0.2761, 0.2761, 0.2761, 0.2761, 0.3536]
-[KD-LP] Phase1: Core-Core Round7/11 (backward)
+[KD-LP] Phase1: Core-Core Round7/8 (backward)
 [KD-LP]   (라벨 refresh 누계: 83, GPU 7816 MB)
   [DBG] P1-R7-backward 완료: min=-0.0002  max=0.9958  mean=0.7384
          [0.2758, 0.2758, 0.2758, 0.2758, 0.2758, 0.3533]
-[KD-LP] Phase1: Core-Core Round8/11 (forward)
+[KD-LP] Phase1: Core-Core Round8/8 (forward)
 [KD-LP]   (라벨 refresh 누계: 89, GPU 7816 MB)
   [DBG] P1-R8-forward 완료: min=-0.0001  max=0.9954  mean=0.7416
          [0.4904, 0.4904, 0.4904, 0.4904, 0.4904, 0.4904]
-[KD-LP] Phase1: Core-Core Round8/11 (backward)
+[KD-LP] Phase1: Core-Core Round8/8 (backward)
 [KD-LP]   (라벨 refresh 누계: 95, GPU 7816 MB)
   [DBG] P1-R8-backward 완료: min=-0.0002  max=0.9951  mean=0.7414
          [0.4901, 0.4901, 0.4901, 0.4901, 0.4901, 0.4901]
-[KD-LP] Phase1: Core-Core Round9/11 (forward)
-[KD-LP]   (라벨 refresh 누계: 101, GPU 7816 MB)
-  [DBG] P1-R9-forward 완료: min=-0.0001  max=0.9946  mean=0.7409
-         [0.4896, 0.4896, 0.4896, 0.4896, 0.4896, 0.4896]
-[KD-LP] Phase1: Core-Core Round9/11 (backward)
-[KD-LP]   (라벨 refresh 누계: 107, GPU 7816 MB)
-  [DBG] P1-R9-backward 완료: min=-0.0002  max=0.9944  mean=0.7407
-         [0.4894, 0.4894, 0.4894, 0.4894, 0.4894, 0.4894]
-[KD-LP] Phase1: Core-Core Round10/11 (forward)
-[KD-LP]   (라벨 refresh 누계: 113, GPU 7816 MB)
-  [DBG] P1-R10-forward 완료: min=-0.0001  max=0.9939  mean=0.7402
-         [0.4889, 0.4889, 0.4889, 0.4889, 0.4889, 0.4889]
-[KD-LP] Phase1: Core-Core Round10/11 (backward)
-[KD-LP]   (라벨 refresh 누계: 119, GPU 7816 MB)
-  [DBG] P1-R10-backward 완료: min=-0.0002  max=0.9937  mean=0.7400
-         [0.4887, 0.4887, 0.4887, 0.4887, 0.4887, 0.4887]
-[KD-LP] Phase1: Core-Core Round11/11 (forward)
-[KD-LP]   (라벨 refresh 누계: 125, GPU 7816 MB)
-  [DBG] P1-R11-forward 완료: min=-0.0001  max=0.9932  mean=0.7395
-         [0.4882, 0.4882, 0.4882, 0.4882, 0.4882, 0.4882]
-[KD-LP] Phase1: Core-Core Round11/11 (backward)
-[KD-LP]   (라벨 refresh 누계: 131, GPU 7816 MB)
-  [DBG] P1-R11-backward 완료: min=-0.0002  max=0.9930  mean=0.7393
-         [0.488, 0.488, 0.488, 0.488, 0.488, 0.488]
 [KD-LP] Phase2: Core→Border (forward)
-[KD-LP]   (라벨 refresh 누계: 136)
-  [DBG] P2-forward 완료: min=-0.0000  max=0.4930  mean=0.0012
-         [-0.0, 0.0, 0.0, -0.0, 0.0, 0.0]
+[KD-LP]   (라벨 refresh 누계: 100)
+  [DBG] P2-forward 완료: min=-0.0000  max=0.4951  mean=0.0012
+         [0.0, 0.0, -0.0, 0.0, 0.0, 0.0]
 [KD-LP] Phase2: Core→Border (backward)
-[KD-LP]   (라벨 refresh 누계: 142)
-  [DBG] P2-backward 완료: min=-0.0000  max=0.4930  mean=0.0025
-         [0.0, 0.0, -0.0, -0.0, 0.0, 0.0]
-[KD-LP] 라벨 lineage 표준 bootstrap 총계: 142 (+ 최종 1회)  ← 이전 구조 추정치 864~1152회
-  [DBG] 최종 [0,400]: min=195.1977  max=397.1990  mean=296.6983
-         [195.1984, 195.2008, 195.1999, 195.2, 195.1977, 195.2008]
+[KD-LP]   (라벨 refresh 누계: 106)
+  [DBG] P2-backward 완료: min=-0.0000  max=0.4951  mean=0.0025
+         [0.0, -0.0, 0.0, 0.0, -0.0, 0.0]
+[KD-LP] 라벨 lineage 표준 bootstrap 총계: 106 (+ 최종 1회)  ← 이전 구조 추정치 648~864회
+  [DBG] 최종 [0,400]: min=196.0429  max=398.0429  mean=297.5429
+         [196.046, 196.0479, 196.0482, 196.0491, 196.0479, 196.0483]
   [MEM][Server] Label Propagation 완료                           delta=+12 MB  (used=6522 MB)
-[TIME] Label_Propagation: 7563.54초
+[TIME] Label_Propagation: 6245.34초
 
-[DEBUG] 최종 라벨 (Heap 순서, 앞 10개): [195.2 195.2 195.2 195.2 195.2 195.2 195.2 195.2 195.2 195.2]
-  범위: min=195.20, max=397.20  (정상: [0,400])
+[DEBUG] 최종 라벨 (Heap 순서, 앞 10개): [196.05 196.05 196.05 196.05 196.05 196.05 196.05 196.05 196.05 196.05]
+  범위: min=196.04, max=398.04  (정상: [0,400])
   ※ 클라이언트에서 inv_perm 적용 후 원래 순서 복원
 ✅ 저장 완료: debug_labelprop_final_eps0.0887_min4.csv
   [MEM][Server] send_to_server_fhe() 완료                        used=6522 MB
 
 [k_max] 105  (PCA(PC1) ε-window 상한, 클라이언트 산출)
+[n_rounds] 8  (사용자 입력)
   [MEM] decrypt                                        delta=+0 MB  (used=5224 MB)
-[FHE] [Client] 적응형 thr: thr=0.9930 | 내부최대 0.0885, 분리 2곳 | 감쇠 c≈0.9930
-[Client] 간격판정: thr=0.9929975247248833 → 클러스터 3개, 노이즈 0개
-[Client]   내부 최대 간격 0.0885 < thr 0.9929975247248833 < 사이 최소 간격 1.9061   여유 22배
-▶ FHE: 9497.25초
+[FHE] [Client] 적응형 thr: thr=0.9951 | 내부최대 0.0888, 분리 2곳 | 감쇠 c≈0.9951
+[Client] 간격판정: thr=0.9951072328057919 → 클러스터 3개, 노이즈 0개
+[Client]   내부 최대 간격 0.0888 < thr 0.9951072328057919 < 사이 최소 간격 1.9058   여유 21배
+▶ FHE: 8175.77초
 
 ================ 소요 시간 =====================
-Normalize         : 1919.70초
+Normalize         : 1916.42초
 Core              : 13.89초
-Label_Propagation : 7563.54초
-합계              : 9497.13초
+Label_Propagation : 6245.34초
+합계              : 8175.65초
 
 ✅ 타이밍 저장: debug_timings_eps0.5_min4.txt
 ✅ 디버깅 파일: debug_fhe_vs_np_eps0.5_min4.csv

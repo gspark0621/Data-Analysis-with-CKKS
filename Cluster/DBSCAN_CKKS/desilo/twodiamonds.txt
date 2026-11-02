@@ -3,10 +3,10 @@
 ============================================================
 
 ▶ 데이터셋: /home/junhyung/study/Data-Analysis-with-CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/twodiamonds.arff
-eps 값 > min_pts 값 > 
-▶ eps=0.14, min_pts=6
+eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력 → grid 기반 자동 산출) > 
+▶ eps=0.14, min_pts=6, n_rounds=13 (입력값)
 
-[Client/grid] cell=ε_n/2  cells=550 (kept 550)  groups=1 (max 550 cells)  Dijkstra=3/550  → n_rounds=31  (참고 ⌈1/ε_n⌉=37, 32.2 ms)
+[Client] n_rounds=13 (사용자 입력 — grid 기반 산출 생략)
 
 [MCP] N=800 기반 alpha별 MCP 준비
       Core: alpha=11 -> mcp_alpha11_lp_cheb.json 존재, 스킵
@@ -25,7 +25,7 @@ eps 값 > min_pts 값 >
 
 ================ Plaintext (sklearn DBSCAN) ===================
 [평문/sklearn] 클러스터 2개, 노이즈 1개, core 740개
-▶ Plaintext: 0.01초
+▶ Plaintext: 0.02초
 
 ================ FHE (kd_dense) ========================
   [MEM] Engine 초기화 전                                   used=570 MB  free=23994 MB
@@ -45,10 +45,10 @@ eps 값 > min_pts 값 >
   [MEM][Encrypt] encrypt dim[0]                            delta=+30 MB  (used=5152 MB)
   [MEM][Encrypt] encrypt dim[1]                            delta=+28 MB  (used=5180 MB)
   [MEM] encrypt_data Ball-sorted (2개)                  delta=+58 MB  (used=5180 MB)
-[Server] n_rounds=31 (클라이언트 grid 산출값 수신)
+[Server] n_rounds=13 (클라이언트 grid 산출값 수신)
   [MEM][Server] send_to_server_fhe() 진입                        used=5180 MB
   N=800  dim=2  eps^2=0.0008  min_pts=6.0
-  k_max=70  T(k_max)=2485  전파방식=KD-dense  n_rounds=31
+  k_max=70  T(k_max)=2485  전파방식=KD-dense  n_rounds=13
 
 [Step 1] Normalize 시작 (k=1..70, eps^2=0.0008)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.000757
@@ -478,7 +478,7 @@ eps 값 > min_pts 값 >
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
   [MEM][Server] adj_k[70] 생성 (누적 70회 MCP)                      delta=-16 MB  (used=6064 MB)
-[TIME] Normalize: 1287.31초
+[TIME] Normalize: 1289.72초
   [진단] Normalize 구간 표준 bootstrap 호출 수 = 0회  → bootstrap_key 불필요! 생성 지연 가능(13.4GB 확보)
   [MEM][Server] Normalize 완료 (adj_k_list 70개 = k=1..70)        used=6078 MB
 
@@ -493,313 +493,170 @@ eps 값 > min_pts 값 >
 [Server] Core: delta=4.88281e-04 (= 2^-11.00) < 0.5/N=0.00063 ✓ (여유 1.3배)
   - [Core] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
   [MEM][Server] identify_core_points_fhe() 완료                  delta=+12 MB  (used=6090 MB)
-[TIME] Core: 13.89초
-[DEBUG] Core 마스크 (앞 10개): [-0.  0.  0.  0.  1.  1.  1. -0.  1.  1.]
+[TIME] Core: 13.98초
+[DEBUG] Core 마스크 (앞 10개): [-0. -0.  0.  0.  1.  1.  1.  0.  1.  1.]
   → Core 포인트: 740/800
 ✅ 저장 완료: debug_core_eps0.0275_min6.csv
 
 [Step 3] Label Propagation 시작
-  방식: KD-dense  k=1..70, n_rounds=31
-  T(70)=2485 ≥ N=800  (fhe_max≈8960회)
+  방식: KD-dense  k=1..70, n_rounds=13
+  T(70)=2485 ≥ N=800  (fhe_max≈3920회)
 
 [KD-LP] ══════════════════════════════════════════
 [KD-LP] KD-tree dense stride 전파 (k=1..70)  [Phase1 재구성]
-[KD-LP] N=800, k_max=70, n_rounds=31, label_scale=1.1 (인셋 1.1)
+[KD-LP] N=800, k_max=70, n_rounds=13, label_scale=1.1 (인셋 1.1)
 [KD-LP] T(70)=2485  ✓ ≥ N
-[KD-LP] fhe_max: 960회 (Phase1 930 + Phase2 30)  [순차식이면 8960회 → 9.3배 감소]
+[KD-LP] fhe_max: 420회 (Phase1 390 + Phase2 30)  [순차식이면 3920회 → 9.3배 감소]
 [KD-LP] 라벨 레벨 가드 임계: 7 (budget=10 가정)
 [KD-LP] ══════════════════════════════════════════
 
   [DBG] 초기 core_labels: min=-0.0000  max=0.9987  mean=0.4613
-         [0.0, -0.0, -0.0, 0.0, 0.0063, 0.0075]
+         [-0.0, 0.0, -0.0, 0.0, 0.0063, 0.0075]
 [KD-LP] Core-Core adjm 사전계산: 70 ciphertext (fwd만 저장, bwd=shift(fwd) 유도 / 라운드 불변 호이스팅)
 [KD-LP] ★ Label_Propagation 버전: 2026-07-r9-nowrap  _FORCE_GROUP_SIZE=None
 [KD-LP] ★감싸기 검사: (n_region 26 + half 13)×N 800 = 31200  vs slot_count 32768  ✓ 안전  (슬롯 채움 63.5%)
 [KD-LP] 그룹 트리-max: m=25 (슬롯 용량 ⌊32768/800⌋−1=39, k_max=70) → 3그룹 × 2방향
 [KD-LP] 암호문 회계: adj_k_half_list 70 + adjm_cache 70 + packed 1 + adjm 1 + 임시 ~3 ≈ 145개
 [KD-LP] (그룹 수 3는 순차 반복 횟수이며 암호문 수가 아님)
-[KD-LP] Phase1: Core-Core Round1/31 (forward)
+[KD-LP] Phase1: Core-Core Round1/13 (forward)
   [LabelProp] N=800 → α=12 MCP 로드: mcp_alpha12_lp_clean1.json (degrees=[7, 15, 15, 31])
 [KD-LP]   (라벨 refresh 누계: 7, GPU 6980 MB)
   [DBG] P1-R1-forward 완료: min=-0.0000  max=0.9986  mean=0.5066
          [-0.0, -0.0, -0.0, -0.0, 0.0211, 0.0211]
-[KD-LP] Phase1: Core-Core Round1/31 (backward)
+[KD-LP] Phase1: Core-Core Round1/13 (backward)
 [KD-LP]   (라벨 refresh 누계: 15, GPU 6976 MB)
   [DBG] P1-R1-backward 완료: min=-0.0001  max=0.9986  mean=0.5160
          [-0.0001, -0.0001, -0.0001, -0.0001, 0.0211, 0.0211]
-[KD-LP] Phase1: Core-Core Round2/31 (forward)
+[KD-LP] Phase1: Core-Core Round2/13 (forward)
 [KD-LP]   (라벨 refresh 누계: 23, GPU 6980 MB)
   [DBG] P1-R2-forward 완료: min=-0.0000  max=0.9984  mean=0.5549
          [-0.0, -0.0, -0.0, -0.0, 0.0521, 0.0521]
-[KD-LP] Phase1: Core-Core Round2/31 (backward)
+[KD-LP] Phase1: Core-Core Round2/13 (backward)
 [KD-LP]   (라벨 refresh 누계: 31, GPU 6976 MB)
   [DBG] P1-R2-backward 완료: min=-0.0001  max=0.9983  mean=0.5636
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.0521, 0.0521]
-[KD-LP] Phase1: Core-Core Round3/31 (forward)
+         [-0.0001, -0.0001, -0.0001, -0.0001, 0.052, 0.052]
+[KD-LP] Phase1: Core-Core Round3/13 (forward)
 [KD-LP]   (라벨 refresh 누계: 39, GPU 6980 MB)
   [DBG] P1-R3-forward 완료: min=-0.0000  max=0.9981  mean=0.5967
          [-0.0, -0.0, -0.0, -0.0, 0.0756, 0.0756]
-[KD-LP] Phase1: Core-Core Round3/31 (backward)
+[KD-LP] Phase1: Core-Core Round3/13 (backward)
 [KD-LP]   (라벨 refresh 누계: 47, GPU 6976 MB)
   [DBG] P1-R3-backward 완료: min=-0.0001  max=0.9980  mean=0.6034
          [-0.0001, -0.0001, -0.0001, -0.0001, 0.0755, 0.0755]
-[KD-LP] Phase1: Core-Core Round4/31 (forward)
+[KD-LP] Phase1: Core-Core Round4/13 (forward)
 [KD-LP]   (라벨 refresh 누계: 55, GPU 6980 MB)
   [DBG] P1-R4-forward 완료: min=-0.0000  max=0.9977  mean=0.6287
-         [-0.0, -0.0, -0.0, -0.0, 0.1364, 0.1364]
-[KD-LP] Phase1: Core-Core Round4/31 (backward)
+         [-0.0, -0.0, -0.0, -0.0, 0.1364, 0.1365]
+[KD-LP] Phase1: Core-Core Round4/13 (backward)
 [KD-LP]   (라벨 refresh 누계: 63, GPU 6976 MB)
   [DBG] P1-R4-backward 완료: min=-0.0001  max=0.9976  mean=0.6332
          [-0.0001, -0.0001, -0.0001, -0.0001, 0.1363, 0.1363]
-[KD-LP] Phase1: Core-Core Round5/31 (forward)
+[KD-LP] Phase1: Core-Core Round5/13 (forward)
 [KD-LP]   (라벨 refresh 누계: 71, GPU 6980 MB)
   [DBG] P1-R5-forward 완료: min=-0.0000  max=0.9973  mean=0.6507
          [-0.0, -0.0, -0.0, -0.0, 0.206, 0.206]
-[KD-LP] Phase1: Core-Core Round5/31 (backward)
+[KD-LP] Phase1: Core-Core Round5/13 (backward)
 [KD-LP]   (라벨 refresh 누계: 79, GPU 6976 MB)
   [DBG] P1-R5-backward 완료: min=-0.0001  max=0.9971  mean=0.6535
          [-0.0001, -0.0001, -0.0001, -0.0001, 0.2059, 0.2059]
-[KD-LP] Phase1: Core-Core Round6/31 (forward)
+[KD-LP] Phase1: Core-Core Round6/13 (forward)
 [KD-LP]   (라벨 refresh 누계: 87, GPU 6980 MB)
   [DBG] P1-R6-forward 완료: min=-0.0000  max=0.9968  mean=0.6671
          [-0.0, -0.0, -0.0, -0.0, 0.2818, 0.2818]
-[KD-LP] Phase1: Core-Core Round6/31 (backward)
+[KD-LP] Phase1: Core-Core Round6/13 (backward)
 [KD-LP]   (라벨 refresh 누계: 95, GPU 6976 MB)
   [DBG] P1-R6-backward 완료: min=-0.0001  max=0.9966  mean=0.6689
          [-0.0001, -0.0001, -0.0001, -0.0001, 0.2816, 0.2816]
-[KD-LP] Phase1: Core-Core Round7/31 (forward)
+[KD-LP] Phase1: Core-Core Round7/13 (forward)
 [KD-LP]   (라벨 refresh 누계: 103, GPU 6980 MB)
   [DBG] P1-R7-forward 완료: min=-0.0000  max=0.9963  mean=0.6770
          [-0.0, -0.0, -0.0, -0.0, 0.3575, 0.3575]
-[KD-LP] Phase1: Core-Core Round7/31 (backward)
+[KD-LP] Phase1: Core-Core Round7/13 (backward)
 [KD-LP]   (라벨 refresh 누계: 111, GPU 6976 MB)
   [DBG] P1-R7-backward 완료: min=-0.0001  max=0.9961  mean=0.6784
          [-0.0001, -0.0001, -0.0001, -0.0001, 0.3574, 0.3574]
-[KD-LP] Phase1: Core-Core Round8/31 (forward)
+[KD-LP] Phase1: Core-Core Round8/13 (forward)
 [KD-LP]   (라벨 refresh 누계: 119, GPU 6980 MB)
   [DBG] P1-R8-forward 완료: min=-0.0000  max=0.9958  mean=0.6830
          [-0.0, -0.0, -0.0, -0.0, 0.4433, 0.4433]
-[KD-LP] Phase1: Core-Core Round8/31 (backward)
+[KD-LP] Phase1: Core-Core Round8/13 (backward)
 [KD-LP]   (라벨 refresh 누계: 127, GPU 6976 MB)
   [DBG] P1-R8-backward 완료: min=-0.0001  max=0.9956  mean=0.6835
          [-0.0001, -0.0001, -0.0001, -0.0001, 0.4431, 0.4431]
-[KD-LP] Phase1: Core-Core Round9/31 (forward)
+[KD-LP] Phase1: Core-Core Round9/13 (forward)
 [KD-LP]   (라벨 refresh 누계: 135, GPU 6980 MB)
   [DBG] P1-R9-forward 완료: min=-0.0000  max=0.9952  mean=0.6858
          [-0.0, -0.0, -0.0, -0.0, 0.4615, 0.4615]
-[KD-LP] Phase1: Core-Core Round9/31 (backward)
+[KD-LP] Phase1: Core-Core Round9/13 (backward)
 [KD-LP]   (라벨 refresh 누계: 143, GPU 6976 MB)
   [DBG] P1-R9-backward 완료: min=-0.0001  max=0.9951  mean=0.6860
          [-0.0001, -0.0001, -0.0001, -0.0001, 0.4613, 0.4613]
-[KD-LP] Phase1: Core-Core Round10/31 (forward)
+[KD-LP] Phase1: Core-Core Round10/13 (forward)
 [KD-LP]   (라벨 refresh 누계: 151, GPU 6980 MB)
   [DBG] P1-R10-forward 완료: min=-0.0000  max=0.9947  mean=0.6870
          [-0.0, -0.0, -0.0, -0.0, 0.4747, 0.4747]
-[KD-LP] Phase1: Core-Core Round10/31 (backward)
+[KD-LP] Phase1: Core-Core Round10/13 (backward)
 [KD-LP]   (라벨 refresh 누계: 159, GPU 6976 MB)
   [DBG] P1-R10-backward 완료: min=-0.0001  max=0.9945  mean=0.6869
          [-0.0001, -0.0001, -0.0001, -0.0001, 0.4745, 0.4745]
-[KD-LP] Phase1: Core-Core Round11/31 (forward)
+[KD-LP] Phase1: Core-Core Round11/13 (forward)
 [KD-LP]   (라벨 refresh 누계: 167, GPU 6980 MB)
   [DBG] P1-R11-forward 완료: min=-0.0000  max=0.9942  mean=0.6873
-         [-0.0, -0.0, -0.0, -0.0, 0.4842, 0.4842]
-[KD-LP] Phase1: Core-Core Round11/31 (backward)
+         [-0.0, -0.0, -0.0, -0.0, 0.4841, 0.4841]
+[KD-LP] Phase1: Core-Core Round11/13 (backward)
 [KD-LP]   (라벨 refresh 누계: 175, GPU 6976 MB)
   [DBG] P1-R11-backward 완료: min=-0.0001  max=0.9940  mean=0.6872
          [-0.0001, -0.0001, -0.0001, -0.0001, 0.484, 0.484]
-[KD-LP] Phase1: Core-Core Round12/31 (forward)
+[KD-LP] Phase1: Core-Core Round12/13 (forward)
 [KD-LP]   (라벨 refresh 누계: 183, GPU 6980 MB)
   [DBG] P1-R12-forward 완료: min=-0.0000  max=0.9936  mean=0.6871
          [-0.0, -0.0, -0.0, -0.0, 0.4899, 0.4899]
-[KD-LP] Phase1: Core-Core Round12/31 (backward)
+[KD-LP] Phase1: Core-Core Round12/13 (backward)
 [KD-LP]   (라벨 refresh 누계: 191, GPU 6976 MB)
-  [DBG] P1-R12-backward 완료: min=-0.0001  max=0.9935  mean=0.6870
+  [DBG] P1-R12-backward 완료: min=-0.0001  max=0.9934  mean=0.6870
          [-0.0001, -0.0001, -0.0001, -0.0001, 0.4897, 0.4897]
-[KD-LP] Phase1: Core-Core Round13/31 (forward)
+[KD-LP] Phase1: Core-Core Round13/13 (forward)
 [KD-LP]   (라벨 refresh 누계: 199, GPU 6980 MB)
   [DBG] P1-R13-forward 완료: min=-0.0000  max=0.9931  mean=0.6867
          [-0.0, -0.0, -0.0, -0.0, 0.4943, 0.4943]
-[KD-LP] Phase1: Core-Core Round13/31 (backward)
+[KD-LP] Phase1: Core-Core Round13/13 (backward)
 [KD-LP]   (라벨 refresh 누계: 207, GPU 6976 MB)
   [DBG] P1-R13-backward 완료: min=-0.0001  max=0.9929  mean=0.6865
          [-0.0001, -0.0001, -0.0001, -0.0001, 0.4942, 0.4942]
-[KD-LP] Phase1: Core-Core Round14/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 215, GPU 6980 MB)
-  [DBG] P1-R14-forward 완료: min=-0.0000  max=0.9925  mean=0.6862
-         [-0.0, -0.0, -0.0, -0.0, 0.4938, 0.4938]
-[KD-LP] Phase1: Core-Core Round14/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 223, GPU 6976 MB)
-  [DBG] P1-R14-backward 완료: min=-0.0001  max=0.9924  mean=0.6860
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4936, 0.4936]
-[KD-LP] Phase1: Core-Core Round15/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 231, GPU 6980 MB)
-  [DBG] P1-R15-forward 완료: min=-0.0000  max=0.9920  mean=0.6857
-         [-0.0, -0.0, -0.0, -0.0, 0.4932, 0.4932]
-[KD-LP] Phase1: Core-Core Round15/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 239, GPU 6976 MB)
-  [DBG] P1-R15-backward 완료: min=-0.0001  max=0.9918  mean=0.6855
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4931, 0.4931]
-[KD-LP] Phase1: Core-Core Round16/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 247, GPU 6980 MB)
-  [DBG] P1-R16-forward 완료: min=-0.0000  max=0.9915  mean=0.6852
-         [-0.0, -0.0, -0.0, -0.0, 0.4927, 0.4927]
-[KD-LP] Phase1: Core-Core Round16/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 255, GPU 6976 MB)
-  [DBG] P1-R16-backward 완료: min=-0.0001  max=0.9913  mean=0.6850
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4925, 0.4925]
-[KD-LP] Phase1: Core-Core Round17/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 263, GPU 6980 MB)
-  [DBG] P1-R17-forward 완료: min=-0.0000  max=0.9909  mean=0.6847
-         [-0.0, -0.0, -0.0, -0.0, 0.4922, 0.4922]
-[KD-LP] Phase1: Core-Core Round17/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 271, GPU 6976 MB)
-  [DBG] P1-R17-backward 완료: min=-0.0001  max=0.9908  mean=0.6845
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.492, 0.492]
-[KD-LP] Phase1: Core-Core Round18/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 279, GPU 6980 MB)
-  [DBG] P1-R18-forward 완료: min=-0.0000  max=0.9904  mean=0.6842
-         [-0.0, -0.0, -0.0, -0.0, 0.4916, 0.4916]
-[KD-LP] Phase1: Core-Core Round18/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 287, GPU 6976 MB)
-  [DBG] P1-R18-backward 완료: min=-0.0001  max=0.9902  mean=0.6840
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4915, 0.4915]
-[KD-LP] Phase1: Core-Core Round19/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 295, GPU 6980 MB)
-  [DBG] P1-R19-forward 완료: min=-0.0000  max=0.9899  mean=0.6837
-         [-0.0, -0.0, -0.0, -0.0, 0.4911, 0.4911]
-[KD-LP] Phase1: Core-Core Round19/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 303, GPU 6976 MB)
-  [DBG] P1-R19-backward 완료: min=-0.0001  max=0.9897  mean=0.6835
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4909, 0.4909]
-[KD-LP] Phase1: Core-Core Round20/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 311, GPU 6980 MB)
-  [DBG] P1-R20-forward 완료: min=-0.0000  max=0.9893  mean=0.6832
-         [-0.0, -0.0, -0.0, -0.0, 0.4906, 0.4906]
-[KD-LP] Phase1: Core-Core Round20/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 319, GPU 6976 MB)
-  [DBG] P1-R20-backward 완료: min=-0.0001  max=0.9892  mean=0.6830
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4904, 0.4904]
-[KD-LP] Phase1: Core-Core Round21/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 327, GPU 6980 MB)
-  [DBG] P1-R21-forward 완료: min=-0.0000  max=0.9888  mean=0.6827
-         [-0.0, -0.0, -0.0, -0.0, 0.49, 0.49]
-[KD-LP] Phase1: Core-Core Round21/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 335, GPU 6976 MB)
-  [DBG] P1-R21-backward 완료: min=-0.0001  max=0.9886  mean=0.6826
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4899, 0.4899]
-[KD-LP] Phase1: Core-Core Round22/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 343, GPU 6980 MB)
-  [DBG] P1-R22-forward 완료: min=-0.0000  max=0.9883  mean=0.6822
-         [-0.0, -0.0, -0.0, -0.0, 0.4895, 0.4895]
-[KD-LP] Phase1: Core-Core Round22/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 351, GPU 6976 MB)
-  [DBG] P1-R22-backward 완료: min=-0.0001  max=0.9881  mean=0.6821
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4893, 0.4894]
-[KD-LP] Phase1: Core-Core Round23/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 359, GPU 6980 MB)
-  [DBG] P1-R23-forward 완료: min=-0.0000  max=0.9877  mean=0.6817
-         [-0.0, -0.0, -0.0, -0.0, 0.489, 0.489]
-[KD-LP] Phase1: Core-Core Round23/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 367, GPU 6976 MB)
-  [DBG] P1-R23-backward 완료: min=-0.0001  max=0.9876  mean=0.6816
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4888, 0.4888]
-[KD-LP] Phase1: Core-Core Round24/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 375, GPU 6980 MB)
-  [DBG] P1-R24-forward 완료: min=-0.0000  max=0.9872  mean=0.6812
-         [-0.0, -0.0, -0.0, -0.0, 0.4885, 0.4885]
-[KD-LP] Phase1: Core-Core Round24/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 383, GPU 6976 MB)
-  [DBG] P1-R24-backward 완료: min=-0.0001  max=0.9870  mean=0.6811
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4883, 0.4883]
-[KD-LP] Phase1: Core-Core Round25/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 391, GPU 6980 MB)
-  [DBG] P1-R25-forward 완료: min=-0.0000  max=0.9867  mean=0.6808
-         [-0.0, -0.0, -0.0, -0.0, 0.4879, 0.4879]
-[KD-LP] Phase1: Core-Core Round25/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 399, GPU 6976 MB)
-  [DBG] P1-R25-backward 완료: min=-0.0001  max=0.9865  mean=0.6806
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4878, 0.4878]
-[KD-LP] Phase1: Core-Core Round26/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 407, GPU 6980 MB)
-  [DBG] P1-R26-forward 완료: min=-0.0000  max=0.9862  mean=0.6803
-         [-0.0, -0.0, -0.0, -0.0, 0.4874, 0.4874]
-[KD-LP] Phase1: Core-Core Round26/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 415, GPU 6976 MB)
-  [DBG] P1-R26-backward 완료: min=-0.0001  max=0.9860  mean=0.6801
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4872, 0.4872]
-[KD-LP] Phase1: Core-Core Round27/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 423, GPU 6980 MB)
-  [DBG] P1-R27-forward 완료: min=-0.0000  max=0.9856  mean=0.6798
-         [-0.0, -0.0, -0.0, -0.0, 0.4869, 0.4869]
-[KD-LP] Phase1: Core-Core Round27/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 431, GPU 6976 MB)
-  [DBG] P1-R27-backward 완료: min=-0.0001  max=0.9855  mean=0.6796
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4867, 0.4867]
-[KD-LP] Phase1: Core-Core Round28/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 439, GPU 6980 MB)
-  [DBG] P1-R28-forward 완료: min=-0.0000  max=0.9851  mean=0.6793
-         [-0.0, -0.0, -0.0, -0.0, 0.4864, 0.4864]
-[KD-LP] Phase1: Core-Core Round28/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 447, GPU 6976 MB)
-  [DBG] P1-R28-backward 완료: min=-0.0001  max=0.9850  mean=0.6792
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4862, 0.4862]
-[KD-LP] Phase1: Core-Core Round29/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 455, GPU 6980 MB)
-  [DBG] P1-R29-forward 완료: min=-0.0000  max=0.9846  mean=0.6788
-         [-0.0, -0.0, -0.0, -0.0, 0.4858, 0.4858]
-[KD-LP] Phase1: Core-Core Round29/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 463, GPU 6976 MB)
-  [DBG] P1-R29-backward 완료: min=-0.0001  max=0.9844  mean=0.6787
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4857, 0.4857]
-[KD-LP] Phase1: Core-Core Round30/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 471, GPU 6980 MB)
-  [DBG] P1-R30-forward 완료: min=-0.0000  max=0.9841  mean=0.6783
-         [-0.0, -0.0, -0.0, -0.0, 0.4853, 0.4853]
-[KD-LP] Phase1: Core-Core Round30/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 479, GPU 6976 MB)
-  [DBG] P1-R30-backward 완료: min=-0.0001  max=0.9839  mean=0.6782
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4852, 0.4852]
-[KD-LP] Phase1: Core-Core Round31/31 (forward)
-[KD-LP]   (라벨 refresh 누계: 487, GPU 6980 MB)
-  [DBG] P1-R31-forward 완료: min=-0.0000  max=0.9836  mean=0.6779
-         [-0.0, -0.0, -0.0, -0.0, 0.4848, 0.4848]
-[KD-LP] Phase1: Core-Core Round31/31 (backward)
-[KD-LP]   (라벨 refresh 누계: 495, GPU 6976 MB)
-  [DBG] P1-R31-backward 완료: min=-0.0001  max=0.9834  mean=0.6777
-         [-0.0001, -0.0001, -0.0001, -0.0001, 0.4846, 0.4846]
 [KD-LP] Phase2: Core→Border (forward)
-[KD-LP]   (라벨 refresh 누계: 503)
-  [DBG] P2-forward 완료: min=-0.0000  max=0.9834  mean=0.0429
-         [-0.0, 0.4846, 0.4846, 0.4846, 0.0, -0.0]
+[KD-LP]   (라벨 refresh 누계: 215)
+  [DBG] P2-forward 완료: min=-0.0000  max=0.9929  mean=0.0434
+         [0.0, 0.4941, 0.4942, 0.4942, 0.0, 0.0]
 [KD-LP] Phase2: Core→Border (backward)
-[KD-LP]   (라벨 refresh 누계: 512)
-  [DBG] P2-backward 완료: min=-0.0000  max=0.9834  mean=0.0557
-         [0.0, 0.4846, 0.4846, 0.4846, 0.0, -0.0]
-[KD-LP] 라벨 lineage 표준 bootstrap 총계: 512 (+ 최종 1회)  ← 이전 구조 추정치 2880~3840회
-  [DBG] 최종 [0,800]: min=-0.1055  max=786.7164  mean=586.7230
-         [-0.1055, 387.608, 387.6053, 387.6057, 387.7127, 387.7118]
+[KD-LP]   (라벨 refresh 누계: 224)
+  [DBG] P2-backward 완료: min=-0.0000  max=0.9929  mean=0.0564
+         [-0.0, 0.4941, 0.4942, 0.4942, -0.0, 0.0]
+[KD-LP] 라벨 lineage 표준 bootstrap 총계: 224 (+ 최종 1회)  ← 이전 구조 추정치 1260~1680회
+  [DBG] 최종 [0,800]: min=-0.1082  max=794.3279  mean=594.3221
+         [-0.1082, 395.208, 395.2171, 395.2218, 395.3299, 395.3288]
   [MEM][Server] Label Propagation 완료                           delta=+12 MB  (used=6102 MB)
-[TIME] Label_Propagation: 21824.25초
+[TIME] Label_Propagation: 10416.40초
 
-[DEBUG] 최종 라벨 (Heap 순서, 앞 10개): [-1.1000e-01  3.8761e+02  3.8761e+02  3.8761e+02  3.8771e+02  3.8771e+02
-  3.8771e+02  3.8761e+02  3.8771e+02  3.8771e+02]
-  범위: min=-0.11, max=786.72  (정상: [0,800])
+[DEBUG] 최종 라벨 (Heap 순서, 앞 10개): [-1.1000e-01  3.9521e+02  3.9522e+02  3.9522e+02  3.9533e+02  3.9533e+02
+  3.9532e+02  3.9522e+02  3.9533e+02  3.9533e+02]
+  범위: min=-0.11, max=794.33  (정상: [0,800])
   ※ 클라이언트에서 inv_perm 적용 후 원래 순서 복원
 ✅ 저장 완료: debug_labelprop_final_eps0.0275_min6.csv
   [MEM][Server] send_to_server_fhe() 완료                        used=6102 MB
 
 [k_max] 70  (PCA(PC1) ε-window 상한, 클라이언트 산출)
+[n_rounds] 13  (사용자 입력)
   [MEM] decrypt                                        delta=+0 MB  (used=5224 MB)
-[FHE] [Client] 적응형 thr: thr=0.9834 | 내부최대 0.0855, 분리 1곳 | 감쇠 c≈0.9834
-[Client] 간격판정: thr=0.9833955097424478 → 클러스터 2개, 노이즈 1개
-[Client]   내부 최대 간격 0.0855 < thr 0.9833955097424478 < 사이 최소 간격 398.8525   여유 4662배
-▶ FHE: 23125.56초
+[FHE] [Client] 적응형 thr: thr=0.9929 | 내부최대 0.0942, 분리 1곳 | 감쇠 c≈0.9929
+[Client] 간격판정: thr=0.9929098685965526 → 클러스터 2개, 노이즈 1개
+[Client]   내부 최대 간격 0.0942 < thr 0.9929098685965526 < 사이 최소 간격 398.8612   여유 4236배
+▶ FHE: 11720.21초
 
 ================ 소요 시간 =====================
-Normalize         : 1287.31초
-Core              : 13.89초
-Label_Propagation : 21824.25초
-합계              : 23125.45초
+Normalize         : 1289.72초
+Core              : 13.98초
+Label_Propagation : 10416.40초
+합계              : 11720.10초
 
 ✅ 타이밍 저장: debug_timings_eps0.14_min6.txt
 ✅ 디버깅 파일: debug_fhe_vs_np_eps0.14_min6.csv
