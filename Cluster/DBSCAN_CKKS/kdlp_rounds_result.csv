@@ -1,3 +1,0 @@
-dataset,N,dim,eps,min_pts,k_max,m,n_groups,R_needed,rounds_executed,n_rounds_public,fhe_max_per_round,n_core,ARI
-tetra.arff,400,3,0.43,3,75,53,2,8,9,11,24,384,0.972509
-tetra.arff,400,3,0.819,45,133,53,3,1,2,6,36,60,1.000000

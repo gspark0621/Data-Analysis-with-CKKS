@@ -16,73 +16,42 @@ python: 3.12.10
 - pip install numpy scikit-learn pynvml 
 ### Dataset 별 DBSCAN parameter
 1. hepta(212개)
-    - max_iter:3
     - eps: 1.0
     - minpts: 4
-    - 결과: 군집 7개(ARI 100점)
+    - round: 3
+    - 결과: 군집 4개 / ARI 1.0
 2. tetra(400개)
-    - max_iter: 4
     - eps: 0.819
     - minpts: 45
-    - 결과: 군집 4개/정답: 4개(ARI 100점)
+    - round: 1
+    - 결과: 군집 4개 / ARI 1.0
 3. TwoDiamonds(800개)
-    - round: 16
     - eps: 0.14
     - minpts: 6
-    - 결과: 군집 2개/정답: 2개(ARI 99.75점)
+    - round: 13
+    - 결과: 군집 2개 / ARI 0.9975
 4. Lsun(400개)
-    - round: 16
     - eps: 0.5
     - minpts: 4
-    - 결과: 군집 3개(ARI 100점)
-5. target(770개)
-    - max_iter: ?
-    - eps: 0.25
-    - minpts: 4
-    - 결과: 군집 6개(ARI 99.96점 - 이게 맞음. noise로 분류되어야 할 점들이 ground truth에서는 각 cluster로 표현됨(eps 0.25 minpoints 3으로 하면 ARI 100 나옴))
-6. 3_spiral(312개)
-    - max_iter: ?
-    - eps: 1.4
-    - minpts: 3
-    - 결과: 군집 3개(ARI 100점)
-7. atom(800개)
-    - max_iter: ?
-    - eps: 20
-    - minpts: 4
-    - 결과: 군집 3개(ARI 100점)
+    - round: 8
+    - 결과: 군집 3개 / ARI 1.0
 8. Longsquare(900개)
-    - round: 12
     - eps: 1.15
     - minpts: 6
-    - 결과: 군집 6개/정답: 6개(ARI 95.02점)
+    - round: 11
+    - 결과: 군집 6개 / ARI 0.9502
 8. S1(5000개)
-    - round: 5
     - eps: 44000
     - minpts: 50
-    - 결과: 군집 6개/정답: 6개(ARI 95.02점)
-9. twomoons(200개)
-    - round: 29
-    - eps: 0.28
-    - minpts: 5
-    - 결과: 군집 2개/정답: 2개(ARI 100점)
-10. chainlink
-    - round: 12
-    - eps: 0.15
-    - minpts: 6
-    - 결과: 군집 2개/정답: 2개(ARI 100점)
--------------------------------------------
-1. Iris(150개)
-    - max_iter: 4
-    - eps: 0.4
-    - minpts: 6
-    - 결과: 군집 4개/정답: 3개(ARI 59.34점 - 원래 DBSCAN이 Iris같은 밀도가 다른 점에 대해서 약함)
-2. banknote_auth(1372개)
-    - max_iter: 6
-    - eps: 1.8
-    - minpts: 8
-    - 결과: 군집 10개/정답: 7개(ARI 66.06점)
-2. seeds(210개)
-    - max_iter: 3
-    - eps: 2.6
-    - minpts: 3
-    - 결과: 군집 3개/정답: 3개(ARI 80.39점)
+    - round: 2
+    - 결과: 군집 6개 / ARI 
+11. leukemia(554개)
+    - eps: 0.85
+    - minpts: 4
+    - round: 4
+    - 결과: 군집 4개 / ARI 0.9959
+11. swiss_banknote(200개)
+    - eps: 0.85
+    - minpts: 4
+    - round: 6
+    - 결과: 군집 2개 / ARI 0.9701

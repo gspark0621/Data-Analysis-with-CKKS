@@ -85,8 +85,7 @@ _MCP_LABEL_PATH = "mcp_alpha15_lp_cheb.json"   # ★ Chebyshev basis (α 고정 
 #     하는 여유. 큰 N(작은 gap)일수록 gap−noise 여유가 줄어드니, gap 이 라벨
 #     비균일 잔차(~5e-4)에 근접하면 2 로 올리고 sanity_check 로 재확인할 것.
 _LP_USE_CLEANING_DEGREES = True   # cleaning 예산 기반 degree 사용(False→논문 Table2)
-_LP_ALPHA_AUTO        = True     # False면 아래 _MCP_LABEL_PATH(α=15) 고정 사용
-_LP_ALPHA_SAFETY_BITS = 2        # ★ [2026-09 확정] s=2.
+_LP_ALPHA_AUTO        = True     # False면 아래 _MCP_LABEL_PATH(α=15) 고정  = 2        # ★ [2026-09 확정] s=2.
 #   [s 결정 — 두 개의 독립 제약 중 더 강한 쪽을 채택]
 #     (a) MCP 파괴 경계(실측 sanity_sweep): gap/δ ≥ 0.25 면 PASS.
 #         s=0 이어도 ceil 때문에 gap/δ ∈ [1,2) → 이미 4~8배 여유. → s=0 도 통과.
@@ -118,7 +117,7 @@ _LP_MINIMIZE_DEPTH_DEGREES = {
 
 def _lp_alpha(num_points: int) -> int:
     """N → LP sign 근사 최소 α. deadzone δ=2^{-α} ≤ 1/(_SCALE_INSET·N)."""
-    a = math.ceil(math.log2(_SCALE_INSET * float(num_points))) + _LP_ALPHA_SAFETY_BITS
+    a = math.ceil(math.log2(_SCALE_INSET * float(num_points)))
     a = max(_LP_ALPHA_MIN, min(_LP_ALPHA_MAX, a))
     return a
 

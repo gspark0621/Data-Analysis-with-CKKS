@@ -37,7 +37,7 @@ from sklearn.metrics import adjusted_rand_score
 from sklearn.neighbors import NearestNeighbors
 
 
-DATASET_PATH = "/home/junhyung/study/Data-Analysis-with-CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/tetra.arff"
+DATASET_PATH = "/home/junhyung/study/Data-Analysis-with-CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/swiss_banknote.arff"
 
 # ── FHE 파이프라인과 맞춰야 하는 설정 ─────────────────────────────────────────
 SLOT_COUNT        = 32768   # engine.slot_count (logN=16). 엔진 설정이 바뀌면 같이 바꿀 것 → m 이 바뀜

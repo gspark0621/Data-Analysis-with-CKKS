@@ -224,7 +224,7 @@ def prepare_client_ordering(
 
 def setup_fhe_engine(verbose: bool = False):
     """FHE 엔진 및 KeyPack 생성. production/test 공통 사용."""
-    engine     = desilofhe.Engine(use_bootstrap=True, mode="gpu")
+    engine     = desilofhe.Engine(bootstrap=True, mode="gpu")
     secret_key = engine.create_secret_key()
 
     def _create(name, fn):

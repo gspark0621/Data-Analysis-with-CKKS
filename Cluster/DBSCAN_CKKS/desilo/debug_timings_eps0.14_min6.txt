@@ -1,3 +1,3 @@
-normalize_sec: 1289.724821
-core_sec: 13.978776
-label_propagation_sec: 10416.395324
+normalize_sec: 1295.409820
+core_sec: 13.982605
+label_propagation_sec: 9008.935911

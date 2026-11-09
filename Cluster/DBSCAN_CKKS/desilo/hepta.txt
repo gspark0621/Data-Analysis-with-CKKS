@@ -10,7 +10,15 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
 
 [MCP] N=212 기반 alpha별 MCP 준비
       Core: alpha=9 -> mcp_alpha9_lp_cheb.json 존재, 스킵
-      LP:   alpha=10 -> mcp_alpha10_lp_clean1.json 존재, 스킵
+      LP:   alpha=8 (gap=1/(1.1*212)=0.004288) 생성 -> mcp_alpha8_lp_clean1.json
+
+[MCP-LP] α=8, cleaning=1회, degrees=[7, 15, 15], δ=3.9062e-03, η=6.9053e-04
+         τ 허용 한계 = 7.8125e-03
+  p_1 (deg=7) [0.003906,1.000000] err=9.5496e-01 t_i=9.5565e-01
+  p_2 (deg=15) [0.044353,1.955647] err=5.8204e-01 t_i=5.8273e-01
+  p_3 (deg=15) [0.417270,1.582730] err=6.1858e-03 t_i=6.8763e-03
+[MCP-LP] t_k=6.8763e-03 ✓ (≤7.8125e-03)
+[MCP] 저장: mcp_alpha8_lp_clean1.json
 데이터: 212개, 3차원  정규화 eps=0.127068
 ⚠️  212개 → 긴 시간 소요 예상
 
@@ -25,7 +33,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
 
 ================ Plaintext (sklearn DBSCAN) ===================
 [평문/sklearn] 클러스터 7개, 노이즈 0개, core 212개
-▶ Plaintext: 0.02초
+▶ Plaintext: 0.04초
 
 ================ FHE (kd_dense) ========================
   [MEM] Engine 초기화 전                                   used=570 MB  free=23994 MB
@@ -515,7 +523,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.12726 (+0.1%)
   [Normalize] bound=3.150000 (= 1.05·dim), scale=0.317460
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-[TIME] Normalize: 1391.31초
+[TIME] Normalize: 1392.33초
   [진단] Normalize 구간 표준 bootstrap 호출 수 = 0회  → bootstrap_key 불필요! 생성 지연 가능(13.4GB 확보)
   [MEM][Server] Normalize 완료 (adj_k_list 76개 = k=1..76)        used=6178 MB
 
@@ -530,7 +538,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
 [Server] Core: delta=1.95312e-03 (= 2^-9.00) < 0.5/N=0.00236 ✓ (여유 1.2배)
   - [Core] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
   [MEM][Server] identify_core_points_fhe() 완료                  delta=+12 MB  (used=6190 MB)
-[TIME] Core: 13.81초
+[TIME] Core: 13.80초
 [DEBUG] Core 마스크 (앞 10개): [1. 1. 1. 1. 1. 1. 1. 1. 1. 1.]
   → Core 포인트: 212/212
 ✅ 저장 완료: debug_core_eps0.1271_min4.csv
@@ -556,7 +564,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
 [KD-LP] 암호문 회계: adj_k_half_list 76 + adjm_cache 76 + packed 1 + adjm 1 + 임시 ~3 ≈ 157개
 [KD-LP] (그룹 수 1는 순차 반복 횟수이며 암호문 수가 아님)
 [KD-LP] Phase1: Core-Core Round1/3 (forward)
-  [LabelProp] N=212 → α=10 MCP 로드: mcp_alpha10_lp_clean1.json (degrees=[15, 31, 31])
+  [LabelProp] N=212 → α=8 MCP 로드: mcp_alpha8_lp_clean1.json (degrees=[7, 15, 15])
 [KD-LP]   (라벨 refresh 누계: 2, GPU 7148 MB)
   [DBG] P1-R1-forward 완료: min=0.0849  max=1.0000  mean=0.6004
          [0.0849, 0.1132, 0.1132, 0.1179, 0.132, 0.1273]
@@ -566,7 +574,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
          [0.0847, 0.113, 0.113, 0.1177, 0.1318, 0.1318]
 [KD-LP] Phase1: Core-Core Round2/3 (forward)
 [KD-LP]   (라벨 refresh 누계: 9, GPU 7152 MB)
-  [DBG] P1-R2-forward 완료: min=0.1742  max=0.9996  mean=0.6314
+  [DBG] P1-R2-forward 완료: min=0.1742  max=0.9997  mean=0.6314
          [0.1742, 0.1742, 0.1742, 0.1742, 0.1742, 0.1742]
 [KD-LP] Phase1: Core-Core Round2/3 (backward)
 [KD-LP]   (라벨 refresh 누계: 12, GPU 7152 MB)
@@ -582,17 +590,17 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
          [0.1736, 0.1736, 0.1736, 0.1736, 0.1736, 0.1736]
 [KD-LP] Phase2: Core→Border (forward)
 [KD-LP]   (라벨 refresh 누계: 21)
-  [DBG] P2-forward 완료: min=-0.0000  max=0.0000  mean=0.0000
-         [-0.0, -0.0, 0.0, -0.0, 0.0, -0.0]
+  [DBG] P2-forward 완료: min=-0.0000  max=0.0000  mean=-0.0000
+         [0.0, -0.0, -0.0, 0.0, 0.0, -0.0]
 [KD-LP] Phase2: Core→Border (backward)
 [KD-LP]   (라벨 refresh 누계: 24)
-  [DBG] P2-backward 완료: min=-0.0000  max=0.0000  mean=-0.0000
-         [-0.0, -0.0, 0.0, 0.0, -0.0, 0.0]
+  [DBG] P2-backward 완료: min=-0.0000  max=0.0000  mean=0.0000
+         [0.0, -0.0, 0.0, -0.0, -0.0, 0.0]
 [KD-LP] 라벨 lineage 표준 bootstrap 총계: 24 (+ 최종 1회)  ← 이전 구조 추정치 168~224회
-  [DBG] 최종 [0,212]: min=36.8003  max=211.7994  mean=134.2811
-         [36.8005, 36.8004, 36.8006, 36.8012, 36.8003, 36.8009]
+  [DBG] 최종 [0,212]: min=36.7999  max=211.8010  mean=134.2811
+         [36.8009, 36.8007, 36.8014, 36.801, 36.8006, 36.801]
   [MEM][Server] Label Propagation 완료                           delta=+12 MB  (used=6202 MB)
-[TIME] Label_Propagation: 2675.89초
+[TIME] Label_Propagation: 2660.02초
 
 [DEBUG] 최종 라벨 (Heap 순서, 앞 10개): [36.8 36.8 36.8 36.8 36.8 36.8 36.8 36.8 36.8 36.8]
   범위: min=36.80, max=211.80  (정상: [0,212])
@@ -603,16 +611,16 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
 [k_max] 76  (PCA(PC1) ε-window 상한, 클라이언트 산출)
 [n_rounds] 3  (사용자 입력)
   [MEM] decrypt                                        delta=+0 MB  (used=5252 MB)
-[FHE] [Client] 적응형 thr: thr=0.9991 | 내부최대 0.0004, 분리 6곳 | 감쇠 c≈0.9991
-[Client] 간격판정: thr=0.9990535612366753 → 클러스터 7개, 노이즈 0개
-[Client]   내부 최대 간격 0.0004 < thr 0.9990535612366753 < 사이 최소 간격 16.9991   여유 42967배
-▶ FHE: 4081.12초
+[FHE] [Client] 적응형 thr: thr=0.9991 | 내부최대 0.0008, 분리 6곳 | 감쇠 c≈0.9991
+[Client] 간격판정: thr=0.9990615182498576 → 클러스터 7개, 노이즈 0개
+[Client]   내부 최대 간격 0.0008 < thr 0.9990615182498576 < 사이 최소 간격 16.9985   여유 22218배
+▶ FHE: 4066.29초
 
 ================ 소요 시간 =====================
-Normalize         : 1391.31초
-Core              : 13.81초
-Label_Propagation : 2675.89초
-합계              : 4081.01초
+Normalize         : 1392.33초
+Core              : 13.80초
+Label_Propagation : 2660.02초
+합계              : 4066.16초
 
 ✅ 타이밍 저장: debug_timings_eps1.0_min4.txt
 ✅ 디버깅 파일: debug_fhe_vs_np_eps1.0_min4.csv
