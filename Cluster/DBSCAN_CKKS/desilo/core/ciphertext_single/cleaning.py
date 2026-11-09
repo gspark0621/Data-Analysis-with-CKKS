@@ -73,30 +73,13 @@ def std_boot_count(reset: bool = False) -> int:
     return n
 
 
-# ★ [2026-07] True 면 표준 bootstrap 에도 small_bootstrap_key 를 쓴다
-#   (full bootstrap_key 13.4GB 생성 불필요). 문제 시 False 로 원복.
-_USE_SMALL_BOOT_FOR_REFRESH = True
-
-
 def _refresh(engine: Engine, ct: Ciphertext, keypack: KeyPack) -> Ciphertext:
-    """일반 bootstrap으로 level 복구 (Label_Propagation._refresh와 동일)."""
+    """일반 bootstrap(lossy)으로 level 복구 (Label_Propagation._refresh와 동일)."""
     _STD_BOOT_COUNT["total"] += 1
-    # ★ [2026-07] small_bootstrap_key 로 전환.
-    #   DesiloFHE 는 engine.bootstrap(ct, relin, conj, rotation, small_bootstrap)
-    #   형태를 지원한다. 'small' 은 EvalSign 전용 키가 아니라 키 변형이므로
-    #   값 보존 bootstrap 에도 쓸 수 있다. 이로써 13.4GB 짜리 full bootstrap_key
-    #   를 아예 생성하지 않아도 된다(GPU 18.6GB → 5.2GB).
-    #   ※ sign_bootstrap 과 bootstrap 은 여전히 다른 연산이다. 라벨처럼 임의
-    #     실수를 나르는 암호문에는 반드시 bootstrap(EvalMod) 을 써야 한다.
-    if _USE_SMALL_BOOT_FOR_REFRESH:
-        return engine.bootstrap(
-            engine.intt(ct),
-            keypack.relinearization_key,
-            keypack.conjugation_key,
-            keypack.rotation_key,
-            keypack.smallbootstrap_key,
-        )
-    return engine.bootstrap(
+    # ★ [2026-11] small_bootstrap_key 폐기 → lossy_bootstrap 으로 전환.
+    #   keypack.bootstrap_key 에는 setup_fhe_engine 이 만든
+    #   engine.create_lossy_bootstrap_key(secret_key) 결과(LossyBootstrapKey)가 들어있다.
+    return engine.lossy_bootstrap(
         engine.intt(ct),
         keypack.relinearization_key,
         keypack.conjugation_key,

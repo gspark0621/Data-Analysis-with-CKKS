@@ -224,7 +224,7 @@ def prepare_client_ordering(
 
 def setup_fhe_engine(verbose: bool = False):
     """FHE 엔진 및 KeyPack 생성. production/test 공통 사용."""
-    engine     = desilofhe.Engine(bootstrap=True, mode="gpu")
+    engine     = desilofhe.Engine(use_bootstrap=True, mode="gpu",compact= True)
     secret_key = engine.create_secret_key()
 
     def _create(name, fn):
@@ -243,33 +243,16 @@ def setup_fhe_engine(verbose: bool = False):
     rk  = _create("rotation_key",        engine.create_rotation_key)
     rlk = _create("relinearization_key", engine.create_relinearization_key)
     ck  = _create("conjugation_key",     engine.create_conjugation_key)
-    sbk = _create("smallbootstrap_key",  engine.create_small_bootstrap_key)
-
-    # ★ [2026-07] full bootstrap_key 생성 생략 (13.4GB → 0).
-    #   DesiloFHE 는 engine.bootstrap(ct, relin, conj, rotation, small_bootstrap)
-    #   형태를 지원하므로, 값 보존 bootstrap(EvalMod) 도 small 키로 수행 가능하다.
-    #   'small' 은 EvalSign 전용 키가 아니라 **키 변형**이다.
-    #   (sign_bootstrap 과 bootstrap 은 여전히 다른 연산 — 라벨처럼 임의 실수를
-    #    나르는 암호문에는 반드시 bootstrap 을 써야 한다. 바뀐 건 키뿐이다.)
-    #   실사용처: Label_Propagation._refresh, cleaning._refresh — 둘 다
-    #   _USE_SMALL_BOOT_FOR_REFRESH=True 로 small 키 경로를 쓴다.
-    #   나머지 3곳(Core.py:72, Normalize.py:68, chebyshev_eval.py:157)은
-    #   죽은 할당/죽은 분기라 None 이어도 무해하다.
-    #   ⇒ GPU 사용량 18.6GB → 약 5.2GB. Step 1(Normalize) 여유 6GB → 19GB.
-    #   문제 시 _CREATE_FULL_BOOTSTRAP_KEY=True + 각 파일의
-    #   _USE_SMALL_BOOT_FOR_REFRESH=False 로 원복.
-    _CREATE_FULL_BOOTSTRAP_KEY = False
-    if _CREATE_FULL_BOOTSTRAP_KEY:
-        bk = _create("bootstrap_key",    engine.create_bootstrap_key)
-    else:
-        bk = None
-        if verbose:
-            print(f"  [MEM] bootstrap_key                             "
-                  f"생략 (small 키로 대체)  (used={_gpu_used_mb():.0f} MB)")
+    # ★ [2026-11] small_bootstrap_key 폐기 → lossy_bootstrap_key 하나로 통일.
+    #   sign_bootstrap : engine.sign_bootstrap(ct, relin, conj, lossy_bootstrap_key)
+    #   일반 bootstrap : engine.lossy_bootstrap(ct, relin, conj, lossy_bootstrap_key)
+    #   KeyPack(util/keypack.py, 다른 경로와 공유)의 필드명은 그대로 두고
+    #   bootstrap_key 필드에 LossyBootstrapKey 를 담는다.
+    bk = engine.create_lossy_bootstrap_key(secret_key, size="medium")
 
     keypack = KeyPack(
         public_key=pk, rotation_key=rk, relinearization_key=rlk,
-        conjugation_key=ck, bootstrap_key=bk, smallbootstrap_key=sbk,
+        conjugation_key=ck, bootstrap_key=bk, smallbootstrap_key=None,
     )
 
     if verbose:

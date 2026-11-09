@@ -82,7 +82,7 @@ def eval_mcp_full_chebyshev(
     """
     relin_key = keypack.relinearization_key
     conj_key  = keypack.conjugation_key
-    boot_key  = keypack.bootstrap_key
+    boot_key  = keypack.bootstrap_key   # ★ [2026-11] LossyBootstrapKey (sign/lossy 공용)
 
     current = ct
 
@@ -146,15 +146,9 @@ def eval_mcp_full_chebyshev(
         #
         #   _INTER_COMPONENT_BOOTSTRAP = "standard"로 되돌리기 가능.
         if _INTER_COMPONENT_BOOTSTRAP == "sign":
-            current = engine.sign_bootstrap(
-                current,
-                relin_key,
-                conj_key,
-                keypack.rotation_key,
-                keypack.smallbootstrap_key,
-            )
+            current = engine.sign_bootstrap(current, relin_key, conj_key, boot_key)
         else:
-            current = engine.bootstrap(current, relin_key, conj_key, boot_key)
+            current = engine.lossy_bootstrap(current, relin_key, conj_key, boot_key)
 
         if debug:
             try:
@@ -233,8 +227,7 @@ def sanity_check_chebyshev(
             engine.intt(eval_ct),
             keypack.relinearization_key,
             keypack.conjugation_key,
-            keypack.rotation_key,
-            keypack.smallbootstrap_key,
+            keypack.bootstrap_key,
         )
         sgn_val    = float(np.real(engine.decrypt(sgn_ct, secret_key)[0]))
         final_diff = abs(ideal_sign - sgn_val)
