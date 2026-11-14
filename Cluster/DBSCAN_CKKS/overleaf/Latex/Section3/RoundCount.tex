@@ -1,0 +1,105 @@
+% ==================================================================
+%  RoundCount.tex  --  part of Section 3.1 (client-side preprocessing)
+%  Kept in its own file because the rule is still being refined;
+%  the rest of the paper refers to it only through \ref{sec:rounds}.
+% ==================================================================
+\subsubsection{Round Count}
+\label{sec:rounds}
+
+The last parameter is $R$, the number of rounds in which the server
+spreads labels among the core points (Section~\ref{sec:lp}). Label
+propagation has two parts, following the definition of DBSCAN. A cluster
+grows only through its core points: a chain of neighboring core points
+carries the cluster from one core point to the next, while a border
+point joins the cluster of a core neighbor but extends it no further. If
+a border point passed its label on, two clusters that share a border
+point would merge, which DBSCAN does not allow. The server therefore
+first spreads labels among the core points, round after round, and then
+gives every non-core point the label of its core neighbors in a single
+pass. Only the first part depends on how far a label has to travel. Each
+round moves a label at least one hop along a chain of neighboring core
+points, so $R$ rounds suffice once $R$ reaches the number of hops between
+the two most distant core points of a cluster.
+
+The client chooses $R$. Prior clustering over encrypted or secret-shared
+data likewise leaves the number of iterations to the data owner. Cheon et
+al.~\cite{cheon2019towards} choose the iteration counts separately for
+each dataset, Yang et al.~\cite{yang2024optimized} take the number of
+K-means iterations as a constant supplied by the data owner, and Bozdemir
+et al.~\cite{bozdemir2021privacy} fix the number of expansion iterations
+to four, which sufficed on their test data. None of them, however, gives
+the client a way to choose that value in advance; Bozdemir et al.\ can
+instead test for convergence during the run, at the cost of one bit of
+leakage per test. The exact number of hops cannot be computed without the
+neighbor relation and the core points, that is, without running DBSCAN on
+the plaintext, which would leave nothing for the server to do. We
+therefore give the client a naive estimate from a coarse grid.
+It uses only cell indices and cell counts, never compares a distance with
+$\varepsilon_n$, and gives the client a starting value when it chooses
+$R$.
+
+Let $s = \varepsilon_n / 2$ be the side of the grid, and assign each
+point $\mathbf{x}$ to the cell $\lfloor \mathbf{x} / s \rfloor$,
+coordinate by coordinate. Two points at distance at most
+$\varepsilon_n = 2s$ differ by at most $2s$ along every axis, so their
+cell indices differ by at most two along every axis. We call two cells
+\emph{adjacent} when their indices differ by at most two along every
+axis. The $5^d - 1$ cells adjacent to a cell then contain every possible
+neighbor of its points. The client proceeds as follows.
+
+\begin{enumerate}
+\item \emph{Filter.} Drop every occupied cell whose own points and those
+  of its adjacent cells number fewer than $\mathit{MinPts}$. Such a cell
+  cannot contain a core point, since that count is an upper bound on the
+  size of any $\varepsilon_n$-neighborhood inside it.
+\item \emph{Group.} Connect every two remaining cells that are adjacent,
+  and take the connected components as groups. The core points of every
+  cluster lie inside a single group: two neighboring core points fall in
+  adjacent cells, neither of which the filter drops, so a chain of
+  neighboring core points never leaves its group.
+\item \emph{Measure.} Give each edge of a group the distance between the
+  centers of its two cells, and compute the geodesic diameter
+  $\Lambda_g$, the longest shortest path inside the group.
+\item \emph{Round up.} Take
+  \begin{align*}
+    R &= \max\Bigl(1, \; \max_{g}
+      \Bigl\lceil \frac{\Lambda_g + s\sqrt{d}}{\varepsilon_n}
+      \Bigr\rceil \Bigr) \\
+      &= \max\Bigl(1, \; \max_{g}
+      \Bigl\lceil \frac{\Lambda_g}{\varepsilon_n}
+        + \frac{\sqrt{d}}{2} \Bigr\rceil \Bigr),
+  \end{align*}
+  where the term $s\sqrt{d}$ adds half a cell diagonal at each end of
+  the path, because a point sits anywhere in its cell rather than at the
+  center.
+\end{enumerate}
+
+The rule measures the length of the path a label has to travel, not the
+straight-line extent of a cluster. The two differ on curved clusters
+such as rings and spirals, where two core points can be close in a
+straight line but far apart along the cluster. The rule has the
+following property. For two core points $p$ and $q$ of a cluster in
+group $g$, let $\mathrm{geo}(p,q)$ be the length of the shortest path
+that leads from $p$ to the center of its cell, through the cell graph of
+$g$ to the center of the cell of $q$, and on to $q$. The two end
+segments are at most half a cell diagonal, $s\sqrt{d}/2$, each, and the
+middle part is at most $\Lambda_g$, so
+\[
+  \Bigl\lceil \frac{\mathrm{geo}(p,q)}{\varepsilon_n} \Bigr\rceil
+  \;\le\; \Bigl\lceil \frac{\Lambda_g + s\sqrt{d}}{\varepsilon_n}
+  \Bigr\rceil \;\le\; R .
+\]
+$R$ is thus at least the number of steps of length $\varepsilon_n$ that
+join any two core points of a cluster along a path through its group,
+and $R$ rounds carry a label across every cluster whenever each round
+moves it at least $\varepsilon_n$ along such a path.
+
+A cell side of $\varepsilon_n/2$, rather than the
+$\varepsilon_n/\sqrt{2}$ used in~\cite{fu2024ppa}, keeps the grid
+binary-nested inside the $\varepsilon_n$ grid and makes adjacency a
+plain two-cell offset along each axis. Let $C \le n$ be the number of
+occupied cells and $T \le C$ the number of single-source shortest-path
+runs used to find the diameters $\Lambda_g$. For a fixed dimension $d$,
+so that every cell has the constant number $5^d - 1$ of adjacent cells,
+the estimate takes $O(n + T\,C \log C)$ time, which is
+$O(n + C^2 \log C)$ in the worst case.

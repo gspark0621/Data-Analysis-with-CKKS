@@ -1,0 +1,133 @@
+% ==================================================================
+%  ClientPreprocessing.tex  --  Section 3.1 "Client-side Preprocessing"
+%  Loaded from main.tex.  Loads RoundCount.tex.
+% ==================================================================
+
+\subsection{Client-side Preprocessing}
+\label{sec:client}
+
+\subsubsection{Normalization}
+The client first fixes one scale for the whole dataset. Let $g_{\min}$
+and $g_{\max}$ be the smallest and the largest coordinate over all points
+and all dimensions, and let
+\[
+  \sigma = g_{\max} - g_{\min} .
+\]
+The client maps every coordinate $x$ of every point to
+\[
+  x' = \frac{x - g_{\min}}{\sigma} \in [0,1],
+\]
+and the radius to
+\[
+  \varepsilon_n = \frac{\varepsilon}{\sigma} .
+\]
+Every dimension is scaled uniformly by the same $\sigma$, so every
+pairwise distance shrinks by the same factor as the radius,
+$\|\mathbf{x}' - \mathbf{y}'\| = \|\mathbf{x} - \mathbf{y}\| / \sigma$.
+The values become smaller, but the clustering does not change:
+$\|\mathbf{x} - \mathbf{y}\| \le \varepsilon$ if and only if
+$\|\mathbf{x}' - \mathbf{y}'\| \le \varepsilon_n$. Every coordinate now
+lies in $[0,1]$ and every squared distance in $[0,d]$, which gives the
+bound on the comparison inputs required at the beginning of
+Section~\ref{sec:method}.
+
+\subsubsection{Ordering and the Offset Bound}
+Deciding for every pair of points whether they are neighbors takes
+$n(n-1)/2$ comparisons, and comparisons dominate the cost of the whole
+protocol. Our goal is therefore to reduce the number of comparisons
+itself.
+
+Two choices achieve this. First, the server compares all pairs of slots
+that are $k$ apart at once: for an offset $k$, a single evaluation
+decides the $n$ pairs $(i, i+k)$ (Section~\ref{sec:neighbor}). Second,
+the client orders the points so that neighbors lie in nearby slots, and
+the server compares only the offsets at which neighbors can occur rather
+than all of them.
+
+The client obtains this order by PCA. A CKKS ciphertext holds the points
+in a single row of slots, so the client arranges them along one
+dimension: it projects every point onto the first principal component
+$\mathbf{v}$ of the normalized data, $\|\mathbf{v}\| = 1$, sorts the
+points by their projections $z_0 \le z_1 \le \dots \le z_{n-1}$, and
+places the $i$-th point of this order in slot~$i$. The sorted vector keeps
+neighbors close. The projection is $1$-Lipschitz by the Cauchy--Schwarz
+inequality, so two points within distance $\varepsilon_n$ of each other
+in $\mathbb{R}^d$ also lie within $\varepsilon_n$ of each other on the
+sorted vector:
+\[
+  |z(\mathbf{x}) - z(\mathbf{y})|
+  = |(\mathbf{x} - \mathbf{y})^{\top}\mathbf{v}|
+  \le \|\mathbf{x} - \mathbf{y}\| \le \varepsilon_n ,
+\]
+where $z(\mathbf{x})$ denotes the projection of $\mathbf{x}$.
+
+Consider the point in slot~$i$. Every neighbor in a later slot $j > i$
+satisfies $z_j - z_i \le \varepsilon_n$ by this inequality, and
+since the values are sorted, these slots form one run
+$i+1, \dots, i+w_i$, where
+\[
+  w_i = \bigl| \{\, j > i : z_j - z_i \le \varepsilon_n \,\} \bigr| .
+\]
+Because the $z_i$ are sorted, the end of this run only moves forward as
+$i$ grows, and all $w_i$ are found in a single pass in $O(n)$ time.
+
+The server compares slots cyclically, modulo $n$
+(Section~\ref{sec:notation}). Two slots that are more than $n/2$ apart
+in one direction are therefore less than $n/2$ apart in the other, so
+offsets up to $\lfloor n/2 \rfloor$, taken in both directions, already
+reach every pair. The client records
+\[
+  k_{\max} = \min\Bigl( \bigl\lfloor n/2 \bigr\rfloor, \;
+    \max_{i} w_i \Bigr).
+\]
+
+Comparing each slot only with the slots up to $k_{\max}$ away yields the
+same clustering as comparing all $n(n-1)/2$ pairs. A pair that these
+offsets leave out lies more than $\varepsilon_n$ apart on the sorted
+vector, and hence, by the inequality above, more than $\varepsilon_n$
+apart in $\mathbb{R}^d$. It is not a neighbor pair, so comparing it could
+only produce a $0$ in an adjacency vector and would add nothing to any
+neighbor count. Leaving it out changes the cost, not the result.
+
+The bound $k_{\max}$ is the same for every point, the worst case over all
+points, although a point in slot~$i$ needs only $w_i$ offsets. If the
+server compared each point only with its own $w_i$ slots, the amount of
+work spent on a point would follow the local density, and the server
+could infer from it how the data are distributed, information that the
+client never meant to reveal. A common bound also suits the slot-wise
+evaluation, in which one operation acts on every point at once.
+
+\input{\dirIII/RoundCount}
+
+\subsubsection{Encryption}
+The client encrypts one ciphertext per dimension: for
+$j = 1, \dots, d$, the vector whose slot~$i$ is the $j$-th coordinate of
+the point in slot~$i$, giving $\mathsf{ct}_1, \dots, \mathsf{ct}_d$. It
+sends these to the server together with $\mathsf{pk}$, $\mathsf{evk}$,
+and the public parameters $n$, $d$, $\varepsilon_n$, $\mathit{MinPts}$,
+$k_{\max}$ and $R$, and keeps $\mathsf{sk}$ and the permutation that
+produced the order. This is the only message the client sends.
+
+% [2026-11-11] Summary removed to meet the 13-page limit; original text:
+% \subsubsection{Summary of the Preprocessing}
+% The client prepares its data with plaintext work only, in three steps,
+% and then encrypts it.
+% \begin{enumerate}
+% \item \emph{Normalization} maps the data into $[0,1]^d$ so that every
+%   comparison input on the server can be scaled into $[-1,1]$ by a public
+%   constant. It outputs the normalized points and $\varepsilon_n$, in
+%   $O(nd)$ time.
+% \item \emph{Ordering} sorts the points along the first principal
+%   component so that the server compares $k_{\max}$ offsets instead of all
+%   pairs. It outputs the slot order and $k_{\max}$, in $O(nd^2 + d^3)$ time
+%   for the principal component, $O(n \log n)$ for the sort and $O(n)$ for
+%   $k_{\max}$.
+% \item \emph{Round count} fixes how many rounds of label propagation the
+%   server runs. It outputs $R$, in $O(n + T\,C \log C)$ time when the grid
+%   estimate is used.
+% \end{enumerate}
+% \emph{Encryption} finally produces the $d$ ciphertexts
+% $\mathsf{ct}_1, \dots, \mathsf{ct}_d$. For a fixed dimension $d$, the
+% preprocessing therefore takes $O(n \log n + T\,C \log C)$ time, which is
+% $O(n \log n + C^2 \log C)$ in the worst case; a client that sets $R$
+% directly saves the grid term.

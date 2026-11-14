@@ -1,0 +1,327 @@
+% ==================================================================
+%  Implementation.tex  --  Section 4 (implementation and evaluation)
+%  Cross-references used here:
+%    \label{sec:dbscan} \label{sec:post}   (Sections 2-3)
+%  Table tab:results: runs of 2026-11-13/14 with alpha_l = ceil(log2(1.1 n))
+%  (logs desilo/{hepta,tetra,lsun,twodiamonds,longsquare,s1,wbc,swiss}.txt,
+%  debug_fhe_vs_np_*.csv).  Time = Normalize + Core + Label_Propagation
+%  ("합계") as printed by the test script, in seconds: hepta 609.06,
+%  tetra 965.93, lsun 1258.26, twodiamonds 1586.09, longsquare 1865.99,
+%  s1 8180.36, banknote 808.54, wbc 3791.58 (server only).
+% ==================================================================
+\section{Implementation and Evaluation}
+\label{sec:eval}
+
+\subsection{Setup}
+\label{sec:setup}
+
+We implemented the protocol in Python with DesiloFHE~1.9.0, with the
+server side running on an NVIDIA GeForce RTX 4090 GPU with 24\,GB of
+memory, and evaluated it on the datasets of Table~\ref{tab:setup}: six
+synthetic benchmarks and two real datasets from the application areas of
+Section~\ref{sec:intro}, outlier detection on financial data and the
+analysis of healthcare data.
+
+\begin{table}[t]
+\centering
+\caption{Datasets.}
+\label{tab:setup}
+\renewcommand{\arraystretch}{1.1}
+\begin{tabular}{@{}l@{\hspace{1.5em}}r@{\hspace{1.5em}}r@{\hspace{2em}}p{0.55\linewidth}@{}}
+\toprule
+Dataset & $n$ & $d$ & Purpose \tabularnewline
+\midrule
+hepta        &  212 & 3 & \raggedright baseline: well-separated convex
+  clusters \tabularnewline
+tetra        &  400 & 3 & \raggedright few core points: most points are
+  border points \tabularnewline
+lsun         &  400 & 2 & \raggedright two bars forming an L and a round
+  cluster, with unequal spreads and gaps \tabularnewline
+twodiamonds  &  800 & 2 & \raggedright two touching clusters, separated
+  only by density \tabularnewline
+longsquare   &  900 & 2 & \raggedright clusters of mixed shapes: squares
+  and long, thin bars \tabularnewline
+s1           & 5000 & 2 & \raggedright largest $n$; 15 Gaussian clusters,
+  some of them nearly touching \tabularnewline
+\midrule
+banknote     &  200 & 6 & \raggedright finance: genuine and counterfeit notes
+  \tabularnewline
+wbc          &  683 & 9 & \raggedright healthcare: benign and malignant tumors
+  \tabularnewline
+\bottomrule
+\end{tabular}
+\end{table}
+
+banknote~\cite{flury1988multivariate} holds six measurements, in
+millimeters, of $100$ genuine and $100$ counterfeit Swiss banknotes. wbc
+is the Wisconsin Breast Cancer (Original)
+dataset~\cite{wolberg1990breast}, in which nine cell features, each
+graded from $1$ to $10$, describe benign and malignant breast tumors. We
+remove its $16$ samples with a missing value, which leaves $683$.
+
+For banknote, the client first subtracts from each feature its minimum.
+The raw values range from $7.2$ to $216.3$ although no feature varies by
+more than $5.5$, so the single scale $\sigma$ of
+Section~\ref{sec:client} would be set by this common offset and
+$\varepsilon_n^2$ would fall below the margin $\mu$ of
+Eq.~\eqref{eq:theta}. A translation leaves every pairwise distance, and
+hence the clustering, unchanged.
+% Input file: dataset/Other_cluster/swiss_banknote_shifted.arff (rows of
+%   the R package mclust, data(banknote), minus the column minima 213.8,
+%   129, 129, 7.2, 7.7, 137.8).
+% wbc: dataset/Other_cluster/wbc_original.arff, UCI id 15, 699 rows; the
+%   16 removed rows have '?' in Bare Nuclei; ID column removed; no scaling.
+
+\subsection{Clustering Accuracy}
+\label{sec:accuracy}
+
+On all eight datasets the encrypted run returns the same clustering as
+plaintext DBSCAN at the same $\varepsilon$ and $\mathit{MinPts}$ that
+assigns border points by the maximum rule of Section~\ref{sec:dbscan}:
+the same clusters and the same noise points.
+Table~\ref{tab:results} reports the server time and the adjusted Rand
+index (ARI) of the encrypted result, with noise as one group, against the
+ground truth and against plaintext DBSCAN.
+% Plaintext reference: sklearn.cluster.DBSCAN (scikit-learn 1.9.1),
+%   DBSCAN(eps = eps_n, min_samples = MinPts) on the normalized points
+%   (test_Server_main_call_dataset.py, Step 5).  min_samples counts the
+%   point itself and the radius is closed (<= eps), as in Section 2.
+%   Its labels equal those on the raw data (uniform scaling).
+
+The neighbor counts behave as Eq.~\eqref{eq:sandwich} predicts. In every
+run, the encrypted count of each point lies between the plaintext counts
+at $\varepsilon_n$ and $\varepsilon_{\mathrm{hi}}$, and the core points
+coincide with those of plaintext DBSCAN except for one point of
+longsquare. That point has $\mathit{MinPts} - 1$ neighbors within
+$\varepsilon_n$ and one more at a distance between $\varepsilon_n$ and
+$\varepsilon_{\mathrm{hi}}$, so the encrypted run counts
+$\mathit{MinPts}$ neighbors and makes it a core point, as
+Theorem~\ref{thm:sandwich} allows. The point is a border point of the
+same cluster in plaintext DBSCAN, so the clustering does not change.
+
+\begin{table}[t]
+\centering
+\caption{Server running time and ARI of the encrypted result against the
+  ground-truth labels and against plaintext DBSCAN.}
+\label{tab:results}
+\begin{tabular}{@{}lrrr@{}}
+\toprule
+ & & \multicolumn{2}{c@{}}{ARI (\%)} \\
+\cmidrule(l){3-4}
+Dataset & Time (min) & vs.\ ground truth & vs.\ plaintext \\
+\midrule
+hepta        & $ 10.2$ & $100.00$ & $100.00$ \\
+tetra        & $ 16.1$ & $100.00$ & $100.00$ \\
+lsun         & $ 21.0$ & $100.00$ & $100.00$ \\
+twodiamonds  & $ 26.4$ & $ 99.75$ & $100.00$ \\
+longsquare   & $ 31.1$ & $ 95.02$ & $100.00$ \\
+s1           & $136.3$ & $ 97.89$ & $ 99.96$ \\
+\midrule
+banknote     & $ 13.5$ & $ 94.06$ & $100.00$ \\
+wbc          & $ 63.2$ & $ 87.98$ & $100.00$ \\
+\bottomrule
+\end{tabular}
+
+\vspace{2pt}
+\parbox{\linewidth}{\footnotesize Plaintext: DBSCAN of
+  scikit-learn~\cite{pedregosa2011scikit}, same $\varepsilon_n$ and
+  $\mathit{MinPts}$.}
+\end{table}
+
+Where the ARI against the ground truth falls below $100\%$, the cause
+lies in DBSCAN itself and not in the encryption. DBSCAN reports some
+points as noise that the ground truth assigns to a cluster, $1$ point of
+twodiamonds, $35$ of longsquare and $85$ of s1, and on s1 it places two
+border points in the cluster of a neighboring class; plaintext DBSCAN
+with the maximum rule gives exactly the same result.
+Against plaintext DBSCAN, the ARI is $100\%$ except on s1. The noise points
+coincide on all eight datasets, but scikit-learn gives a border point to
+the cluster that reaches it first (Section~\ref{sec:dbscan}), and of the
+seven border points of s1 that neighbor two clusters, it places one
+differently from the maximum rule. The encrypted run puts it in its true
+class and scores $97.89\%$ against the ground truth, scikit-learn
+$97.84\%$.
+
+\paragraph{\emph{Real data}}
+The two real datasets show the two properties for which
+Section~\ref{sec:intro} prefers DBSCAN to K-means. On banknote, DBSCAN
+finds the two kinds of notes without being given the number of clusters:
+one cluster holds $97$ genuine notes, the other $98$ counterfeit notes
+and one genuine note, and four notes, two of each kind, are reported as
+noise. On wbc, the noise label itself is the result. DBSCAN finds a
+single cluster, which holds $431$ of the $444$ benign samples, and
+reports $231$ of the $239$ malignant samples as noise, that is, as
+outliers of the benign population. In both cases the server works on
+ciphertexts alone, so such financial or medical records can be analyzed
+without being revealed.
+
+\paragraph{\emph{Running time}}
+Every run except s1 and wbc finishes in about half an hour or less, and
+s1, with $5000$ points, in $2.3$ hours. The time follows the number of
+evaluations of $\mathsf{Sgn}$ rather than $n$ alone. Neighbor Check
+evaluates $\mathsf{Sgn}$ once per offset, $k_{\max}$ times in total, and
+takes between $14\%$ and $43\%$ of the time. Label Propagation calls
+$\mathsf{Max}$ at most $2g \lceil \log_2(m+1) \rceil$ times
+(Section~\ref{sec:lp}) in each of the $R$ rounds and in the final pass
+to the non-core points, and takes almost all of the rest.
+% Timing split from the logs (Normalize / Core / Label_Propagation, s):
+%   hepta 229.37/1.85/377.84, tetra 414.37/1.88/549.68,
+%   lsun 313.82/1.89/942.55, twodiamonds 215.70/1.96/1368.43,
+%   longsquare 273.90/1.94/1590.15, s1 1868.97/2.44/6308.95,
+%   banknote 241.83/1.83/564.88, wbc 1346.76/1.93/2442.89.
+% Real data, confusion of the encrypted run (2026-11-13 logs):
+%   banknote: cluster A 97 genuine; cluster B 98 counterfeit + 1 genuine;
+%   noise 2 genuine + 2 counterfeit.  wbc: cluster 431 benign + 8
+%   malignant; noise 13 benign + 231 malignant.
+% Checked on the 2026-11-13/14 runs (all eight logs):
+%   the partition equals plaintext max-rule DBSCAN (labels = largest core
+%   slot + 1) on all eight datasets, noise sets equal scikit-learn's, and
+%   the core sets equal plaintext DBSCAN's except longsquare index 399.
+%   banknote: 40 points count one neighbor more than plaintext (20 pairs
+%   at a distance between eps and eps_hi); wbc: all counts equal (no pair
+%   between eps and eps_hi).  On s1,
+%   scikit-learn assigns one of the seven ambiguous border points
+%   differently (index 1660; the encrypted run puts it in its true class),
+%   hence ARI(FHE, scikit-learn) = 99.96.  On twodiamonds one border point
+%   (index 120) neighbors both clusters; both assign it to its true class.
+%   s1 misassigned border points of the encrypted run: 208 (ambiguous,
+%   true 13 -> cluster of class 14) and 3561 (core neighbors only in the
+%   cluster of class 8, true 9).
+%   Sandwich of Eq. (sandwich) holds for every point with eps_hi from the
+%   logged alpha_d; extra core point on longsquare: index 399.
+
+
+\subsection{Comparison with Prior Work}
+\label{sec:compare}
+
+Table~\ref{tab:compare} places our results next to those reported for the
+schemes of Section~\ref{sec:related} on the datasets they share with ours.
+The values of the other schemes are taken from the original papers, each
+obtained with the parameters chosen there, so the table compares clustering
+quality against the ground truth rather than identical runs. The HE schemes
+for mean-shift~\cite{cheon2019towards} and K-means~\cite{yang2024optimized}
+report accuracy, and the MPC-based DBSCAN
+schemes~\cite{bozdemir2021privacy,fu2024ppa} report the ARI; we give our
+result in the same metric. For our scheme, accuracy is the fraction of
+points whose cluster matches the ground-truth class under the best
+one-to-one matching, with noise counted as an error.
+
+\begin{table}[t]
+\centering
+\caption{Comparison with prior privacy-preserving clustering on shared
+  datasets. Values of the other schemes are as reported in the original
+  papers, each obtained with the parameters chosen there; a dash marks a
+  value that is not reported. On lsun, the mean-shift scheme returns four
+  clusters instead of three; their higher silhouette coefficient reflects
+  more compact clusters rather than agreement with the ground truth, which
+  plaintext mean-shift does not recover either
+  (Section~\ref{sec:compare}).}
+\label{tab:compare}
+\begin{tabular}{lccc}
+\toprule
+\multicolumn{4}{l}{(a) Accuracy (\%), HE-based clustering} \\
+\midrule
+Dataset & Cheon et al.~\cite{cheon2019towards}
+  & Yang et al.~\cite{yang2024optimized} & Ours \\
+\midrule
+hepta        & 100  & 80.2  & 100 \\
+lsun         & --   & 71.2  & 100 \\
+tetra        & 100  & 96.8  & 100 \\
+twodiamonds  & 99.0 & 100   & 99.9 \\
+\midrule
+\multicolumn{4}{l}{(b) ARI (\%), MPC-based DBSCAN} \\
+\midrule
+Dataset & Bozdemir et al.~\cite{bozdemir2021privacy}
+  & Fu et al.~\cite{fu2024ppa} & Ours \\
+\midrule
+lsun         & 100  & 100   & 100 \\
+s1           & 97.6 & 97.8  & 97.9 \\
+longsquare   & --   & 93.4  & 95.0 \\
+\bottomrule
+\end{tabular}
+\end{table}
+% Sources of the reported values:
+%   Cheon et al.  ePrint 2019/465, Table 2 (hepta 212/212, tetra 400/400,
+%                 twodiamonds 792/800; lsun not reported, 4 clusters found).
+%   Yang et al.   ePrint 2024/1141, Table 2, column "Ours" (encrypted).
+%   Bozdemir et al. ASIACCS'21, Table 1 (lsun 1.0, s1 0.9757).
+%   Fu et al.     TDSC'24, Table VIII (lsun, longsquare, rho = 0.1) and
+%                 Table XI (s1, rho = 0.1).
+%   Ours (2026-11 runs): accuracy hepta 100, lsun 100, tetra 100,
+%   twodiamonds 99.875 (799/800); ARI lsun 100, s1 97.886, longsquare 95.020.
+
+% Table 5 (Section 5, tab:leakage). Defined here, not in SecurityAnalysis.tex:
+% a two-column float can only appear on a page after the one where it is
+% defined, so defining it here places it on the page where Section 5 starts.
+\begin{table*}[t]
+\centering
+\caption{Values the server receives in the clear.}
+\label{tab:leakage}
+\small
+\renewcommand{\arraystretch}{1.15}
+% \raggedright in each p-cell avoids stretched spacing in the narrow
+% columns; rows therefore end with \tabularnewline instead of \\.
+\begin{tabular}{@{}l p{0.16\linewidth} p{0.25\linewidth} p{0.35\linewidth}@{}}
+\toprule
+Value & Description & Role at the server & What it reveals about the data
+  \tabularnewline
+\midrule
+$n$ & \raggedright number of points
+    & \raggedright slot layout, loop bounds, precisions $\alpha$
+    & \raggedright size of the dataset \tabularnewline
+$d$ & \raggedright dimension
+    & \raggedright number of input ciphertexts
+    & \raggedright dimension of the dataset \tabularnewline
+$\epsn$, $\MinPts$
+    & \raggedright DBSCAN parameters
+    & \raggedright constants in Eqs.~(\ref{eq:cmpinput}) and~(\ref{eq:coreinput})
+    & \raggedright $\varepsilon$ relative to the normalization scale;
+      density threshold \tabularnewline
+$\kmax$
+    & \raggedright operation range
+    & \raggedright offsets in Algorithms~\ref{alg:neighbor}--\ref{alg:lp}
+    & \raggedright one less than the largest number of points in a window
+      of width $\epsn$ along the first principal component, capped at
+      $\lfloor n/2 \rfloor$ \tabularnewline
+$R$ & \raggedright number of rounds
+    & \raggedright rounds in Algorithm~\ref{alg:lp}
+    & \raggedright a value chosen by the client; with the grid estimate,
+      the largest geodesic diameter of a cell group in units of $\epsn$
+      \tabularnewline
+\bottomrule
+\end{tabular}
+\end{table*}
+
+Against the HE schemes, the differences on hepta and lsun stem from the
+algorithms rather than from the encryption. There only K-means falls
+behind, and Yang et al.~\cite{yang2024optimized} obtain nearly the same
+accuracy with plaintext K-means on these datasets. Mean-shift reaches
+$100\%$ on hepta; lsun is discussed below. Against the MPC-based schemes, our
+ARI is on par. Bozdemir et al.~\cite{bozdemir2021privacy} evaluate exact
+DBSCAN, so the small difference on s1 reflects a different choice of
+parameters rather than a loss of accuracy on either side. PPA-DBSCAN
+returns an approximation of DBSCAN: on longsquare its ARI lies below the
+94.9 that Fu et al.~\cite{fu2024ppa} report for exact DBSCAN, whereas our
+scheme returns the clustering of plaintext DBSCAN.
+
+On lsun, Cheon et al.~\cite{cheon2019towards} obtain four clusters
+instead of the three of the ground truth and therefore report no
+accuracy. They note instead that their four clusters have a higher
+silhouette coefficient than the ground-truth labels, $0.577$ against
+$0.443$. The silhouette coefficient, however, measures how compact and
+well separated the clusters are, not whether they match the ground truth.
+lsun consists of two elongated bars that form an L and a round cluster,
+and dividing an elongated cluster into more compact parts raises the
+coefficient even as the partition moves away from the ground truth. The
+four clusters are a property of mean-shift itself rather than of its
+encrypted evaluation: mean-shift assigns each point to a mode of the
+density, and a bar of nearly uniform density need not have a single mode.
+In our plaintext runs of the mean-shift implementation of
+scikit-learn~\cite{pedregosa2011scikit}, no bandwidth between $0.2$ and
+$3.0$ recovered the ground truth, the best ARI being $0.65$. DBSCAN
+instead links points through chains of neighbors, so it follows each bar
+along its length, and both plaintext DBSCAN and our encrypted run recover
+the three clusters of lsun.
+% Plaintext mean-shift check (2026-11-11): sklearn.cluster.MeanShift on
+%   dataset/Other_cluster/lsun.arff, bandwidth 0.20:0.05:3.00; best ARI
+%   0.648 (bw 1.00-1.10, 5 clusters); ARI = 1 never reached.

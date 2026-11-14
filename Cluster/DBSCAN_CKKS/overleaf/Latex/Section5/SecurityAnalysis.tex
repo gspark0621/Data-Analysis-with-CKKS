@@ -1,0 +1,106 @@
+% =====================================================================
+% Section 5: Security Analysis
+%   Labels: sec:security, sec:leakage, eq:message, tab:leakage
+%   Bib keys used: yang2024optimized, fu2024ppa
+% =====================================================================
+
+% Fallback macros: \providecommand does nothing if main.tex already
+% defines these names, so existing notation takes precedence.
+\providecommand{\MinPts}{\mathit{MinPts}}
+\providecommand{\kmax}{k_{\max}}
+\providecommand{\epsn}{\varepsilon_n}
+\providecommand{\pk}{\mathsf{pk}}
+\providecommand{\sk}{\mathsf{sk}}
+\providecommand{\evk}{\mathsf{evk}}
+\providecommand{\ct}{\mathsf{ct}}
+
+\section{Security Analysis}\label{sec:security}
+
+We analyze the protocol in the semi-honest model of
+Section~\ref{sec:model}: the server follows the protocol, but tries to
+learn whatever it can from what it receives, stores and computes.
+Everything the server receives apart from the public parameters is a
+CKKS ciphertext or key. CKKS is IND-CPA secure under the RLWE assumption,
+together with the circular-security assumption that bootstrappable
+schemes need for the evaluation keys, so the ciphertexts reveal nothing
+about the data to the server, and no decrypted value ever reaches it.
+What the server can learn is therefore limited to the
+values it receives in the clear, which Section~\ref{sec:leakage}
+examines.
+
+% ---------------------------------------------------------------------
+\subsection{Encryption Parameters}\label{sec:params}
+% ---------------------------------------------------------------------
+% N, log2 PQ: desilo/util/fhe_params.py on Engine(use_bootstrap=True);
+% lambda: desilo/util/estimate_security.sage (lattice-estimator 7d59f86,
+% sigma 3.19, BDGL16): usvp / bdd / dual_hybrid = 133.9 bits.
+
+We use the bootstrappable parameter set of DesiloFHE, with ring degree
+$N = 2^{16}$ and a largest modulus, that of the key-switching keys, of
+$\log_2 PQ \approx 1704$ bits. The lattice
+estimator~\cite{albrecht2015concrete} gives a security level of
+$\lambda \approx 134$ bits for these parameters, so the scheme achieves
+$128$-bit security.
+
+% ---------------------------------------------------------------------
+\subsection{Leakage Profile}\label{sec:leakage}
+% ---------------------------------------------------------------------
+
+The client sends the server a single message
+\begin{equation}
+  M = \bigl(\pk,\ \evk,\ \ct_1,\dots,\ct_d,\ n,\ \epsn,\ \MinPts,\ \kmax,\ R\bigr).
+  \label{eq:message}
+\end{equation}
+Here $\evk$ consists of the relinearization, rotation and conjugation keys
+and the key used for bootstrapping, and $\ct_j$ encrypts the $j$-th coordinate
+of the ordered, normalized points (Section~\ref{sec:client}).
+The server returns one ciphertext and receives nothing afterwards.
+It never holds $\sk$, and no value decrypted by the client is sent back to it.
+The dimension $d$ is visible as the number of ciphertexts.
+In the clear, the server therefore sees only the public parameters $n$,
+$d$, $\epsn$, $\MinPts$, $\kmax$ and $R$.
+
+\paragraph{\emph{What each value reveals}}
+Table~\ref{tab:leakage} lists each public parameter, its role at the
+server, and what it says about the data.
+The server learns nothing about the coordinates, the pairwise distances, the
+neighbor relation, which points are core, border or noise, the number or
+sizes of the clusters, or the output labels.
+PPA-DBSCAN~\cite{fu2024ppa}, which runs on two non-colluding servers,
+hides even the DBSCAN parameters: $\varepsilon$ and $\MinPts$ are
+secret-shared, and only the approximation parameter $\rho$ and the number
+of sub-cells derived from it are public.
+In our protocol $\epsn$ and $\MinPts$ are public; the paragraphs below
+discuss what they reveal.
+
+% Table tab:leakage is defined in Section4/Implementation.tex so that the
+% full-width float is placed on the page where Section 5 starts.
+
+\paragraph{\emph{Sizes and DBSCAN parameters}}
+The number of points $n$ is also public in prior HE clustering, for example
+as the denominator of the centroid update in~\cite{yang2024optimized}.
+The dimension $d$ can be hidden by appending zero coordinates up to a public
+bound, which leaves every pairwise distance unchanged.
+The value $\epsn = \varepsilon/\sigma$ reveals $\varepsilon$ only relative to
+the normalization scale $\sigma$ of Section~\ref{sec:client}, not $\sigma$
+itself.
+Both $\epsn$ and $\MinPts$ enter the server's computation only as constants
+subtracted in Eqs.~(\ref{eq:cmpinput}) and~(\ref{eq:coreinput}).
+The client could therefore send them encrypted at no additional
+multiplicative depth.
+We keep them public because $\kmax$ and $R$ depend on them anyway.
+
+\paragraph{\emph{The offset bound $\kmax$}}
+By construction (Section~\ref{sec:client}), $\kmax$ is one less than the
+largest number of points that a window of width $\epsn$ contains along the
+first principal component, capped at $\lfloor n/2 \rfloor$.
+
+\paragraph{\emph{The round count $R$}}
+$R$ is not free of information: it reflects how far a label has to
+travel within a cluster. $R$ is, however, a single integer, and similar
+values of $n$ and $R$ can come from very different shapes. $R$ does not
+determine the number of clusters, nor their sizes, shapes or positions.
+A client that wants to hide $R$ altogether can send $R = n - 1$, which
+always suffices, since each round advances a label at least one hop and a
+chain of core points has at most $n - 1$ hops, at a proportional cost in
+label propagation.

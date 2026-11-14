@@ -1,0 +1,102 @@
+% ============================================================
+% Introduction
+% ============================================================
+\section{Introduction}
+\label{sec:intro}
+
+As machine learning (ML) has advanced, identifying patterns in data has
+increasingly shifted from a manual task to one delegated to learned
+models. Both the volume of data and the range of data types have grown.
+Labeling such data, however, is costly, so most of it remains unlabeled.
+Demand has therefore risen for unsupervised learning, which extracts
+meaningful structure without explicit labels.
+
+Among such methods, clustering is used as an analysis tool in its own
+right, for example in geographic information
+systems~\cite{tu2022dbscan}, in outlier detection over
+financial transactions~\cite{yang2014dbscan,ahmed2016survey}, and in the
+analysis of healthcare data~\cite{khanizadeh2025smart,ahlqvist2018novel}.
+It also serves as a building block for downstream pipelines such as
+retrieval-augmented generation~\cite{sarthi2024raptor,edge2024local}.
+In practice, clustering frequently operates on data aggregated from
+multiple data owners or on directly sensitive records. Data privacy is
+therefore a primary concern for clustering.
+
+K-means is the most commonly studied algorithm in the privacy-preserving
+clustering literature. Its update rule of additions and averages is
+inherently friendly to homomorphic encryption (HE)~\cite{gentry2009fully},
+and comparison is needed only to assign each point to its nearest
+centroid. K-means, however, detects only convex clusters, cannot identify
+noise, and requires the number of clusters to be fixed in advance---a
+value that is rarely known in practice. This paper therefore targets Density-Based Spatial Clustering
+of Applications with Noise (DBSCAN)~\cite{ester1996density}, which
+discovers clusters of arbitrary shape, labels noise explicitly, and
+requires no prior cluster count.
+
+Executing DBSCAN over encrypted data, however, faces a single fundamental
+barrier. DBSCAN is built on comparisons---whether a distance lies within
+$\varepsilon$, whether a neighbor count is at least $\mathit{MinPts}$---and
+homomorphic encryption provides no comparison as a native operation.
+Existing schemes have circumvented this limitation in different ways.
+
+The first approach returns the comparison, or other steps of the
+computation, to the client~\cite{wang2022homomorphic,rahman2017towards}.
+In the scheme of Wang et al.~\cite{wang2022homomorphic}, the server sends
+the encrypted, shifted difference of the two compared values to the
+client, which decrypts it and replies with the outcome of the comparison
+as a single bit. This
+recovers the missing primitive but introduces three problems. First, one
+round trip is incurred per comparison, so the clustering is serialized on
+client responses and its latency is bound to how often the client
+replies. Second, each reply is a plaintext
+bit, and the server knows which pair it queried; the accumulated replies
+therefore yield the $\varepsilon$-neighborhood relation, the core, border,
+and noise labels derived from it, and ultimately the cluster membership
+itself, since the server executes the clustering control flow directly on
+these plaintext outcomes. The coordinates are protected, but the structure
+is not. Third, the security analysis of~\cite{wang2022homomorphic} argues
+that the server cannot recover the data without breaking the encryption,
+and considers the returned bits only as a possible aid to recovering the
+key. It does not consider what these bits reveal about the structure of
+the data.
+
+The second approach adopts secure multi-party computation (MPC), so that
+the comparison is evaluated jointly by two or three non-colluding servers
+over secret-shared data~\cite{bozdemir2021privacy,fu2024ppa,fu2024fss}.
+This keeps data owners offline and yields the most efficient results
+reported to date. It rests, however, on a non-collusion assumption whose
+violation reconstructs the original data, and it requires
+server-to-server communication rounds that grow with the data size. The
+non-collusion assumption also requires that the servers be run by
+independent parties, for example a governmental institution and a
+non-profit organization~\cite{bozdemir2021privacy}. A client that rents
+computing from a single cloud provider cannot meet it on its own.
+
+Neither approach keeps the comparison where the data is. We take a third
+route and evaluate it inside the ciphertext. By approximating the sign
+function with composite minimax polynomials~\cite{lee2021minimax}
+evaluated under the Cheon--Kim--Kim--Song (CKKS)
+scheme~\cite{cheon2017homomorphic}, core-point identification
+and cluster propagation are completed on a single server. The client
+uploads its encrypted data once and downloads the encrypted labels once;
+between these two messages it sends and receives nothing, and neither the
+client nor the server decrypts any intermediate value. In this sense, the
+protocol is non-interactive. Existing privacy-preserving DBSCAN schemes
+either involve the data owners in the
+computation~\cite{amirbekyan2006privacy,kumar2007privacy,liu2012privacy,rahman2017towards,wang2022homomorphic}
+or rely on multiple non-colluding
+servers~\cite{bozdemir2021privacy,fu2024ppa,fu2024fss}; to the best of our
+knowledge, no scheme avoids both.
+
+Our main contributions are as follows.
+\begin{itemize}
+  \item We present the first non-interactive DBSCAN over encrypted data,
+    in which every comparison is evaluated inside CKKS on a single server.
+  \item We show that the encrypted result matches that of plaintext DBSCAN
+    with the same border-point rule on six benchmark datasets and two
+    real datasets from finance and healthcare.
+  \item We give the client an algorithm that helps it set the number of
+    label-propagation rounds before encryption: a grid-based estimate
+    that uses only cell indices and cell counts and never compares a
+    distance with the radius.
+\end{itemize}

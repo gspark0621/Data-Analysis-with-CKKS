@@ -1,7 +1,6 @@
 # Data-Analysis-with-CKKS
 - pip list
-    - pip install numpy
-    - pip install desilofhe-cu128
+    - pip install numpy desilofhe-cu130
 - Test
     1. pyenv activate hardtree
     2. (hardtree) junhyung@cryptolab2:~/study/Data_Analysis_with_CKKS$ python3 -m Hard_Tree.test.test_cheby_levels

@@ -1,0 +1,51 @@
+% ==================================================================
+%  FullProtocol.tex  --  Algorithm: the complete protocol.
+%  Loaded from main.tex after Section 3.3.  It calls the three
+%  server algorithms of Section 3.2 by name.
+% ==================================================================
+
+% Unnumbered part headers whose body is indented.  Defined here so the
+% file is self-contained; move the two lines to the preamble if other
+% algorithms need them.
+\algblockdefx[IND]{Indent}{EndIndent}{}{}
+\algtext*{Indent}\algtext*{EndIndent}
+
+\begin{algorithm}[t]
+\caption{\textsf{FHE-DBSCAN}}
+\label{alg:protocol}
+\begin{algorithmic}[1]
+\Require dataset $X = \{\mathbf{x}_0, \dots, \mathbf{x}_{n-1}\}
+  \subset \mathbb{R}^d$, radius $\varepsilon$, threshold
+  $\mathit{MinPts}$
+\Ensure a cluster label for every point of $X$, or noise
+\Statex \textbf{Client}
+\Indent
+\State $(\mathsf{sk}, \mathsf{pk}, \mathsf{evk}) \gets \mathsf{KeyGen}$
+\State preprocess $X$ and send $\mathsf{ct}_1, \dots, \mathsf{ct}_d$,
+  $\mathsf{pk}$, $\mathsf{evk}$ and
+  $n, d, \varepsilon_n, \mathit{MinPts}, k_{\max}, R$ to the server
+  (Section~\ref{sec:client})
+\EndIndent
+\Statex \textbf{Server}
+\Indent
+\For{$k = 1$ \textbf{to} $k_{\max}$}
+  \State $\mathsf{adj}_k \gets \textbf{\textsf{Neighbor\_check}}
+    (\mathsf{ct}_1, \dots, \mathsf{ct}_d, k)$
+\EndFor
+\State $\mathsf{Core\_mask} \gets \textbf{\textsf{Core\_check}}
+  (\mathsf{adj}_1, \dots, \mathsf{adj}_{k_{\max}})$
+\State $\boldsymbol{\ell} \gets \textbf{\textsf{Label\_Propagation}}($
+  \Statex \hspace{\algorithmicindent}\hspace{\algorithmicindent}
+  $\mathsf{adj}_1, \dots, \mathsf{adj}_{k_{\max}},
+   \mathsf{Core\_mask}, R)$
+\State return $\boldsymbol{\ell}$ to the client
+\EndIndent
+\Statex \textbf{Client}
+\Indent
+\State $\boldsymbol{\ell}' \gets
+  \mathsf{Dec}_{\mathsf{sk}}(\boldsymbol{\ell})$
+\State post-process $\boldsymbol{\ell}'$ (Section~\ref{sec:post})
+\State \Return the cluster labels
+\EndIndent
+\end{algorithmic}
+\end{algorithm}

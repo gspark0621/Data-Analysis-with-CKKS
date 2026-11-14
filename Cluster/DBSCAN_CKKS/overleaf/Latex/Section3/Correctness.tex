@@ -1,0 +1,73 @@
+% ==================================================================
+%  Correctness.tex  --  Section 3.2.4 "Correctness" (summary)
+%  Loaded from main.tex.  The derivations, the proof of Theorem 1, sign
+%  bootstrapping/cleaning and the error analysis are in
+%  Appendix/CorrectnessDetails.tex (Appendix A).
+% ==================================================================
+
+\subsubsection{Correctness}
+\label{sec:correct}
+
+Every stage of the server rests on $\mathsf{Sgn}$, which is reliable only
+outside its dead zone $(-2^{-\alpha}, 2^{-\alpha})$
+(Section~\ref{sec:comparison}). A comparison is therefore correct when
+the inputs that decide its output lie outside the dead zone. We fix here
+the precision of each stage; Appendix~\ref{app:correct} gives the
+derivations, the proof of Theorem~\ref{thm:sandwich}, and how the server
+brings the outputs close to $\pm 1$.
+
+\paragraph{\emph{Neighbor Check}}
+Squared distances are continuous, so no precision keeps every input of
+Eq.~\eqref{eq:cmpinput} out of the dead zone. The server uses
+% Note: Normalize.py also clamps alpha_d from below at 15, which binds
+%   only for n < 128.
+$\alpha_d = \min(20,\, \lceil \log_2 n \rceil + 8)$ and moves the dead
+zone entirely to the non-neighbor side by the threshold
+\begin{equation}
+  \label{eq:theta}
+  \theta = \varepsilon_n^2 + \mu,
+  \qquad \mu = 2^{-\alpha_d} B ,
+\end{equation}
+with $B$ from Eq.~\eqref{eq:bound}. No true neighbor is then missed; only
+a non-neighbor with a squared distance between $\varepsilon_n^2$ and
+$\varepsilon_n^2 + 2\mu$ may add a value between $0$ and $1$ to a count.
+Writing $\mathrm{Nei}_r(i)$ for the number of points within distance $r$
+of point~$i$, itself included, and
+$\varepsilon_{\mathrm{hi}} = \sqrt{\varepsilon_n^2 + 2\mu}$, the count
+$\hat{c}_i$ of Eq.~\eqref{eq:count} satisfies
+\begin{equation}
+  \label{eq:sandwich}
+  \mathrm{Nei}_{\varepsilon_n}(i) \;\le\; \hat{c}_i \;\le\;
+  \mathrm{Nei}_{\varepsilon_{\mathrm{hi}}}(i)
+  \qquad \text{for every } i .
+\end{equation}
+
+\paragraph{\emph{Core Check}}
+An integer count lies at least $\tfrac{1}{2}$ from
+$\mathit{MinPts} - \tfrac{1}{2}$, so the input of
+Eq.~\eqref{eq:coreinput} has magnitude at least $1/(2n)$, and
+$\alpha_c = \lceil \log_2 (2n) \rceil$ keeps it outside the dead zone.
+
+\begin{theorem}
+\label{thm:sandwich}
+Let $\mathrm{Core}_r$ denote the set of core points of plaintext DBSCAN
+run at radius $r$ with the same $\mathit{MinPts}$, and
+$\widehat{\mathrm{Core}}$ the set of points whose slot of
+$\mathsf{Core\_mask}$ is not $0$, with $\alpha_c$ as above. Then
+\[
+  \mathrm{Core}_{\varepsilon_n} \;\subseteq\;
+  \widehat{\mathrm{Core}} \;\subseteq\;
+  \mathrm{Core}_{\varepsilon_{\mathrm{hi}}} .
+\]
+In particular $\widehat{\mathrm{Core}} = \mathrm{Core}_{\varepsilon_n}$
+whenever no pair of points lies at a distance strictly between
+$\varepsilon_n$ and $\varepsilon_{\mathrm{hi}}$.
+\end{theorem}
+
+\paragraph{\emph{Label Propagation}}
+Two distinct labels differ by at least $1/n$, so after the division by
+$1.1$ in Eq.~\eqref{eq:step}, $\alpha_\ell = \lceil \log_2 (1.1\,n) \rceil$
+keeps the input of $\mathsf{Sgn}$ outside the dead zone. Two equal labels
+give the input $0$, but $\mathsf{Max}$ then returns their common value
+whatever the sign. The three precisions depend on $n$ alone, so the
+public parameters fix them.

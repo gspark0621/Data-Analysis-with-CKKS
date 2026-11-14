@@ -1,0 +1,40 @@
+% =====================================================================
+% Section 6: Conclusion
+%   Label: sec:conclusion
+% =====================================================================
+
+\providecommand{\MinPts}{\mathit{MinPts}}
+\providecommand{\kmax}{k_{\max}}
+\providecommand{\epsn}{\varepsilon_n}
+
+\section{Conclusion}\label{sec:conclusion}
+
+We presented, to our knowledge, the first non-interactive DBSCAN over FHE.
+The client uploads its CKKS-encrypted points once and downloads a single
+ciphertext of labels.
+A single honest-but-curious server evaluates Neighbor Check, Core Check
+and Label Propagation entirely on ciphertexts.
+No intermediate decryption, helper server or non-collusion assumption is
+needed, because every comparison is evaluated inside the ciphertexts with
+composite minimax sign approximations~\cite{lee2021minimax}.
+
+Three design choices make this practical.
+First, the client orders the points along the first principal component.
+Since this projection is 1-Lipschitz, every neighbor of a point lies within
+$\kmax$ slots of it, and the server replaces the $n(n-1)/2$ pairwise
+comparisons with $\kmax$ packed comparisons without changing the result.
+Second, the inputs of Core Check and Label Propagation take discrete
+values. A neighbor count is compared with $\MinPts - 1/2$, halfway between
+two integers, and two distinct labels differ by at least one label unit.
+Every such input therefore starts outside the dead zone of the sign
+approximation, and each comparison can use the smallest precision that
+keeps it there, $\alpha_c = \lceil \log_2(2n) \rceil$ and
+$\alpha_\ell = \lceil \log_2(1.1\,n) \rceil$. Only Neighbor Check, whose
+inputs are continuous, needs a large precision; its threshold is moved so
+that the dead zone produces no false negatives, and the encrypted core set
+lies between the plaintext core sets at radii $\epsn$ and
+$\varepsilon_{\mathrm{hi}}$ (Theorem~\ref{thm:sandwich}).
+Third, the client separates the decrypted labels by the gaps between them
+rather than by rounding. On six benchmark datasets and two real datasets
+this recovered the same
+clustering as plaintext DBSCAN with the maximum rule for border points.

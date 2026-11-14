@@ -1,0 +1,236 @@
+% ==================================================================
+%  LabelPropagation.tex  --  Section 3.2.3 "Label Propagation"
+%  Loaded from main.tex.
+%  Implementation: Label_Propagation.py, fhe_kd_dense_propagation
+%  (_slot_group_size, _pack_candidates, _tree_max_packed).  Max calls per
+%  round: 2 * sum_j ceil(log2(|G_j|+1)).
+% ==================================================================
+
+\subsubsection{Label Propagation}
+\label{sec:lp}
+
+Label Propagation is the final step on the server. It turns the two
+masks into cluster labels. The original DBSCAN~\cite{ester1996density}
+does this with a traversal: it picks an unvisited core point, follows the
+chains of neighboring core points, and gives every point it reaches the
+same label. A traversal is out of reach here for two reasons. The server
+cannot tell which point comes next, since that depends on values it holds
+only in encrypted form. And even if it could, the work would differ from
+point to point---one point expanded into many neighbors, another into
+none---so the time and the number of operations spent around a point
+would let the server infer the distribution of the data.
+
+Distributed variants of DBSCAN replace the traversal by propagation.
+NG-DBSCAN~\cite{lulli2016ng}, for instance, tags each cluster with
+the label of its highest-ranked node, ranking nodes by their degree. We
+follow the same max-based propagation and rank the core points by their
+slot. Every core point starts with a label of its own, labels spread
+between neighboring core points, and wherever two labels meet the larger
+one is kept. Over the rounds, the core points of a cluster come to carry
+the same label, the largest they started with.
+
+\paragraph{\emph{Labels and the Maximum}}
+The initial label of slot~$i$ is $u_i = (i+1)/n$. Core points keep it
+and all other points start with $0$:
+\begin{equation}
+  \label{eq:init}
+  \boldsymbol{\ell} = \mathsf{Core\_mask} \odot \mathbf{u},
+  \qquad u_i = \frac{i+1}{n} ,
+\end{equation}
+where $\mathbf{u}$ is a plaintext vector. Dividing by $n$ puts every
+label in $[0,1]$ and every difference of two labels in $[-1,1]$. A
+difference can reach the ends of that interval, for instance when the
+label $1$ meets a candidate that a mask has set to $0$. The server
+therefore divides it by $1.1$, a heuristic margin, before taking its
+sign, for the reason given with Eq.~\eqref{eq:bound}. The sign gives the step vector
+\begin{equation}
+  \label{eq:step}
+  \mathsf{ste} = \tfrac{1}{2}\Bigl( 1 + \mathsf{Sgn}\bigl(
+    \tfrac{1}{1.1} (\mathbf{b} - \mathbf{a}) \bigr) \Bigr),
+\end{equation}
+and the maximum of two label vectors is
+\begin{equation}
+  \label{eq:max}
+  \mathsf{Max}(\mathbf{a}, \mathbf{b}) = \mathbf{a}
+    + (\mathbf{b} - \mathbf{a}) \odot \mathsf{ste} .
+\end{equation}
+In a slot where $\mathbf{b}$ is larger, $\mathsf{ste}$ is $1$ and
+$\mathsf{Max}$ returns $\mathbf{b}$. Where $\mathbf{b}$ is smaller,
+$\mathsf{ste}$ is $0$ and $\mathsf{Max}$ keeps $\mathbf{a}$. Where the two
+are equal, $\mathsf{Max}$ returns their common value whatever
+$\mathsf{ste}$ is.
+
+\paragraph{\emph{Core-to-Core Rounds}}
+A label may move from point $i+k$ to point $i$ only if the two are
+neighbors and both are core points. That condition is itself a product of
+masks,
+\begin{equation}
+  \label{eq:mask}
+  \mathbf{m}_k[i] = \mathsf{adj}_k[i] \cdot \mathsf{Core\_mask}[i+k]
+    \cdot \mathsf{Core\_mask}[i] ,
+\end{equation}
+which is $1$ exactly in the slots whose pair may exchange a label. The
+server multiplies the rotated labels $\mathsf{Rot}_k(\boldsymbol{\ell})$
+by this mask. The product keeps the candidate label in those slots and is
+$0$ everywhere else. All labels are non-negative and $\max(x,0) = x$ for
+$x \ge 0$, so the zeroed slots leave the maximum unchanged. The mask
+$\mathbf{m}_{n-k}$ of the opposite direction has the same form. A round
+gives every point the maximum of its label and its candidates for all
+offsets $s \in \{k, n-k\}$, $k = 1, \dots, k_{\max}$, and the server runs
+$R$ rounds (Section~\ref{sec:rounds}). The masks do not change from round
+to round, so the server computes them once.
+
+\paragraph{\emph{Packed Tree Maximum}}
+Taking these maxima one offset at a time costs $2k_{\max}$ calls to
+$\mathsf{Max}$ per round, each with its own evaluation of $\mathsf{Sgn}$.
+The labels, however, occupy only the first $n$ of the $N/2$ slots of a
+ciphertext, and a call to $\mathsf{Max}$ costs the same however many
+slots carry data. The server therefore places several candidates in the
+unused slots and reduces them with a tree of maxima.
+
+Divide the slots into blocks of $n$, block $t$ holding slots
+$tn, \dots, (t+1)n - 1$, and let $\mathbf{e}$ be the plaintext vector that
+is $1$ in block $0$ and $0$ elsewhere. For $q$ offsets
+$s_1, \dots, s_q$ with masks $\mathbf{w}_1, \dots, \mathbf{w}_q$, the
+server keeps the labels $\mathbf{a}$ being updated in block $0$ and moves
+the candidate of the $t$-th offset, taken from the labels
+$\boldsymbol{\lambda}$, into block $t$:
+\begin{equation}
+  \label{eq:pack}
+  \mathbf{P} = \mathbf{e} \odot \mathbf{a} + \sum_{t=1}^{q}
+    \mathsf{Rot}\bigl( \mathbf{w}_t \odot
+      \mathsf{Rot}_{s_t}(\boldsymbol{\lambda}),\, -tn \bigr).
+\end{equation}
+Each candidate is $0$ outside block $0$, so the rotation by $-tn$ moves
+it into block $t$ and leaves the other blocks untouched. In the
+core-to-core rounds, $\mathbf{a} = \boldsymbol{\lambda} = \boldsymbol{\ell}$
+and the masks are those of Eq.~\eqref{eq:mask}.
+
+The server then folds the blocks in half. With $\beta = q+1$ occupied
+blocks and $h = \lceil \beta/2 \rceil$, it sets
+\[
+  \mathbf{P} \gets \mathsf{Max}\bigl( \mathbf{P},\,
+    \mathsf{Rot}(\mathbf{P}, hn) \bigr),
+\]
+which gives block $t$ the maximum of itself and block $t+h$, and repeats
+with $\beta \gets h$ until $\beta = 1$. After $\lceil \log_2(q+1) \rceil$ calls to
+$\mathsf{Max}$, block $0$ holds the maximum of the labels and all $q$
+candidates, and $\mathbf{e} \odot \mathbf{P}$ is the updated label vector.
+A block that a fold reads beyond the occupied ones holds $0$ or a maximum
+of candidates of the same offsets, so it changes nothing.
+
+The fold reads slot $i + hn$ for every occupied slot $i < \beta n$. If this
+ran past the end of the ciphertext, the rotation would wrap around and
+combine slots that belong to different points. The fold stays inside the
+ciphertext when $(\beta + \lceil \beta/2 \rceil)\, n \le N/2$. The server
+therefore takes the largest $\beta$ with this property and splits the offsets
+$1, \dots, k_{\max}$ into $g = \lceil k_{\max}/m \rceil$ consecutive groups
+$G_1, \dots, G_g$ of at most
+\[
+  m = \min(k_{\max},\, \beta - 1)
+\]
+offsets each. The groups are processed one after another, each starting
+from the labels the previous group produced. A round consists of a forward
+pass over $G_1, \dots, G_g$ with the offsets $k$ and a backward pass over
+$G_g, \dots, G_1$ with the offsets $n-k$. When $2k = n$, the two offsets
+coincide and the backward pass leaves $k$ out.
+
+A round thus costs at most $2g \lceil \log_2(m+1) \rceil$ calls to
+$\mathsf{Max}$ instead of $2k_{\max}$. When $k_{\max} < \beta$, all
+offsets fit into one group and a round takes only
+$2\lceil \log_2(k_{\max}+1) \rceil$ calls. The gain shrinks as $n$ grows:
+for $n = 5000$, only $m = 3$ offsets fit, and a round takes about two
+thirds of the $2k_{\max}$ calls. The group size depends only on $n$,
+$k_{\max}$ and $N$, so the schedule of operations is fixed by public
+values. Taking the candidates of a group at once rather than one after
+another changes neither the labels the rounds converge to nor the
+guarantee that a label advances at least one hop per round
+(Section~\ref{sec:rounds}): labels only grow, so within a round every
+point receives, from each of its core neighbors, a candidate at least as
+large as the label that neighbor had when the round began.
+
+\paragraph{\emph{Core-to-Border Round}}
+One further round hands a label to the non-core points. A non-core point
+takes the largest label among the core points it neighbors, and keeps $0$
+if it neighbors none, in which case it is noise. The mask has the same
+form with the roles of the two ends exchanged,
+\begin{equation}
+  \label{eq:border}
+  \mathbf{b}_k[i] = \mathsf{adj}_k[i] \cdot \mathsf{Core\_mask}[i+k]
+    \cdot \bigl( 1 - \mathsf{Core\_mask}[i] \bigr),
+\end{equation}
+and a single round, with a forward and a backward pass as above,
+suffices, since a border point passes its label on to no one. Here the
+labels $\mathbf{a}$ being updated are a separate vector $\mathbf{z}$ that
+starts at $0$, and the candidates are taken from the core labels,
+$\boldsymbol{\lambda} = \boldsymbol{\ell}$. A border point adjacent to
+core points of two clusters therefore joins the one with the larger
+label, the rule discussed in Section~\ref{sec:dbscan}. Core and non-core
+labels occupy disjoint slots, so the two are added at the end.
+Algorithm~\ref{alg:lp} collects the stage.
+
+\begin{algorithm}[tp]
+\caption{\textsf{Label\_Propagation}}
+\label{alg:lp}
+\begin{algorithmic}[1]
+\Require $\mathsf{adj}_1, \dots, \mathsf{adj}_{k_{\max}}$ and
+  $\mathsf{adj}_{n-k} = \mathsf{Rot}_{n-k}(\mathsf{adj}_k)$;
+  $\mathsf{Core\_mask}$; public $n$, $N$, $k_{\max}$, $R$
+\Ensure label ciphertext, slot $i$ carrying the cluster label of point
+  $i$, or $0$ if it is noise
+\State $\beta \gets$ the largest integer with
+  $(\beta + \lceil \beta/2 \rceil)\, n \le N/2$
+\State $m \gets \min(k_{\max}, \beta-1)$;\quad
+  $g \gets \lceil k_{\max}/m \rceil$
+\State $G_j \gets \{(j-1)m + 1, \dots, \min(jm, k_{\max})\}$ for
+  $j = 1, \dots, g$
+\For{$k = 1$ \textbf{to} $k_{\max}$ \textbf{and} $s \in \{k, n-k\}$}
+  \State $\mathbf{m}_s \gets \mathsf{adj}_s \odot
+    \mathsf{Rot}_s(\mathsf{Core\_mask}) \odot \mathsf{Core\_mask}$
+    \Comment{Eq.~\eqref{eq:mask}}
+  \State $\mathbf{b}_s \gets \mathsf{adj}_s \odot
+    \mathsf{Rot}_s(\mathsf{Core\_mask}) \odot (1 - \mathsf{Core\_mask})$
+    \Comment{Eq.~\eqref{eq:border}}
+\EndFor
+\State $\boldsymbol{\ell} \gets \mathsf{Core\_mask} \odot \mathbf{u}$
+\For{$r = 1$ \textbf{to} $R$}
+  \For{$j = 1, \dots, g$} \Comment{forward pass}
+    \State $\boldsymbol{\ell} \gets \Call{TreeMax}{\boldsymbol{\ell},
+      \boldsymbol{\ell}, \{ (k, \mathbf{m}_k) : k \in G_j \}}$
+  \EndFor
+  \For{$j = g, \dots, 1$} \Comment{backward pass}
+    \State $\boldsymbol{\ell} \gets \Call{TreeMax}{\boldsymbol{\ell},
+      \boldsymbol{\ell}, \{ (n-k, \mathbf{m}_{n-k}) : k \in G_j,\,
+      2k < n \}}$
+  \EndFor
+\EndFor
+\State $\mathbf{z} \gets 0$
+\For{$j = 1, \dots, g$}
+  \State $\mathbf{z} \gets \Call{TreeMax}{\mathbf{z}, \boldsymbol{\ell},
+    \{ (k, \mathbf{b}_k) : k \in G_j \}}$
+\EndFor
+\For{$j = g, \dots, 1$}
+  \State $\mathbf{z} \gets \Call{TreeMax}{\mathbf{z}, \boldsymbol{\ell},
+    \{ (n-k, \mathbf{b}_{n-k}) : k \in G_j,\, 2k < n \}}$
+\EndFor
+\State \Return $\boldsymbol{\ell} + \mathbf{z}$
+\Statex
+\Function{TreeMax}{$\mathbf{a}, \boldsymbol{\lambda},
+  \{(s_t, \mathbf{w}_t)\}_{t=1}^{q}$}
+  \State $\mathbf{P} \gets \mathbf{e} \odot \mathbf{a}$
+  \For{$t = 1$ \textbf{to} $q$} \Comment{candidate of $s_t$ into block $t$}
+    \State $\mathbf{P} \gets \mathbf{P} + \mathsf{Rot}\bigl(
+      \mathbf{w}_t \odot \mathsf{Rot}_{s_t}(\boldsymbol{\lambda}),\,
+      -tn \bigr)$
+  \EndFor
+  \State $\beta \gets q + 1$
+  \While{$\beta > 1$} \Comment{fold the blocks in half}
+    \State $h \gets \lceil \beta/2 \rceil$
+    \State $\mathbf{P} \gets \mathsf{Max}\bigl( \mathbf{P},
+      \mathsf{Rot}(\mathbf{P}, hn) \bigr)$
+    \State $\beta \gets h$
+  \EndWhile
+  \State \Return $\mathbf{e} \odot \mathbf{P}$
+\EndFunction
+\end{algorithmic}
+\end{algorithm}

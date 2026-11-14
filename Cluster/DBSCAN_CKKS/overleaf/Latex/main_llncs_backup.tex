@@ -1,0 +1,124 @@
+%==================================================================
+%  main.tex  --  Springer LNCS (llncs.cls), multi-file project
+%==================================================================
+\documentclass[runningheads]{llncs}
+
+%------------------------------------------------------------------
+%  Packages
+%------------------------------------------------------------------
+\usepackage[T1]{fontenc}      % Springer 공식 템플릿 권장 설정
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}  % amsthm은 로드하지 말 것 (llncs의 \proof와 충돌)
+\usepackage{booktabs}
+\usepackage{cite}              % [8,9,10] -> [8--10]; 번호 오름차순 정렬
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{xcolor}           % color 대신 xcolor (TikZ와 공용)
+\usepackage{tikz}             % Fig. 1 (Technical Overview)
+\usetikzlibrary{arrows.meta,shadows}
+\usepackage{hyperref}         % 가급적 마지막에 로드
+\renewcommand\UrlFont{\color{blue}\rmfamily}
+\urlstyle{rm}
+
+%------------------------------------------------------------------
+%  Notation / figure colors
+%------------------------------------------------------------------
+\newcommand{\enc}[1]{[\![#1]\!]}          % ciphertext of #1
+\definecolor{figNavy}{HTML}{0B1E31}       % 원본 그림의 박스 색
+\definecolor{figGold}{HTML}{C8871A}       % 암호문 전송 화살표·자물쇠
+
+%------------------------------------------------------------------
+%  Folder names  (Overleaf 폴더 이름과 정확히 일치해야 함;
+%                영문 입력 상태로 입력한 ASCII 이름 권장)
+%------------------------------------------------------------------
+\newcommand{\dirI}{Section1}     % Introduction (+ Related Work, Technical Overview as subsections)
+\newcommand{\dirII}{Section2}    % Preliminaries
+\newcommand{\dirIII}{Section3}   % FHE-DBSCAN
+\newcommand{\dirIV}{Section4}    % Implementation results
+\newcommand{\dirV}{Section5}     % Security analysis, Conclusion
+
+% 파일이 없으면 컴파일을 멈추지 않고 PDF에 "Missing file" 상자를 표시
+\newcommand{\inputsection}[1]{%
+  \IfFileExists{#1.tex}{\input{#1}}{%
+    \par\noindent\fbox{\ttfamily Missing file: \detokenize\expandafter{#1}.tex}\par
+    \typeout{*** Missing file: #1.tex ***}}}
+
+\graphicspath{{\dirI/Figures/}}
+
+\begin{document}
+
+%------------------------------------------------------------------
+%  Front matter
+%------------------------------------------------------------------
+\title{Non-Interactive Privacy-Preserving DBSCAN\\ with Homomorphic Encryption}
+\author{JunHyung Park\inst{1} \and Yongwoo Lee\inst{1}}
+\authorrunning{Park et al.}
+\institute{Inha University, Incheon, Korea\\ \email{gspark0621@gmail.com}}
+\maketitle
+
+\begin{abstract}
+DBSCAN clusters data by density: it finds clusters of arbitrary shape,
+labels noise explicitly, and needs no prior number of clusters. Evaluating
+it on encrypted data is difficult because the algorithm is built on
+comparisons, which homomorphic encryption does not support natively.
+Existing privacy-preserving DBSCAN schemes therefore return comparisons to
+the data owner or split the computation among non-colluding servers. We
+present, to our knowledge, the first non-interactive DBSCAN over
+homomorphic encryption. The client uploads its CKKS-encrypted data once
+and receives a single ciphertext of cluster labels. In between, a single
+server evaluates the entire algorithm on ciphertexts. Instead of comparing
+every pair of points, the server compares each point only within a range
+that contains all of its neighbors, which greatly reduces the computation.
+Since core-point detection and label propagation operate on discrete values, we design their comparisons so that every input that decides the output lies outside the interval where the polynomial approximation of the sign function gives no accuracy guarantee. On six benchmark datasets, the encrypted result coincides with
+plaintext DBSCAN under the same border-point rule, while the server learns
+nothing beyond a few public parameters.
+\keywords{Homomorphic encryption \and CKKS \and DBSCAN \and
+  Privacy-preserving machine learning}
+\end{abstract}
+
+%------------------------------------------------------------------
+%  Folder 1: Introduction / Related Work / Technical Overview
+%------------------------------------------------------------------
+\inputsection{\dirI/Introduction}
+\inputsection{\dirI/RelatedWork}
+\inputsection{\dirI/TechnicalOverview}
+
+%------------------------------------------------------------------
+%  Folder 2: Preliminaries            (\label{sec:prelim})
+%------------------------------------------------------------------
+\inputsection{\dirII/Preliminaries}
+
+%------------------------------------------------------------------
+%  Folder 3: Proposed Method          (\label{sec:method})
+%------------------------------------------------------------------
+\inputsection{\dirIII/ProposedMethod}        % 절 제목 + 도입
+\inputsection{\dirIII/ClientPreprocessing}   % 3.1 (RoundCount 포함)
+\inputsection{\dirIII/NeighborCheck}         % 3.2 머리말 + 3.2.1
+\inputsection{\dirIII/CoreCheck}             % 3.2.2
+\inputsection{\dirIII/LabelPropagation}      % 3.2.3
+\inputsection{\dirIII/Correctness}           % 3.2.4
+\inputsection{\dirIII/PostProcessing}       % 3.3
+\inputsection{\dirIII/Figures/FullProtocol} % Algorithm 4 (전체 프로토콜)
+%------------------------------------------------------------------
+%  Folder 4: Implementation results   (\label{sec:eval})
+%------------------------------------------------------------------
+\inputsection{\dirIV/Implementation}
+
+%------------------------------------------------------------------
+%  Folder 5: Security analysis / Conclusion
+%            (\label{sec:security}, \label{sec:conclusion})
+%------------------------------------------------------------------
+\inputsection{\dirV/SecurityAnalysis}
+\inputsection{\dirV/Conclusion}
+
+%------------------------------------------------------------------
+%  References
+%------------------------------------------------------------------
+% 참고문헌 번호: 본문에 처음 인용된 순서로 고정.
+% splncs04-citeorder.bst = 공식 splncs04.bst에서 정렬(SORT)만 끈 파일.
+% 공식 splncs04.bst와 이름이 겹치지 않게 따로 두어, 어느 환경에서
+% 컴파일해도 알파벳순으로 바뀌지 않게 함.
+\bibliographystyle{splncs04}
+\bibliography{references}
+
+\end{document}

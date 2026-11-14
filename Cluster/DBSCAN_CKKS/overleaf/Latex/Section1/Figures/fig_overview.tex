@@ -1,0 +1,91 @@
+% ==================================================================
+%  fig_overview.tex  --  Fig. 1: protocol overview (TikZ)
+%  Two-party message-flow layout: parties as columns, time flows
+%  downward, messages as horizontal arrows between the columns.
+%  Loaded by TechnicalOverview.tex inside a figure environment.
+%  Requires in the main.tex preamble:
+%    \usepackage{tikz}
+%    \usetikzlibrary{arrows.meta,shadows}
+%    \definecolor{figNavy}{HTML}{0B1E31}
+%    \definecolor{figGold}{HTML}{C8871A}
+%  Width is tuned to the LNCS text width (12.2 cm).
+% ==================================================================
+\begin{tikzpicture}[
+    font=\footnotesize,
+    blk/.style={fill=figNavy, text=white, rounded corners=2pt,
+                text width=3.5cm, minimum height=0.95cm,
+                align=center, inner sep=2pt, font=\footnotesize\bfseries,
+                drop shadow={opacity=0.22, shadow xshift=0.7pt,
+                             shadow yshift=-0.7pt}},
+    flowarr/.style={-{Stealth[length=1.9mm]}, line width=0.8pt, draw=figNavy},
+    ctxarr/.style={-{Stealth[length=2.7mm]}, line width=1.5pt, draw=figGold},
+    lanetitle/.style={font=\small\bfseries, text=figNavy, inner sep=1pt},
+    tag/.style={font=\scriptsize, text=figNavy, inner sep=1pt},
+    % ---- small icons drawn in TikZ (no extra packages needed) ----
+    pics/lock/.style={code={
+      \draw[line width=0.9pt, figGold]
+        (-0.07,0.02) -- (-0.07,0.10) arc[start angle=180, end angle=0, radius=0.07]
+        -- (0.07,0.02);
+      \fill[figGold, rounded corners=0.6pt] (-0.105,-0.11) rectangle (0.105,0.035);
+      \fill[white] (0,-0.04) circle (0.02);
+    }},
+    pics/laptop/.style={code={
+      \draw[figNavy, line width=0.8pt, fill=white, rounded corners=1pt]
+        (-0.2,0.02) rectangle (0.2,0.3);
+      \fill[figNavy] (-0.28,-0.04) -- (0.28,-0.04) -- (0.24,0.02)
+        -- (-0.24,0.02) -- cycle;
+    }},
+    pics/server/.style={code={
+      \foreach \y in {0,0.12,0.24}{
+        \draw[figNavy, line width=0.7pt, fill=white, rounded corners=0.8pt]
+          (-0.2,\y) rectangle (0.2,\y+0.1);
+        \fill[figNavy] (0.12,\y+0.05) circle (0.018);
+        \draw[figNavy, line width=0.5pt] (-0.14,\y+0.05) -- (0.03,\y+0.05);
+      }
+    }},
+  ]
+  \def\xc{2.06}   % client column centre
+  \def\xs{9.84}   % server column centre
+
+  % ---------------- party columns ----------------
+  % Client (left); Server (right, shaded = evaluated on ciphertexts)
+  \draw[figNavy!40, line width=0.6pt, rounded corners=4pt]
+    (0.02,0.55) rectangle (4.10,-5.95);
+  \draw[figNavy!40, line width=0.6pt, rounded corners=4pt, fill=figNavy!5]
+    (7.60,0.55) rectangle (12.08,-5.95);
+
+  \pic[scale=1.15] at (\xc-0.62, 0.02) {laptop};
+  \node[lanetitle, anchor=west] at (\xc-0.2, 0.08) {Client};
+  \pic[scale=1.15] at (\xs-0.62,-0.07) {server};
+  \node[lanetitle, anchor=west] at (\xs-0.2, 0.08) {Server};
+
+  % ---------------- DBSCAN group (server side) ----------------
+  \draw[figNavy, line width=0.8pt, rounded corners=3pt, fill=figNavy!26]
+    (7.78,-0.98) rectangle (11.90,-5.75);
+  \node[font=\footnotesize\bfseries, text=figNavy] at (\xs,-1.30) {DBSCAN};
+
+  % ---------------- blocks (titles only) ----------------
+  \node[blk] (keygen) at (\xc, -0.85) {KeyGen};
+  \node[blk] (pre)    at (\xc, -2.10) {Pre-processing};
+  \node[blk] (post)   at (\xc, -5.00) {Post-processing};
+
+  \node[blk] (nbr)  at (\xs, -2.10) {Neighbor Check};
+  \node[blk] (core) at (\xs, -3.55) {Core Check};
+  \node[blk] (lp)   at (\xs, -5.00) {Label Propagation};
+
+  % ---------------- flow within each party ----------------
+  \draw[flowarr] (keygen) -- (pre);
+  \draw[flowarr] (nbr)    -- (core);
+  \draw[flowarr] (core)   -- (lp);
+
+  % ---------------- the only two messages ----------------
+  \draw[ctxarr] (pre.east) -- (nbr.west) coordinate[pos=0.5] (dn);
+  \pic at ([xshift=-0.95cm, yshift=0.22cm]dn) {lock};
+  \node[tag, anchor=west] at ([xshift=-0.78cm, yshift=0.21cm]dn)
+    {Ciphertext, $\mathsf{pk}$};
+
+  \draw[ctxarr] (lp.west) -- (post.east) coordinate[pos=0.5] (up);
+  \pic at ([xshift=-0.6cm, yshift=0.22cm]up) {lock};
+  \node[tag, anchor=west] at ([xshift=-0.43cm, yshift=0.21cm]up)
+    {Ciphertext};
+\end{tikzpicture}

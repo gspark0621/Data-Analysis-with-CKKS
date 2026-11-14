@@ -1,0 +1,42 @@
+% ==================================================================
+%  ProposedMethod.tex  --  Section 3 (title and introduction)
+%  Structure of Section 3:
+%    3.1 Client-side Preprocessing   (ClientPreprocessing.tex, RoundCount.tex)
+%    3.2 Server-side Computation     (NeighborCheck.tex: 3.2 header + 3.2.1,
+%                                     CoreCheck.tex 3.2.2,
+%                                     LabelPropagation.tex 3.2.3,
+%                                     Correctness.tex 3.2.4)
+%    3.3 Client-side Post-processing (PostProcessing.tex)
+%  Cross-references used here:
+%    \label{sec:ckks} \label{sec:comparison} \label{sec:model}
+%    \label{sec:notation}                                       (Section 2)
+%    \label{sec:client} \label{sec:server} \label{sec:core} \label{sec:lp}
+%    \label{sec:correct} \label{sec:post}                       (Section 3)
+% ==================================================================
+\section{Proposed Method}
+\label{sec:method}
+
+Every decision the server makes in this section is a comparison: whether
+two points are neighbors, whether a point has enough neighbors, and which
+of two labels is larger. Comparison is not among the operations of
+Section~\ref{sec:ckks}, so the server evaluates it with the composite
+minimax approximation $\mathsf{Sgn}$ of Section~\ref{sec:comparison}. The
+approximation is defined only on $[-1,1]$, so each input is divided by a
+public constant that bounds its magnitude. The neighbor counts and the
+labels are bounded by construction (Sections~\ref{sec:core}
+and~\ref{sec:lp}). For the distances, this bound is the reason the client
+normalizes the data before encrypting it (Section~\ref{sec:client}).
+
+This section gives the algorithms behind the three server stages of
+Fig.~\ref{fig:overview}, Neighbor Check, Core Check and Label
+Propagation, together with the client-side work that precedes and
+follows them. Section~\ref{sec:client} describes how the client prepares
+its data. Section~\ref{sec:server} writes each server stage as an
+operation on ciphertexts, in the notation of Section~\ref{sec:notation}.
+Neighbor Check decides which pairs of points are neighbors and outputs
+the result as mask vectors, which Core Check uses next. Core Check
+decides which points are core points and outputs a mask vector, which
+Label Propagation uses next to turn the masks into cluster labels.
+Section~\ref{sec:correct} examines how
+accurate each comparison is, and Section~\ref{sec:post} describes the
+post-processing on the client.

@@ -1,0 +1,159 @@
+%==================================================================
+%  main.tex  --  IEEE S&P 2027 submission
+%  IEEE Computer Society conference template (IEEEtran.cls V1.8b,
+%  [conference,compsoc]), anonymized for double-blind review.
+%  The previous LNCS version is kept in main_llncs_backup.tex.
+%==================================================================
+\documentclass[conference,compsoc]{IEEEtran}
+
+%------------------------------------------------------------------
+%  Packages
+%------------------------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{graphicx}
+\usepackage{amsmath,amssymb}  % amsthm은 로드하지 말 것 (IEEEtran의 IEEEproof 사용)
+\interdisplaylinepenalty=2500 % IEEEtran 권장: amsmath 사용 시 수식 내 페이지 나눔 허용
+\usepackage{booktabs}
+% IEEE Computer Society는 [1]-[4] 대신 [1], [2], [3], [4] 형식 (nocompress)
+\ifCLASSOPTIONcompsoc
+  \usepackage[nocompress]{cite}
+\else
+  \usepackage{cite}
+\fi
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{xcolor}           % color 대신 xcolor (TikZ와 공용)
+\usepackage{tikz}             % Fig. 1 (Technical Overview)
+\usetikzlibrary{arrows.meta,shadows}
+\usepackage{hyperref}         % 가급적 마지막에 로드
+\hypersetup{pdfauthor={},pdfcreator={},pdfproducer={}} % 익명 심사: PDF 메타데이터 비움
+
+% IEEEtran은 theorem 환경을 제공하지 않으므로 직접 정의
+\newtheorem{theorem}{Theorem}
+
+%------------------------------------------------------------------
+%  Notation / figure colors
+%------------------------------------------------------------------
+\newcommand{\enc}[1]{[\![#1]\!]}          % ciphertext of #1
+% Section 5 표기 (Table 5가 Section 4 파일에서 정의되므로 preamble에 둠)
+\providecommand{\MinPts}{\mathit{MinPts}}
+\providecommand{\kmax}{k_{\max}}
+\providecommand{\epsn}{\varepsilon_n}
+\providecommand{\pk}{\mathsf{pk}}
+\providecommand{\sk}{\mathsf{sk}}
+\providecommand{\evk}{\mathsf{evk}}
+\providecommand{\ct}{\mathsf{ct}}
+\definecolor{figNavy}{HTML}{0B1E31}       % 원본 그림의 박스 색
+\definecolor{figGold}{HTML}{C8871A}       % 암호문 전송 화살표·자물쇠
+
+%------------------------------------------------------------------
+%  Folder names  (Overleaf 폴더 이름과 정확히 일치해야 함)
+%------------------------------------------------------------------
+\newcommand{\dirI}{Section1}     % Introduction (+ Related Work, Technical Overview as subsections)
+\newcommand{\dirII}{Section2}    % Preliminaries
+\newcommand{\dirIII}{Section3}   % FHE-DBSCAN
+\newcommand{\dirIV}{Section4}    % Implementation results
+\newcommand{\dirV}{Section5}     % Security analysis, Conclusion
+
+% 파일이 없으면 컴파일을 멈추지 않고 PDF에 "Missing file" 상자를 표시
+\newcommand{\inputsection}[1]{%
+  \IfFileExists{#1.tex}{\input{#1}}{%
+    \par\noindent\fbox{\ttfamily Missing file: \detokenize\expandafter{#1}.tex}\par
+    \typeout{*** Missing file: #1.tex ***}}}
+
+\graphicspath{{\dirI/Figures/}}
+
+\hyphenation{Neigh-bor}
+
+\begin{document}
+
+%------------------------------------------------------------------
+%  Front matter  (anonymous submission: no names or affiliations)
+%------------------------------------------------------------------
+\title{Non-Interactive Privacy-Preserving DBSCAN\\ with Homomorphic Encryption}
+\author{\IEEEauthorblockN{Anonymous Author(s)}}
+\maketitle
+
+% IEEE: 초록에는 수식, 특수기호, 인용을 넣지 않음
+\begin{abstract}
+DBSCAN clusters data by density: it finds clusters of arbitrary shape,
+labels noise explicitly, and needs no prior number of clusters. Evaluating
+it on encrypted data is difficult because the algorithm is built on
+comparisons, which homomorphic encryption does not support natively.
+Existing privacy-preserving DBSCAN schemes therefore return comparisons to
+the data owner or split the computation among non-colluding servers. We
+present, to our knowledge, the first non-interactive DBSCAN over
+homomorphic encryption. The client uploads its data once, encrypted under
+the Cheon--Kim--Kim--Song (CKKS) scheme, and receives a single ciphertext of cluster labels. In between, a single
+server evaluates the entire algorithm on ciphertexts. Instead of comparing
+every pair of points, the server compares each point only within a range
+that contains all of its neighbors, which greatly reduces the computation.
+Since core-point detection and label propagation operate on discrete
+values, we design their comparisons so that every input that decides the
+output lies outside the interval where the polynomial approximation of the
+sign function gives no accuracy guarantee. On six benchmark datasets and
+two real datasets from finance and healthcare, the
+encrypted result is equivalent to plaintext DBSCAN under the same
+border-point rule, while the server learns nothing beyond a few public
+parameters.
+\end{abstract}
+
+\IEEEpeerreviewmaketitle
+
+%------------------------------------------------------------------
+%  Folder 1: Introduction / Related Work / Technical Overview
+%------------------------------------------------------------------
+\inputsection{\dirI/Introduction}
+\inputsection{\dirI/RelatedWork}
+\inputsection{\dirI/TechnicalOverview}
+
+%------------------------------------------------------------------
+%  Folder 2: Preliminaries            (\label{sec:prelim})
+%------------------------------------------------------------------
+\inputsection{\dirII/Preliminaries}
+
+%------------------------------------------------------------------
+%  Folder 3: Proposed Method          (\label{sec:method})
+%------------------------------------------------------------------
+\inputsection{\dirIII/ProposedMethod}        % 절 제목 + 도입
+\inputsection{\dirIII/ClientPreprocessing}   % 3.1 (RoundCount 포함)
+\inputsection{\dirIII/NeighborCheck}         % 3.2 머리말 + 3.2.1
+\inputsection{\dirIII/CoreCheck}             % 3.2.2
+\inputsection{\dirIII/LabelPropagation}      % 3.2.3
+\inputsection{\dirIII/Correctness}           % 3.2.4
+\inputsection{\dirIII/PostProcessing}        % 3.3
+\inputsection{\dirIII/Figures/FullProtocol}  % Algorithm 4 (전체 프로토콜)
+
+%------------------------------------------------------------------
+%  Folder 4: Implementation results   (\label{sec:eval})
+%------------------------------------------------------------------
+\inputsection{\dirIV/Implementation}
+
+%------------------------------------------------------------------
+%  Folder 5: Security analysis / Conclusion
+%------------------------------------------------------------------
+\inputsection{\dirV/SecurityAnalysis}
+\inputsection{\dirV/Conclusion}
+
+%------------------------------------------------------------------
+%  Acknowledgments  (익명 심사: 연구비·동료 이름 등 신원 정보 금지)
+%  IEEE compsoc 템플릿 형식에 따라 번호 없는 \section* 사용
+%------------------------------------------------------------------
+\section*{Acknowledgments}
+Generative AI was used for editorial purposes in this manuscript, and all
+outputs were inspected by the authors to ensure accuracy and originality.
+
+%------------------------------------------------------------------
+%  References
+%------------------------------------------------------------------
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+%------------------------------------------------------------------
+%  Appendices  (13쪽 이후: S&P 규정상 appendix로 명시)
+%------------------------------------------------------------------
+\appendices
+\inputsection{Appendix/CorrectnessDetails}
+
+\end{document}

@@ -1,0 +1,66 @@
+% ==================================================================
+%  TechnicalOverview.tex  --  subsection of Section 1 (Introduction)
+%  The model setting (formerly Section 2.4) is placed here; its label
+%  sec:model therefore points to this subsection.
+%  Cross-references used here:
+%    \label{sec:client} \label{sec:post}      (Section 3)
+%    \label{sec:security}                     (Section 5)
+%    \label{tab:notation}                     (Section 2)
+% ==================================================================
+\subsection{Technical Overview}
+\label{sec:overview}
+\label{sec:model}
+
+\begin{figure*}[t]
+  \centering
+  \input{\dirI/Figures/fig_overview}
+  \caption{Overview of the proposed protocol. The client sends its
+    ciphertexts once and receives a single ciphertext once; every step in
+    the shaded region is evaluated by the server on CKKS ciphertexts, and the
+    server never obtains the client's secret key $\mathsf{sk}$.}
+  \label{fig:overview}
+\end{figure*}
+
+Fig.~\ref{fig:overview} summarizes the protocol. A client holds a dataset
+$X$ of $n$ points in $d$ dimensions together with the two DBSCAN
+parameters, a radius $\varepsilon$ and a threshold $\mathit{MinPts}$
+(Table~\ref{tab:notation}). The client generates the CKKS keys, keeps the
+secret key $\mathsf{sk}$, and preprocesses its data
+(Section~\ref{sec:client}). It uploads the data only once, as ciphertexts
+that encrypt it, together with the public key $\mathsf{pk}$ and the
+evaluation keys $\mathsf{evk}$, and may then stay offline. The client
+returns only to download a single ciphertext that encrypts the cluster
+labels, which it decrypts and post-processes (Section~\ref{sec:post}). A
+server performs the clustering and holds no data of its own.
+
+The server evaluates DBSCAN in the three stages shown in
+Fig.~\ref{fig:overview}. \emph{Neighbor Check} decides whether the
+distance between two points is at most $\varepsilon$; if so, the two
+points are \emph{neighbors}. \emph{Core Check} decides whether the number
+of neighbors of a point, counting the point itself, is at least
+$\mathit{MinPts}$; if so, the point is a \emph{core point}. A core point
+is the basic unit from which a cluster grows: the point and its neighbors
+alone are already dense enough to form a cluster. \emph{Label
+Propagation} then spreads labels from core points to their neighbors
+until every point carries its final cluster label. All three stages run on
+ciphertexts without decrypting any intermediate value, and every
+comparison among them is evaluated with a composite minimax polynomial
+approximation of the sign function~\cite{lee2021minimax}.
+
+\subsubsection{Non-interactive Execution}
+The protocol consists of one upload and one download. The server
+evaluates the whole of DBSCAN on ciphertexts. It never sends an
+intermediate value back for decryption, and it never needs the client to
+be online while it computes. No other party takes part: there is no
+second server with which to share the computation, and no comparison is
+delegated to the client.
+
+\subsubsection{Adversary and Public Parameters}
+The server is honest-but-curious. Since the computation is carried out by
+one server alone, no assumption about non-collusion is needed. Everything
+the server receives is a ciphertext, a key, or one of the public
+parameters $n$, $d$, $\varepsilon_n$, $\mathit{MinPts}$, $k_{\max}$, and
+$R$, and the sequence of homomorphic operations it performs is determined
+by these parameters alone. These few integers and the normalized radius
+do not let the server infer the distribution of the data;
+Section~\ref{sec:security} analyzes what each of them reveals.

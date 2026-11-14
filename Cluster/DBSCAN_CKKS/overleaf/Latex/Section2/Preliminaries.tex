@@ -1,0 +1,291 @@
+% ==================================================================
+%  Preliminaries.tex  --  Section 2
+%  The model setting moved to the Technical Overview (Section 1);
+%  its label sec:model is defined there.
+%  Cross-references used here:
+%    \label{sec:method}    FHE-DBSCAN (proposed method) section
+%    \label{sec:intro}     Introduction (Section 1)
+% ==================================================================
+\section{Preliminaries}
+\label{sec:prelim}
+
+\subsection{Notation}
+\label{sec:notation}
+
+Table~\ref{tab:notation} lists the notation used throughout the paper.
+
+\begin{table}[t]
+\centering
+\caption{Notation.}
+\label{tab:notation}
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}l p{0.75\linewidth}@{}}
+\toprule
+Symbol & Description \tabularnewline
+\midrule
+$X$
+  & \raggedright dataset $\{\mathbf{x}_0, \dots, \mathbf{x}_{n-1}\} \subset
+    \mathbb{R}^d$ \tabularnewline
+$n$, $d$ & \raggedright number of points, dimension \tabularnewline
+$\varepsilon$, $\mathit{MinPts}$
+  & \raggedright DBSCAN radius and density threshold \tabularnewline
+$\varepsilon_n$
+  & \raggedright radius after the normalization of
+    Section~\ref{sec:client} \tabularnewline
+$N$ & \raggedright ring degree of CKKS; a ciphertext has $N/2$ slots
+  \tabularnewline
+$\mathsf{ct}.\mathbf{x}$
+  & \raggedright ciphertext that encrypts the vector $\mathbf{x}$
+    \tabularnewline
+$\mathsf{ct}_j$
+  & \raggedright ciphertext of the $j$-th coordinates of all $n$ points,
+    $j = 1, \dots, d$ \tabularnewline
+$\boldsymbol{\ell}$, $\mathsf{adj}_k$
+  & \raggedright in Section~\ref{sec:method}, a bold or sans-serif vector
+    symbol denotes the ciphertext of that vector, whose slot $i$ carries
+    the value of the $i$-th point \tabularnewline
+$\mathbf{v}[i]$
+  & \raggedright slot $i$ of $\mathbf{v}$; the client puts the $i$-th
+    point of the order of Section~\ref{sec:client} in slot $i$,
+    $i = 0, \dots, n-1$ \tabularnewline
+$\mathsf{Rot}(\mathbf{v}, k)$
+  & \raggedright rotation of all $N/2$ slots: slot $i$ holds
+    $\mathbf{v}[(i+k) \bmod N/2]$ \tabularnewline
+$\mathsf{Rot}_k(\mathbf{v})$
+  & \raggedright cyclic shift of the first $n$ slots: slot $i$ holds
+    $\mathbf{v}[(i+k) \bmod n]$; realized with two rotations and two
+    plaintext masks \tabularnewline
+$\mathsf{Sgn}$
+  & \raggedright composite minimax approximation of $\operatorname{sgn}$,
+    applied to every slot; its precision $\alpha$ is set per stage
+    (Section~\ref{sec:correct}) \tabularnewline
+mask vector
+  & \raggedright vector whose slots are $0$ or $1$; multiplying by it
+    with $\odot$ keeps the slots where it is $1$ and sets the others to
+    $0$ \tabularnewline
+$k_{\max}$
+  & \raggedright largest slot offset the server compares
+    (Section~\ref{sec:client}) \tabularnewline
+$R$
+  & \raggedright number of propagation rounds (Section~\ref{sec:client})
+    \tabularnewline
+$\mathsf{adj}_k$
+  & \raggedright adjacency mask for offset $k$
+    (Section~\ref{sec:neighbor}) \tabularnewline
+$\mathsf{Core\_mask}$
+  & \raggedright core mask (Section~\ref{sec:core}) \tabularnewline
+$\boldsymbol{\ell}$
+  & \raggedright label vector (Section~\ref{sec:lp}) \tabularnewline
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{The CKKS Scheme}
+\label{sec:ckks}
+
+CKKS~\cite{cheon2017homomorphic} is a homomorphic encryption scheme for
+approximate arithmetic over the real and complex numbers. It is built on
+the ring
+$R = \mathbb{Z}[X]/(X^{N}+1)$, where the degree $N$ is a power of two, and
+on its residue rings $R_{q} = R/qR$. A message is a vector of up to $N/2$
+complex numbers: the $N$ complex roots of $X^{N}+1$ come in $N/2$
+conjugate pairs, so a polynomial with real coefficients carries only
+$N/2$ independent complex values. We use real vectors throughout.
+Encoding carries such a vector into $R$ through the inverse of the
+canonical embedding, scaled by a factor $\Delta$ and rounded to integer
+coefficients. The encoded message is therefore a fixed-point
+representation of the vector: $\Delta$ fixes how many fractional bits are
+kept, and the rounding discards everything below them. A ciphertext at
+level $\ell$ is a pair of polynomials in $R_{q_{\ell}}$, where $q_{\ell}$
+is the $\ell$-th modulus of a chain
+$q_{0} \mid q_{1} \mid \dots \mid q_{L}$, and a fresh ciphertext starts at
+the top level~$L$. We use the residue number system (RNS) variant of
+CKKS~\cite{cheon2018full}, which DesiloFHE implements: each $q_{\ell}$ is
+a product of word-sized primes, rescaling to the level below drops the
+last of them, and every ring element is stored through the Chinese
+remainder theorem as its residues modulo these primes. Security rests on
+the ring learning with errors assumption. Each entry of the message occupies one \emph{slot};
+additions and multiplications act on all $N/2$ slots at once, in a
+single-instruction-multiple-data (SIMD) manner, which is what lets one
+ciphertext carry a whole dataset. Decryption does not return the message
+exactly: the rounding of the encoding and the noise of the encryption sit
+below the fixed-point bits and grow as operations are chained, so every
+value is only correct to a precision that the design has to keep track
+of. Throughout this paper $N$ denotes the ring degree and $n$ the number
+of data points.
+
+We use the algorithms below, each described by what its output
+encrypts.
+
+\begin{itemize}
+\item $\mathsf{KeyGen}$ produces the secret key $\mathsf{sk}$, the public
+  key $\mathsf{pk}$, and the evaluation keys $\mathsf{evk}$. The
+  evaluation keys are a relinearization key, a rotation key for the
+  shifts that occur in the computation, a conjugation key, and a
+  bootstrapping key. They allow the operations below to be carried out
+  without $\mathsf{sk}$.
+\item $\mathsf{Enc}_{\mathsf{pk}}(\mathbf{x})$ encodes $\mathbf{x}$ with
+  the scaling factor $\Delta$ and returns a ciphertext
+  $\mathsf{ct}.\mathbf{x}$ of $\mathbf{x}$;
+  $\mathsf{Dec}_{\mathsf{sk}}(\mathsf{ct}.\mathbf{x})$ returns an
+  approximation of $\mathbf{x}$.
+\item $\mathsf{Add}(\mathsf{ct}.\mathbf{x}, \mathsf{ct}.\mathbf{y})$
+  returns an encryption of $\mathbf{x} + \mathbf{y}$, and
+  $\mathsf{Sub}(\mathsf{ct}.\mathbf{x}, \mathsf{ct}.\mathbf{y})$ returns
+  an encryption of $\mathbf{x} - \mathbf{y}$. One of the two operands may
+  be a plaintext vector. Neither operation consumes a level.
+\item $\mathsf{Mul}(\mathsf{ct}.\mathbf{x}, \mathsf{ct}.\mathbf{y})$
+  returns an encryption of $\mathbf{x} \odot \mathbf{y}$, the slot-wise
+  (Hadamard) product. The product of two ciphertexts consists of three
+  polynomials instead of two. Relinearization with the relinearization
+  key brings it back to two, and rescaling then divides the scaling factor
+  back to $\Delta$ and moves the ciphertext one level down the modulus
+  chain. Multiplying by a plaintext vector encoded with the scaling factor
+  $\Delta$, which we use for masks and scalars, needs no relinearization,
+  but the result is also rescaled and consumes one level.
+\item $\mathsf{Rot}(\mathsf{ct}.\mathbf{x}, k)$ returns an encryption of
+  the vector whose $i$-th slot is $x_{i+k}$, the indices being taken
+  modulo the number of slots. It is a Galois automorphism followed by key
+  switching under the rotation key, and consumes no level.
+  $\mathsf{Conj}$ conjugates the slots and is used inside bootstrapping.
+\end{itemize}
+
+Once a ciphertext has spent its levels, bootstrapping with the
+bootstrapping key returns an encryption of the same vector at a higher
+level. It is by far the most expensive operation of the scheme, and the
+number of bootstrappings, rather than the number of additions or
+multiplications, sets the running time of our pipeline. Because it
+changes no slot value, we leave it out of the algorithms of
+Section~\ref{sec:method} and apply it wherever a ciphertext runs out of
+levels.
+
+The algorithms of Section~\ref{sec:method} are expressions on
+ciphertexts. There we name a ciphertext after the vector it encrypts,
+such as $\mathsf{adj}_k$ or $\boldsymbol{\ell}$, and write the
+operations above as $\mathbf{x} + \mathbf{y}$, $\mathbf{x} - \mathbf{y}$,
+$\mathbf{x} \odot \mathbf{y}$, $c\,\mathbf{x}$ for a public scalar $c$,
+and $\mathbf{x}^{2}$ for $\mathbf{x} \odot \mathbf{x}$. Rotations appear
+there mostly as the cyclic shift $\mathsf{Rot}_k$ of
+Table~\ref{tab:notation}, which is built from two calls to
+$\mathsf{Rot}$. Label Propagation also uses $\mathsf{Rot}$ itself, to
+move blocks of $n$ slots within the ciphertext.
+
+Comparison, division, and any other non-polynomial function are not part
+of this set. Everything a DBSCAN evaluation needs beyond additions,
+multiplications and rotations must therefore be built from polynomials;
+Section~\ref{sec:comparison} does this for the comparison.
+
+\subsection{DBSCAN}
+\label{sec:dbscan}
+
+DBSCAN~\cite{ester1996density} defines clusters by local density rather
+than by distance to a representative point. Given a radius $\varepsilon$
+and a threshold $\mathit{MinPts}$, the $\varepsilon$-neighborhood of a
+point $p$ in a dataset $X$ is
+$\mathcal{N}_{\varepsilon}(p) = \{\, q \in X : \mathrm{dist}(p,q) \le \varepsilon
+\,\}$, which contains $p$ itself, and $p$ is a \emph{core point} if
+$|\mathcal{N}_{\varepsilon}(p)| \ge \mathit{MinPts}$. In one sentence, the two
+parameters fix a single density threshold: a region is dense enough to
+carry a cluster when each of its points has at least $\mathit{MinPts}$
+points within distance $\varepsilon$.
+
+A point $q$ is \emph{directly density-reachable} from a point $p$ if $p$
+is a core point and $q \in \mathcal{N}_{\varepsilon}(p)$. A point $q$ is
+\emph{density-reachable} from $p$ if there is a chain of points
+$p = p_1, p_2, \dots, p_m = q$ in which each $p_{j+1}$ is directly
+density-reachable from $p_j$; every point of the chain except possibly
+$q$ is then a core point. Two points are \emph{density-connected} if both
+are density-reachable from a common point, and a cluster is a maximal set
+of density-connected points. Intuitively, a cluster grows from a core
+point by repeatedly adding the neighbors of its core points. A non-core
+point that lies in the neighborhood of a core point is a \emph{border
+point} and joins that cluster; a point that is neither core nor border
+belongs to no cluster and is reported as noise.
+
+Two consequences matter for this paper. First, because membership follows
+chains of local links, a cluster can take an arbitrary shape---elongated,
+curved, or wrapped around another cluster---and the number of clusters
+need not be known in advance. This is what separates DBSCAN from
+K-means (Section~\ref{sec:intro}), whose clusters are the cells of a set
+of centroids and are therefore convex.
+
+Second, border points are ambiguous. A border point can lie in the
+neighborhoods of core points of two different clusters, and the
+definition does not say which one it belongs to. Implementations resolve
+this in several ways. The original algorithm follows the order of the
+traversal, so that the cluster whose expansion reaches the point first
+takes it. Parallel algorithms built on a disjoint-set (union--find)
+structure~\cite{patwary2012new} merge core points into clusters and
+attach each border point to only one of them. A fixed rule, such as
+taking the cluster with the largest label, removes the choice altogether.
+Each of these yields a valid DBSCAN output. We adopt the maximum rule, because it is the one that can be evaluated on
+ciphertexts: it is a maximum over encrypted labels, whereas a first-come
+rule presupposes a traversal whose order depends on the data, which the
+server could follow only if it learned which points are reached at each
+step.
+
+\subsection{Homomorphic Comparison}
+\label{sec:comparison}
+
+The sign function is
+\[
+  \operatorname{sgn}(x) =
+  \begin{cases}
+    1 & \text{if } x > 0, \\
+    0 & \text{if } x = 0, \\
+    -1 & \text{if } x < 0.
+  \end{cases}
+\]
+Every comparison in DBSCAN reduces to a sign. For two values $u$ and $v$,
+we write
+\[
+  \operatorname{comp}(u,v) = \frac{1 + \operatorname{sgn}(v-u)}{2}
+  = \begin{cases}
+      1 & \text{if } u < v, \\
+      \tfrac{1}{2} & \text{if } u = v, \\
+      0 & \text{if } u > v,
+    \end{cases}
+\]
+so that $\operatorname{comp}(u,v)$ is the outcome of the comparison
+$u < v$ whenever $u \ne v$. The maximum follows from it as well:
+\[
+  \max(u,v) = u + (v-u) \cdot \operatorname{comp}(u,v).
+\]
+This expression also holds for $u = v$, since $v - u$ then vanishes.
+The sign function is discontinuous at the origin, so no polynomial
+represents it, and it can only be approximated on a domain that excludes
+a neighborhood of the origin. We follow Lee et
+al.~\cite{lee2021minimax}, who compose low-degree minimax polynomials
+$p_1, \dots, p_k$ so that, for a precision parameter $\alpha$,
+\begin{gather*}
+  \bigl| (p_k \circ \cdots \circ p_1)(x) - \operatorname{sgn}(x) \bigr|
+  \le 2^{1-\alpha} \\
+  \text{for all } x \in [-1,1] \text{ with } |x| \ge 2^{-\alpha}.
+\end{gather*}
+Replacing $\operatorname{sgn}$ by this composition in
+$\operatorname{comp}(u,v)$ then gives a value within $2^{-\alpha}$ of the
+true outcome whenever $v - u \in [-1,1]$ and $|v - u| \ge 2^{-\alpha}$.
+This is the comparison with precision $\alpha$
+of~\cite{lee2021minimax}, and every comparison in
+Section~\ref{sec:method} takes this form. A composition reaches this
+accuracy at a far smaller multiplicative depth than a single polynomial of
+the same accuracy. Even so, one evaluation spends a large part of the
+level budget, so the ciphertext is bootstrapped between the components,
+with the sign bootstrapping of Appendix~\ref{app:signboot}. For each
+$\alpha$, we obtain the degrees of the components as
+in~\cite{lee2021minimax}, taking into account that every component is
+followed by this bootstrapping.
+
+The approximation is applied to every slot at once, so one evaluation
+decides $N/2$ comparisons. How a comparison outcome and a maximum are
+built from it is shown in Section~\ref{sec:method}, where each is first
+needed.
+
+Two properties of this approximation are used throughout
+Section~\ref{sec:method}. Its input must lie in $[-1,1]$, so every
+quantity to be compared is scaled into that interval first. And the
+interval $(-2^{-\alpha}, 2^{-\alpha})$, which we call the \emph{dead
+zone}, carries no guarantee at all: an input that falls inside it may
+evaluate to any value in $[-1,1]$. An algorithm built on this comparison
+must therefore keep the quantities that decide its output away from the
+dead zone, at a distance that $\alpha$ controls.

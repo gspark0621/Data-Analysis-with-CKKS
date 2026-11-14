@@ -1,0 +1,74 @@
+% ==================================================================
+%  CoreCheck.tex  --  Section 3.2.2 "Core Check"
+%  Loaded from main.tex.
+% ==================================================================
+
+\subsubsection{Core Check}
+\label{sec:core}
+
+A point is a core point when its $\varepsilon_n$-neighborhood, itself
+included, holds at least $\mathit{MinPts}$ points. Core Check counts the
+neighbors of every point from the masks of Neighbor Check. Summing the
+masks of both directions over all offsets, and adding the point itself,
+gives the neighbor count of every point in a single ciphertext,
+\begin{equation}
+  \label{eq:count}
+  \hat{\mathbf{c}} = 1 + \sum_{k=1}^{k_{\max}}
+    \sum_{s \in \{k,\, n-k\}} \mathsf{adj}_s ,
+\end{equation}
+whose slot~$i$ holds $\hat{c}_i$, the number of points within
+$\varepsilon_n$ of point~$i$.
+
+Point~$i$ is a core point when $\hat{c}_i$ is at least
+$\mathit{MinPts}$, and the server decides this with one more comparison.
+The threshold is not $\mathit{MinPts}$ itself but
+$\mathit{MinPts} - \tfrac{1}{2}$. The counts are integers, and so is
+$\mathit{MinPts}$. A point with exactly $\mathit{MinPts}$ neighbors would
+therefore give $\mathsf{Sgn}$ the input $0$, which lies in the dead zone
+of the approximation (Section~\ref{sec:comparison}). The threshold
+$\mathit{MinPts} - \tfrac{1}{2}$ lies halfway between the last non-core
+count and the first core count, so every count is at least half a unit
+away from it, and the input stays outside the dead zone once the
+precision is chosen as in Section~\ref{sec:correct}.
+
+No count can exceed the number of points, so dividing the shifted count
+by $n$ keeps the input in $[-1,1]$:
+\begin{equation}
+  \label{eq:coreinput}
+  \mathbf{y} = \tfrac{1}{n} \Bigl( \hat{\mathbf{c}}
+    - \bigl( \mathit{MinPts} - \tfrac{1}{2} \bigr) \Bigr),
+\end{equation}
+\begin{equation}
+  \label{eq:core}
+  \mathsf{Core\_mask} = \tfrac{1}{2}
+    \bigl( 1 + \mathsf{Sgn}(\mathbf{y}) \bigr).
+\end{equation}
+Slot~$i$ of $\mathsf{Core\_mask}$ is $1$ when point~$i$ is a core point
+and $0$ when it is not. The sign is taken in the opposite direction to
+Eq.~\eqref{eq:adj}, since here it is the larger values that pass.
+$\mathsf{Core\_mask}$ is the mask vector that Label Propagation uses
+next. The stage needs a single call to $\mathsf{Sgn}$, and
+Algorithm~\ref{alg:core} collects its steps.
+
+\begin{algorithm}[t]
+\caption{\textsf{Core\_check}}
+\label{alg:core}
+\begin{algorithmic}[1]
+\Require adjacency vectors $\mathsf{adj}_1, \dots, \mathsf{adj}_{k_{\max}}$;
+  public $\mathit{MinPts}$, $k_{\max}$, $n$
+\Ensure $\mathsf{Core\_mask}$, slot $i$ equal to $1$ iff point $i$ is a
+  core point
+\State $\hat{\mathbf{c}} \gets 1$
+\For{$k = 1$ \textbf{to} $k_{\max}$}
+  \State $\mathsf{adj}_{n-k} \gets \mathsf{Rot}_{n-k}(\mathsf{adj}_k)$
+  \ForAll{$s \in \{k, n-k\}$}
+    \State $\hat{\mathbf{c}} \gets \hat{\mathbf{c}} + \mathsf{adj}_s$
+  \EndFor
+\EndFor
+\State $\mathbf{y} \gets \tfrac{1}{n} \bigl( \hat{\mathbf{c}}
+  - (\mathit{MinPts} - \tfrac{1}{2}) \bigr)$
+\State $\mathsf{Core\_mask} \gets
+  \tfrac{1}{2}\bigl( 1 + \mathsf{Sgn}(\mathbf{y}) \bigr)$
+\State \Return $\mathsf{Core\_mask}$
+\end{algorithmic}
+\end{algorithm}

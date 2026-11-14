@@ -1,0 +1,24 @@
+% ==================================================================
+%  PostProcessing.tex  --  Section 3.3 "Client-side Post-processing"
+%  Loaded from main.tex.
+%  Implementation (Client_main.py, assign_clusters_by_gap): noise band
+%  0.5 label unit; gap threshold = one label unit, estimated as
+%  max(value) / (largest labelled slot + 1).
+% ==================================================================
+
+\subsection{Client-side Post-processing}
+\label{sec:post}
+
+The client decrypts the ciphertext it receives and recovers one value per
+slot. These values are real numbers rather than exact multiples of the
+label unit $1/n$. Each maximum is approximate
+(Appendix~\ref{app:error}), and every CKKS operation adds a small noise,
+so the labels drift slightly over the rounds.
+
+The client therefore separates the clusters by the gaps between the label
+values rather than by rounding them. The points of one cluster carry the
+same label up to these small errors, so their values lie close together.
+The labels of two clusters started at different multiples of $1/n$, so
+their values lie about one label unit or more apart. Points that received
+no label from a core point keep a value near $0$ and are reported as
+noise.

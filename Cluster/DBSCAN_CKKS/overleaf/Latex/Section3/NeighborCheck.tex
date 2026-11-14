@@ -1,0 +1,124 @@
+% ==================================================================
+%  NeighborCheck.tex  --  Section 3.2 header "Server-side Computation"
+%                         and 3.2.1 "Neighbor Check"
+%  Loaded from main.tex.
+%  IEEEtran compsoc conference numbers subsubsections (secnumdepth = 3),
+%  so 3.2.1--3.2.4 are numbered without changing secnumdepth.
+%  Inside 3.2.x, run-in headings use \paragraph.
+% ==================================================================
+
+\subsection{Server-side Computation}
+\label{sec:server}
+
+The server receives $\mathsf{ct}_1, \dots, \mathsf{ct}_d$ and the
+public parameters, and evaluates DBSCAN in three stages, namely
+Neighbor Check (Section~\ref{sec:neighbor}), Core Check
+(Section~\ref{sec:core}) and
+Label Propagation (Section~\ref{sec:lp}). Section~\ref{sec:correct}
+analyzes the accuracy of the comparisons they use.
+
+\subsubsection{Neighbor Check}
+\label{sec:neighbor}
+
+Neighbor Check decides, for every pair of points that the ordering
+leaves in range, whether their Euclidean distance is at most
+$\varepsilon_n$. The distance itself needs a square root, which CKKS can
+evaluate only through another approximation. The server therefore
+compares squared distances: $\|\mathbf{x}_i - \mathbf{x}_j\| \le
+\varepsilon_n$ if and only if $\|\mathbf{x}_i - \mathbf{x}_j\|^2 \le
+\varepsilon_n^2$.
+
+The server decides one offset $k$ at a time. Rotating a coordinate
+ciphertext by $k$ puts the coordinate of point $i+k$ in slot~$i$.
+Subtracting the rotated ciphertext from the original one, squaring, and
+summing over the $d$ dimensions gives
+\begin{equation}
+  \label{eq:dist}
+  \mathsf{dist}_k^{2} = \sum_{j=1}^{d}
+    \bigl( \mathsf{ct}_j - \mathsf{Rot}_k(\mathsf{ct}_j) \bigr)^{2}.
+\end{equation}
+This is a single ciphertext. Its slot~$i$ holds
+$\|\mathbf{x}_i - \mathbf{x}_{i+k}\|^2$, the squared distance between
+point~$i$ and point~$i+k$, for every $i$ at once.
+
+The input of $\mathsf{Sgn}$ has to lie in $[-1,1]$. After the
+normalization of Section~\ref{sec:client}, every squared distance lies
+in $[0,d]$, so the server divides its difference to the threshold by
+\begin{equation}
+  \label{eq:bound}
+  B = 1.05 \cdot d .
+\end{equation}
+The factor $1.05$ is chosen heuristically. It keeps the scaled input at
+most $1/1.05$ in magnitude,
+about $5\%$ inside the ends $\pm 1$ of the interval on which the
+approximation is fitted. The minimax polynomials grow quickly outside
+that interval, so an input that exceeds $1$ even slightly, for instance
+by the noise that $\mathsf{dist}_k^{2}$ carries, can come out with the
+wrong sign. Label Propagation (Section~\ref{sec:lp}) divides by $1.1$
+instead, also a heuristic choice, and leaves a margin of about $10\%$. There the difference of two
+labels, which can reach $\pm 1$, is refreshed by bootstrapping before its
+sign is taken, and bootstrapping adds more noise than the computation of
+$\mathsf{dist}_k^{2}$, which reaches $\mathsf{Sgn}$ without one. The
+scaled input is
+\begin{equation}
+  \label{eq:cmpinput}
+  \mathbf{x}_k = \tfrac{1}{B}
+    \bigl( \mathsf{dist}_k^{2} - \theta \bigr),
+\end{equation}
+where $\theta$ is a threshold slightly above $\varepsilon_n^2$, fixed in
+Eq.~\eqref{eq:theta}.
+
+The sign of slot~$i$ of $\mathbf{x}_k$ is negative exactly when points
+$i$ and $i+k$ are neighbors. Mapping that sign to $\{0,1\}$ gives the
+adjacency vector
+\begin{equation}
+  \label{eq:adj}
+  \mathsf{adj}_k = \tfrac{1}{2}
+    \bigl( 1 - \mathsf{Sgn}(\mathbf{x}_k) \bigr),
+\end{equation}
+whose slot~$i$ records whether points $i$ and $i+k$ are neighbors:
+\[
+  \mathsf{adj}_k[i] =
+  \begin{cases}
+    1 & \text{if } \mathsf{dist}_k^{2}[i] \le \varepsilon_n^2
+        \quad \text{(neighbors)}, \\[2pt]
+    0 & \text{if } \mathsf{dist}_k^{2}[i] > \varepsilon_n^2
+        \quad \text{(not neighbors)}.
+  \end{cases}
+\]
+$\mathsf{adj}_k$ is the mask vector that Core Check uses next: adding
+the masks of all offsets counts the neighbors of every point.
+
+Algorithm~\ref{alg:neighbor} collects these steps, and the server runs
+it for $k = 1, \dots, k_{\max}$. The same pairs seen from their other end
+need no further comparison. The vector whose slot~$i$ marks the pair
+$(i, i-k)$ is a rotation,
+\[
+  \mathsf{adj}_{n-k} = \mathsf{Rot}_{n-k}(\mathsf{adj}_{k}),
+\]
+since slot~$i$ of the right-hand side holds $\mathsf{adj}_k[i-k]$. The
+whole stage thus costs $k_{\max}$ calls to $\mathsf{Sgn}$, against the
+$n(n-1)/2$ pairwise decisions it stands for.
+
+\begin{algorithm}[t]
+\caption{\textsf{Neighbor\_check}}
+\label{alg:neighbor}
+\begin{algorithmic}[1]
+\Require coordinate ciphertexts $\mathsf{ct}_1, \dots, \mathsf{ct}_d$;
+  offset $k$; public $\theta$, $d$, $n$
+\Ensure $\mathsf{adj}_k$, slot $i$ equal to $1$ iff
+  $\|\mathbf{x}_i - \mathbf{x}_{i+k}\| \le \varepsilon_n$
+\State $B \gets 1.05 \cdot d$
+\State $\mathsf{dist}^{2} \gets
+  \bigl( \mathsf{ct}_1 - \mathsf{Rot}_k(\mathsf{ct}_1) \bigr)^{2}$
+\For{$j = 2$ \textbf{to} $d$}
+  \State $\mathsf{dist}^{2} \gets \mathsf{dist}^{2} +
+    \bigl( \mathsf{ct}_j - \mathsf{Rot}_k(\mathsf{ct}_j) \bigr)^{2}$
+\EndFor
+\State $\mathbf{x} \gets \tfrac{1}{B}
+  \bigl( \mathsf{dist}^{2} - \theta \bigr)$
+\State $\mathsf{adj}_k \gets
+  \tfrac{1}{2}\bigl( 1 - \mathsf{Sgn}(\mathbf{x}) \bigr)$
+\State \Return $\mathsf{adj}_k$
+\end{algorithmic}
+\end{algorithm}

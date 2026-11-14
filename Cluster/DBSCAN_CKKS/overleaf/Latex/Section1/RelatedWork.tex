@@ -1,0 +1,100 @@
+% ==================================================================
+%  RelatedWork.tex  --  subsection of Section 1 (Introduction)
+% ==================================================================
+\subsection{Related Work}
+\label{sec:related}
+
+Privacy-preserving clustering has been pursued with both HE and secure
+multi-party computation (MPC).
+
+\subsubsection{Averaging-Based Clustering under HE}
+K-means and mean-shift share an averaging structure: in every iteration,
+a point---a centroid or a shifted sample---is replaced by a weighted
+average of the data. Non-interactive clustering under HE has been achieved
+for both, for mean-shift~\cite{cheon2019towards} and for
+K-means~\cite{yang2024optimized}. The weighted sums inside these averages
+require only additions and multiplications, which CKKS evaluates natively;
+the remaining non-polynomial steps, division and nearest-center
+selection, are approximated by polynomials or reformulated.
+
+Cheon et al.~\cite{cheon2019towards} adapt mean-shift, which seeks the
+modes of a kernel density estimator (KDE). In the original algorithm,
+every point is shifted toward a mode, and the mode it reaches serves as
+its label. Cheon et al.\ instead shift only a small number of points
+sampled at random from the data, called dusts, while the KDE is still
+evaluated over all points, and they replace the usual Gaussian or
+Epanechnikov kernel with a polynomial one. After the dusts have been
+shifted toward the modes, a separate point-labeling phase maps every
+point to its closest mode. It applies MinIdx, a polynomial approximation
+of the position of the minimum, to the squared distances from the point
+to all dusts, and multiplies the resulting vector entry by entry by the
+number of dusts close to each dust. The label of the point is this
+product, a vector over the dusts that is close to $1$ at the dusts
+nearest to the point and close to $0$ elsewhere.
+The parameters of the scheme, among them the numbers of iterations for
+mean-shift and for the polynomial approximations, are chosen separately
+for each dataset.
+
+Yang et al.~\cite{yang2024optimized} compute each nearest-centroid
+assignment as an encrypted one-hot vector via composite polynomial sign
+approximation. They feed this vector directly into a stabilized centroid
+update that divides by the public dataset size rather than an encrypted
+cluster size. The number of iterations is a constant supplied by the data
+owner, with no rule given for choosing it, and the scheme inherits the
+limitations of K-means discussed above.
+
+\subsubsection{Privacy-Preserving DBSCAN}
+Wang et al.~\cite{wang2022homomorphic} return every comparison to the client. They
+encrypt the data under the Brakerski--Gentry--Vaikuntanathan (BGV)
+scheme~\cite{brakerski2012leveled}, an HE scheme defined over the
+integers modulo a plaintext modulus. To
+compare two encrypted values $x$ and $y$, the server homomorphically
+subtracts $y$ from $x$, adds a fixed constant~$K$, and sends the resulting
+ciphertext $\mathrm{Enc}(x - y + K)$ to the client. The client decrypts it
+and returns its most significant bit as the comparison outcome, and the
+server drives the clustering on these plaintext outcomes.
+
+In MPC-based schemes, non-colluding servers that hold secret shares
+instead evaluate the comparisons jointly. Bozdemir
+et al.~\cite{bozdemir2021privacy} execute exact DBSCAN between two
+servers, computing distances with arithmetic sharing and performing
+comparisons and cluster expansion with Yao's garbled
+circuits~\cite{yao1986generate}. The scheme reveals nothing beyond the
+output, not even the number or sizes of clusters. A data-oblivious
+expansion, whose steps do not depend on the data, requires up to $n$
+passes of $O(n^2)$ work; the scheme therefore fixes the number of passes
+to a value that sufficed on its test data, or otherwise reveals one bit
+per convergence check.
+
+Fu et al.~\cite{fu2024ppa} build on $\rho$-approximate
+DBSCAN~\cite{gan2015dbscan}, which clusters the cells of a grid rather
+than individual points, and run it between two non-colluding servers.
+They construct comparisons from secure most-significant-bit extraction
+over additive secret shares. The grid partition reduces the number of
+communication rounds to $O(n)$. The scheme, however, is designed for
+two-dimensional data, and its output is only guaranteed to lie between
+the DBSCAN results for the radii $\varepsilon$ and
+$(1+\rho)\varepsilon$.
+
+Both MPC schemes rely on non-collusion among multiple servers and on
+server-to-server interaction throughout the computation; as Bozdemir
+et al.~\cite{bozdemir2021privacy} themselves note, HE would remove the
+non-collusion assumption, at a computational cost.
+
+% [2026-11-11] Summary removed to meet the 13-page limit; original text:
+% \subsubsection{Summary}
+% Non-interactive clustering under HE thus exists for K-means and
+% mean-shift, where each comparison outcome is either consumed by an
+% arithmetic update or forms the final label. In DBSCAN, comparison
+% outcomes are thresholded again by the $\mathit{MinPts}$ test and then
+% chained: two core points linked through a sequence of neighboring core
+% points fall into the same cluster, so a single erroneous outcome can merge
+% two clusters. Existing DBSCAN schemes have avoided evaluating these
+% comparisons in the ciphertext, relocating them to the
+% client~\cite{wang2022homomorphic} or to additional
+% servers~\cite{bozdemir2021privacy,fu2024ppa,fu2024fss}. We evaluate them
+% inside CKKS on a single server. The number of propagation rounds is chosen
+% by the client, and we give the client a grid-based estimate that helps it
+% choose. The result is a non-interactive DBSCAN in which the server learns
+% nothing about the data beyond a small set of public parameters, and whose
+% clustering accuracy is on par with plaintext DBSCAN.

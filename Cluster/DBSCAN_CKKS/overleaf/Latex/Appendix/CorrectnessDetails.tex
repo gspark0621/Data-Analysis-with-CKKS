@@ -1,0 +1,135 @@
+% ==================================================================
+%  CorrectnessDetails.tex  --  Appendix A
+%  Details of Section 3.2.4 (Section3/Correctness.tex): derivation of the
+%  precisions, proof of Theorem 1, sign bootstrapping and cleaning, and
+%  the error of the masks and of Max.
+%  Loaded from main.tex after the references, under \appendices.
+% ==================================================================
+
+\section{Details of the Correctness Analysis}
+\label{app:correct}
+
+For a precision $\alpha$, the composite approximation of
+Section~\ref{sec:comparison} returns a value within $2^{1-\alpha}$ of the
+sign of its input $x$ whenever $|x| \ge 2^{-\alpha}$; an input inside the
+dead zone $(-2^{-\alpha}, 2^{-\alpha})$ may give any value in $[-1,1]$.
+A comparison is correct when the inputs that decide the output lie
+outside the dead zone, and it is accurate when the value it returns there
+is close to $\pm 1$. This appendix derives the precisions of
+Section~\ref{sec:correct}, proves Theorem~\ref{thm:sandwich}, and
+describes how the server brings the outputs closer to $\pm 1$, and the
+masks closer to $0$ and $1$.
+
+\subsection{Dead Zone in Neighbor Check}
+\label{app:neighbor}
+
+Nothing in the public parameters bounds how close a squared distance can
+come to $\varepsilon_n^2$, so the server uses a precision $\alpha_d$
+large enough to make the dead zone narrow and chooses on which side of
+$\varepsilon_n$ it lies. With the threshold at $\varepsilon_n^2$ itself,
+the dead zone would lie on both sides of it, and a pair inside it could
+be decided wrongly in either direction. A true neighbor whose input lies
+just below $0$ may come out with an ambiguous value and be missed, a false
+negative. A non-neighbor whose input lies just above $0$ may come out
+with an ambiguous value and be partly counted, a false positive. Removing
+false negatives matters more: a lost neighbor can turn a core point into a
+non-core point or cut a chain of core points, and so split a cluster that
+plaintext DBSCAN keeps whole. The server therefore shifts the threshold
+by the half-width of the dead zone, measured in squared distance, to
+$\theta$ of Eq.~\eqref{eq:theta}. The dead zone then covers only the
+squared distances between $\varepsilon_n^2$ and $\varepsilon_n^2 + 2\mu$,
+all of them on the non-neighbor side. No false negative remains, and a
+false positive adds a value between $0$ and $1$ to a count. Since only
+false positives occur, the count of every point lies between the
+plaintext counts at the radii $\varepsilon_n$ and
+$\varepsilon_{\mathrm{hi}}$, which is Eq.~\eqref{eq:sandwich}.
+
+\subsection{Dead Zone in Core Check and Proof of Theorem~\ref{thm:sandwich}}
+\label{app:core}
+
+Core Check compares $\hat{c}_i$ with $\mathit{MinPts} - \tfrac{1}{2}$
+(Section~\ref{sec:core}). When the count is an integer, the shifted count
+is a half-integer, so
+$|\hat{c}_i - (\mathit{MinPts} - \tfrac{1}{2})| \ge \tfrac{1}{2}$, and
+the input of Eq.~\eqref{eq:coreinput} satisfies $|y_i| \ge 1/(2n)$. The
+smallest precision whose dead zone excludes every such input is
+$\alpha_c = \lceil \log_2 (2n) \rceil$, since then
+$2^{-\alpha_c} \le 1/(2n)$. A count is not an integer only when a false
+positive of Neighbor Check contributes to it. Eq.~\eqref{eq:sandwich}
+bounds the effect of such pairs, and the core test turns that bound into
+the subset relation of Theorem~\ref{thm:sandwich}.
+
+\begin{IEEEproof}[Proof of Theorem~\ref{thm:sandwich}]
+We ignore the error of $\mathsf{Sgn}$ outside its dead zone, which
+Appendices~\ref{app:signboot} and~\ref{app:error} bound.
+If $i \in \mathrm{Core}_{\varepsilon_n}$, Eq.~\eqref{eq:sandwich} gives
+$\hat{c}_i \ge \mathrm{Nei}_{\varepsilon_n}(i) \ge \mathit{MinPts}$, so
+$y_i \ge 1/(2n) \ge 2^{-\alpha_c}$ and $\mathsf{Core\_mask}[i] = 1$. If
+$i \notin \mathrm{Core}_{\varepsilon_{\mathrm{hi}}}$, it gives
+$\hat{c}_i \le \mathrm{Nei}_{\varepsilon_{\mathrm{hi}}}(i) \le
+\mathit{MinPts} - 1$, so $y_i \le -1/(2n)$ and
+$\mathsf{Core\_mask}[i] = 0$. If no distance lies strictly between
+$\varepsilon_n$ and $\varepsilon_{\mathrm{hi}}$, then
+$\mathrm{Nei}_{\varepsilon_n}(i) = \mathrm{Nei}_{\varepsilon_{\mathrm{hi}}}(i)$
+for every $i$, and the two bounds meet.
+\end{IEEEproof}
+
+\subsection{Dead Zone in Label Propagation}
+\label{app:lp}
+
+Every initial label is a multiple of $1/n$, and so is the $0$ of a masked
+slot. Apart from its error, $\mathsf{Max}$ returns one of its two inputs,
+so every label that $\mathsf{Max}$ compares is an initial label or $0$,
+and two labels that differ do so by at least $1/n$. After the division by
+$1.1$ in Eq.~\eqref{eq:step}, the input of $\mathsf{Sgn}$ then has
+magnitude at least $1/(1.1\,n)$, and the smallest precision that keeps it
+outside the dead zone is $\alpha_\ell = \lceil \log_2 (1.1\,n) \rceil$,
+since then $2^{-\alpha_\ell} \le 1/(1.1\,n)$. Two equal labels give the
+input $0$, inside the dead zone, but $\mathsf{Max}$ then returns their
+common value whatever the sign (Section~\ref{sec:lp}). No input of the
+maximum can therefore lead it to a wrong label.
+
+\subsection{Sign Bootstrapping and Cleaning}
+\label{app:signboot}
+
+Outside the dead zone the composite polynomial returns a value within
+$2^{1-\alpha}$ of $\pm 1$. The server pushes its outputs further toward
+$\pm 1$, and with them the masks further toward $0$ and $1$, in two
+ways.
+
+First, following Hong et al.~\cite{hong2026white}, it refreshes the
+ciphertext with sign bootstrapping after every component of the
+composite polynomial, the last one included. Sign bootstrapping evaluates
+a sine function in place of the modular reduction of ordinary
+bootstrapping. The sine removes the multiple of the modulus that
+bootstrapping introduces, and its extrema are placed at the two signs, so
+a value near $\pm 1$ is drawn toward $\pm 1$: an input within $\tau$ of
+$z \in \{-1, 1\}$ comes out within $(\pi^2/8)\,\tau^2$ of
+$z$~\cite[Thm.~1]{hong2026white}. The bootstrapping that the composite
+polynomial needs between its components thus also shrinks the error
+quadratically, without an extra level.
+
+Second, after the last sign bootstrapping the server applies one cleaning
+polynomial. The signs that enter $\mathsf{Max}$ are cleaned with
+$g(x) = \tfrac{3}{2}x - \tfrac{1}{2}x^3$, which
+fixes $\pm 1$, and the masks $\mathsf{adj}_k$ and $\mathsf{Core\_mask}$
+with $h(x) = 3x^2 - 2x^3$, which fixes $0$ and
+$1$. Both polynomials have zero derivative at the points they fix, so an
+error $\eta$ becomes $O(\eta^2)$; for instance,
+$h(1-\eta) = 1 - 3\eta^2 + 2\eta^3$ and $h(\eta) = 3\eta^2 - 2\eta^3$.
+
+\subsection{Halving the Error}
+\label{app:error}
+
+The masks and the maximum use $\mathsf{Sgn}$ only through
+$\tfrac{1}{2}(1 \pm \mathsf{Sgn})$, in Eqs.~\eqref{eq:adj},
+\eqref{eq:core} and~\eqref{eq:step}. If $\mathsf{Sgn}$ is within $\eta$
+of $\pm 1$, then $\tfrac{1}{2}(1 \pm \mathsf{Sgn})$ is within $\eta/2$ of
+$0$ or $1$. The mapping thus halves the error, from $2^{1-\alpha}$ to
+$2^{-\alpha}$ for the bare approximation, which is the precision $\alpha$
+of a comparison in~\cite{lee2021minimax}. In the maximum of
+Eq.~\eqref{eq:max} the error of $\mathsf{ste}$ is multiplied by
+$|\mathbf{b} - \mathbf{a}| \le 1$, so one maximum deviates from the
+larger label by at most $|\mathbf{b} - \mathbf{a}| \cdot
+2^{-\alpha_\ell}$. These small deviations are why the client receives
+real values rather than exact labels (Section~\ref{sec:post}).
