@@ -4,29 +4,20 @@
 
 ▶ 데이터셋: /home/junhyung/study/Data-Analysis-with-CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/s1.arff
 eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력 → grid 기반 자동 산출) > 
-▶ eps=44000.0, min_pts=50, n_rounds=2 (입력값)
+▶ eps=44000.0, min_pts=50, n_rounds=1 (입력값)
 
-[Client] n_rounds=2 (사용자 입력 — grid 기반 산출 생략)
+[Client] n_rounds=1 (사용자 입력 — grid 기반 산출 생략)
 
 [MCP] N=5000 기반 alpha별 MCP 준비
       Core: alpha=14 -> mcp_alpha14_lp_cheb.json 존재, 스킵
-      LP:   alpha=13 (gap=1/(1.1*5000)=0.000182) 생성 -> mcp_alpha13_lp_clean1.json
-
-[MCP-LP] α=13, cleaning=1회, degrees=[15, 15, 15, 31], δ=1.2207e-04, η=7.6294e-06
-         τ 허용 한계 = 2.4414e-04
-  p_1 (deg=15) [0.000122,1.000000] err=9.9692e-01 t_i=9.9692e-01
-  p_2 (deg=15) [0.003076,1.996924] err=9.6193e-01 t_i=9.6194e-01
-  p_3 (deg=15) [0.038058,1.961942] err=6.2724e-01 t_i=6.2724e-01
-  p_4 (deg=31) [0.372755,1.627245] err=2.0094e-04 t_i=2.0857e-04
-[MCP-LP] t_k=2.0857e-04 ✓ (≤2.4414e-04)
-[MCP] 저장: mcp_alpha13_lp_clean1.json
+      LP:   alpha=13 -> mcp_alpha13_lp_clean1.json 존재, 스킵
 데이터: 5000개, 2차원  정규화 eps=0.042510
 ⚠️  5000개 → 긴 시간 소요 예상
 
 
 [Ball Tree] BFS level-order 정렬 + k_max 구조 분석...
 [Client] PCA(PC1) 정렬 구축: 0.001초  (중심화+thin SVD+argsort, O(N log N))
-[Client] k_max ε-window 상한: 0.005초 (two-pointer O(N), eps-이웃 조회 없음)
+[Client] k_max ε-window 상한: 0.003초 (two-pointer O(N), eps-이웃 조회 없음)
 [Client] k_max 상한=563   (1-Lipschitz 보장: ε-이웃 ⇒ |Δz|≤ε)
          T(563)=158766  안전값=2500
 ✅ Heap 순서 저장: debug_heap_order_N5000.csv
@@ -34,30 +25,30 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
 
 ================ Plaintext (sklearn DBSCAN) ===================
 [평문/sklearn] 클러스터 15개, 노이즈 85개, core 4280개
-▶ Plaintext: 0.07초
+▶ Plaintext: 0.05초
 
 ================ FHE (kd_dense) ========================
-  [MEM] Engine 초기화 전                                   used=570 MB  free=23994 MB
-  [MEM] Engine 초기화  used=1044 MB
-  [MEM] public_key                                delta=+28 MB  (used=1072 MB)
-  [MEM] rotation_key                              delta=+3370 MB  (used=4442 MB)
-  [MEM] relinearization_key                       delta=+224 MB  (used=4666 MB)
-  [MEM] conjugation_key                           delta=+224 MB  (used=4890 MB)
-  [MEM] smallbootstrap_key                        delta=+232 MB  (used=5122 MB)
-  [MEM] bootstrap_key                             생략 (small 키로 대체)  (used=5122 MB)
-  [MEM] 모든 키 생성 완료  used=5122 MB
+  [MEM] Engine 초기화 전                                   used=482 MB  free=24082 MB
+  [MEM] Engine 초기화  used=1090 MB
+  [MEM] public_key                                delta=+32 MB  (used=1122 MB)
+  [MEM] rotation_key                              delta=+3790 MB  (used=4912 MB)
+  [MEM] relinearization_key                       delta=+252 MB  (used=5164 MB)
+  [MEM] conjugation_key                           delta=+252 MB  (used=5416 MB)
+  [MEM] lossy_bootstrap_key(stage=4)              delta=+9160 MB  (used=14576 MB)
+  [MEM] smallbootstrap_key  생략 (라벨 lossy + 동기화 모드)
+  [MEM] 모든 키 생성 완료  used=14576 MB
   slot_count=32,768  N=5000  dim=2
 [Client] Starting encryption for 2 dimensions...
   [MEM][Encrypt] slot_count=32,768  num_points=5000  dim=2
   [MEM][Encrypt] 슬롯 사용률: 5000/32768 (15.26%)
   [MEM][Encrypt] 생성될 ciphertext 수: 2개
-  [MEM][Encrypt] encrypt dim[0]                            delta=+30 MB  (used=5152 MB)
-  [MEM][Encrypt] encrypt dim[1]                            delta=+28 MB  (used=5180 MB)
-  [MEM] encrypt_data Ball-sorted (2개)                  delta=+58 MB  (used=5180 MB)
-[Server] n_rounds=2 (클라이언트 grid 산출값 수신)
-  [MEM][Server] send_to_server_fhe() 진입                        used=5180 MB
+  [MEM][Encrypt] encrypt dim[0]                            delta=+28 MB  (used=14604 MB)
+  [MEM][Encrypt] encrypt dim[1]                            delta=+28 MB  (used=14632 MB)
+  [MEM] encrypt_data Ball-sorted (2개)                  delta=+56 MB  (used=14632 MB)
+[Server] n_rounds=1 (클라이언트 grid 산출값 수신)
+  [MEM][Server] send_to_server_fhe() 진입                        used=14632 MB
   N=5000  dim=2  eps^2=0.0018  min_pts=50.0
-  k_max=563  T(k_max)=158766  전파방식=KD-dense  n_rounds=2
+  k_max=563  T(k_max)=158766  전파방식=KD-dense  n_rounds=1
 
 [Step 1] Normalize 시작 (k=1..563, eps^2=0.0018)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
@@ -120,7 +111,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[10] 생성 (누적 10회 MCP)                      delta=-16 MB  (used=5344 MB)
+  [MEM][Server] adj_k[10] 생성 (누적 10회 MCP)                      delta=-16 MB  (used=14800 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -181,7 +172,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[20] 생성 (누적 20회 MCP)                      delta=-16 MB  (used=5464 MB)
+  [MEM][Server] adj_k[20] 생성 (누적 20회 MCP)                      delta=-16 MB  (used=14920 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -242,7 +233,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[30] 생성 (누적 30회 MCP)                      delta=-16 MB  (used=5584 MB)
+  [MEM][Server] adj_k[30] 생성 (누적 30회 MCP)                      delta=-16 MB  (used=15040 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -303,7 +294,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[40] 생성 (누적 40회 MCP)                      delta=-16 MB  (used=5704 MB)
+  [MEM][Server] adj_k[40] 생성 (누적 40회 MCP)                      delta=-16 MB  (used=15162 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -364,7 +355,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[50] 생성 (누적 50회 MCP)                      delta=-16 MB  (used=5824 MB)
+  [MEM][Server] adj_k[50] 생성 (누적 50회 MCP)                      delta=-16 MB  (used=15282 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -425,7 +416,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[60] 생성 (누적 60회 MCP)                      delta=-16 MB  (used=5944 MB)
+  [MEM][Server] adj_k[60] 생성 (누적 60회 MCP)                      delta=-16 MB  (used=15402 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -486,7 +477,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[70] 생성 (누적 70회 MCP)                      delta=-16 MB  (used=6064 MB)
+  [MEM][Server] adj_k[70] 생성 (누적 70회 MCP)                      delta=-16 MB  (used=15522 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -547,7 +538,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[80] 생성 (누적 80회 MCP)                      delta=-16 MB  (used=6184 MB)
+  [MEM][Server] adj_k[80] 생성 (누적 80회 MCP)                      delta=-16 MB  (used=15642 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -608,7 +599,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[90] 생성 (누적 90회 MCP)                      delta=-16 MB  (used=6304 MB)
+  [MEM][Server] adj_k[90] 생성 (누적 90회 MCP)                      delta=-16 MB  (used=15762 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -669,7 +660,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[100] 생성 (누적 100회 MCP)                    delta=-16 MB  (used=6424 MB)
+  [MEM][Server] adj_k[100] 생성 (누적 100회 MCP)                    delta=-16 MB  (used=15882 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -730,7 +721,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[110] 생성 (누적 110회 MCP)                    delta=-16 MB  (used=6544 MB)
+  [MEM][Server] adj_k[110] 생성 (누적 110회 MCP)                    delta=-16 MB  (used=16002 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -791,7 +782,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[120] 생성 (누적 120회 MCP)                    delta=-16 MB  (used=6664 MB)
+  [MEM][Server] adj_k[120] 생성 (누적 120회 MCP)                    delta=-16 MB  (used=16122 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -852,7 +843,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[130] 생성 (누적 130회 MCP)                    delta=-16 MB  (used=6784 MB)
+  [MEM][Server] adj_k[130] 생성 (누적 130회 MCP)                    delta=-16 MB  (used=16242 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -913,7 +904,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[140] 생성 (누적 140회 MCP)                    delta=-16 MB  (used=6904 MB)
+  [MEM][Server] adj_k[140] 생성 (누적 140회 MCP)                    delta=-16 MB  (used=16362 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -974,7 +965,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[150] 생성 (누적 150회 MCP)                    delta=-16 MB  (used=7024 MB)
+  [MEM][Server] adj_k[150] 생성 (누적 150회 MCP)                    delta=-16 MB  (used=16482 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1035,7 +1026,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[160] 생성 (누적 160회 MCP)                    delta=-16 MB  (used=7144 MB)
+  [MEM][Server] adj_k[160] 생성 (누적 160회 MCP)                    delta=-16 MB  (used=16602 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1096,7 +1087,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[170] 생성 (누적 170회 MCP)                    delta=-16 MB  (used=7264 MB)
+  [MEM][Server] adj_k[170] 생성 (누적 170회 MCP)                    delta=-16 MB  (used=16722 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1157,7 +1148,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[180] 생성 (누적 180회 MCP)                    delta=-16 MB  (used=7384 MB)
+  [MEM][Server] adj_k[180] 생성 (누적 180회 MCP)                    delta=-16 MB  (used=16842 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1218,7 +1209,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[190] 생성 (누적 190회 MCP)                    delta=-16 MB  (used=7504 MB)
+  [MEM][Server] adj_k[190] 생성 (누적 190회 MCP)                    delta=-16 MB  (used=16962 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1279,7 +1270,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[200] 생성 (누적 200회 MCP)                    delta=-16 MB  (used=7624 MB)
+  [MEM][Server] adj_k[200] 생성 (누적 200회 MCP)                    delta=-16 MB  (used=17082 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1340,7 +1331,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[210] 생성 (누적 210회 MCP)                    delta=-16 MB  (used=7744 MB)
+  [MEM][Server] adj_k[210] 생성 (누적 210회 MCP)                    delta=-16 MB  (used=17202 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1401,7 +1392,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[220] 생성 (누적 220회 MCP)                    delta=-16 MB  (used=7864 MB)
+  [MEM][Server] adj_k[220] 생성 (누적 220회 MCP)                    delta=-16 MB  (used=17322 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1462,7 +1453,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[230] 생성 (누적 230회 MCP)                    delta=-16 MB  (used=7984 MB)
+  [MEM][Server] adj_k[230] 생성 (누적 230회 MCP)                    delta=-16 MB  (used=17442 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1523,7 +1514,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[240] 생성 (누적 240회 MCP)                    delta=-16 MB  (used=8104 MB)
+  [MEM][Server] adj_k[240] 생성 (누적 240회 MCP)                    delta=-16 MB  (used=17562 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1584,7 +1575,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[250] 생성 (누적 250회 MCP)                    delta=-16 MB  (used=8224 MB)
+  [MEM][Server] adj_k[250] 생성 (누적 250회 MCP)                    delta=-16 MB  (used=17682 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1645,7 +1636,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[260] 생성 (누적 260회 MCP)                    delta=-16 MB  (used=8344 MB)
+  [MEM][Server] adj_k[260] 생성 (누적 260회 MCP)                    delta=-16 MB  (used=17802 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1706,7 +1697,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[270] 생성 (누적 270회 MCP)                    delta=-16 MB  (used=8464 MB)
+  [MEM][Server] adj_k[270] 생성 (누적 270회 MCP)                    delta=-16 MB  (used=17922 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1767,7 +1758,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[280] 생성 (누적 280회 MCP)                    delta=-16 MB  (used=8584 MB)
+  [MEM][Server] adj_k[280] 생성 (누적 280회 MCP)                    delta=-16 MB  (used=18042 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1828,7 +1819,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[290] 생성 (누적 290회 MCP)                    delta=-16 MB  (used=8704 MB)
+  [MEM][Server] adj_k[290] 생성 (누적 290회 MCP)                    delta=-16 MB  (used=18162 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1889,7 +1880,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[300] 생성 (누적 300회 MCP)                    delta=-16 MB  (used=8824 MB)
+  [MEM][Server] adj_k[300] 생성 (누적 300회 MCP)                    delta=-16 MB  (used=18282 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -1950,7 +1941,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[310] 생성 (누적 310회 MCP)                    delta=-16 MB  (used=8944 MB)
+  [MEM][Server] adj_k[310] 생성 (누적 310회 MCP)                    delta=-16 MB  (used=18402 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2011,7 +2002,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[320] 생성 (누적 320회 MCP)                    delta=-16 MB  (used=9064 MB)
+  [MEM][Server] adj_k[320] 생성 (누적 320회 MCP)                    delta=-16 MB  (used=18522 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2072,7 +2063,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[330] 생성 (누적 330회 MCP)                    delta=-16 MB  (used=9184 MB)
+  [MEM][Server] adj_k[330] 생성 (누적 330회 MCP)                    delta=-16 MB  (used=18642 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2133,7 +2124,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[340] 생성 (누적 340회 MCP)                    delta=-16 MB  (used=9304 MB)
+  [MEM][Server] adj_k[340] 생성 (누적 340회 MCP)                    delta=-16 MB  (used=18762 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2194,7 +2185,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[350] 생성 (누적 350회 MCP)                    delta=-16 MB  (used=9424 MB)
+  [MEM][Server] adj_k[350] 생성 (누적 350회 MCP)                    delta=-16 MB  (used=18882 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2255,7 +2246,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[360] 생성 (누적 360회 MCP)                    delta=-16 MB  (used=9544 MB)
+  [MEM][Server] adj_k[360] 생성 (누적 360회 MCP)                    delta=-16 MB  (used=19002 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2316,7 +2307,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[370] 생성 (누적 370회 MCP)                    delta=-16 MB  (used=9664 MB)
+  [MEM][Server] adj_k[370] 생성 (누적 370회 MCP)                    delta=-16 MB  (used=19122 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2377,7 +2368,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[380] 생성 (누적 380회 MCP)                    delta=-16 MB  (used=9784 MB)
+  [MEM][Server] adj_k[380] 생성 (누적 380회 MCP)                    delta=-16 MB  (used=19242 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2438,7 +2429,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[390] 생성 (누적 390회 MCP)                    delta=-16 MB  (used=9904 MB)
+  [MEM][Server] adj_k[390] 생성 (누적 390회 MCP)                    delta=-16 MB  (used=19362 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2499,7 +2490,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[400] 생성 (누적 400회 MCP)                    delta=-16 MB  (used=10024 MB)
+  [MEM][Server] adj_k[400] 생성 (누적 400회 MCP)                    delta=-16 MB  (used=19482 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2560,7 +2551,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[410] 생성 (누적 410회 MCP)                    delta=-16 MB  (used=10144 MB)
+  [MEM][Server] adj_k[410] 생성 (누적 410회 MCP)                    delta=-16 MB  (used=19602 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2621,7 +2612,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[420] 생성 (누적 420회 MCP)                    delta=-16 MB  (used=10264 MB)
+  [MEM][Server] adj_k[420] 생성 (누적 420회 MCP)                    delta=-16 MB  (used=19722 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2682,7 +2673,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[430] 생성 (누적 430회 MCP)                    delta=-16 MB  (used=10384 MB)
+  [MEM][Server] adj_k[430] 생성 (누적 430회 MCP)                    delta=-16 MB  (used=19842 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2743,7 +2734,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[440] 생성 (누적 440회 MCP)                    delta=-16 MB  (used=10504 MB)
+  [MEM][Server] adj_k[440] 생성 (누적 440회 MCP)                    delta=-16 MB  (used=19962 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2804,7 +2795,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[450] 생성 (누적 450회 MCP)                    delta=-16 MB  (used=10624 MB)
+  [MEM][Server] adj_k[450] 생성 (누적 450회 MCP)                    delta=-16 MB  (used=20082 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2865,7 +2856,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[460] 생성 (누적 460회 MCP)                    delta=-16 MB  (used=10744 MB)
+  [MEM][Server] adj_k[460] 생성 (누적 460회 MCP)                    delta=-16 MB  (used=20202 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2926,7 +2917,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[470] 생성 (누적 470회 MCP)                    delta=-16 MB  (used=10864 MB)
+  [MEM][Server] adj_k[470] 생성 (누적 470회 MCP)                    delta=-16 MB  (used=20322 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -2987,7 +2978,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[480] 생성 (누적 480회 MCP)                    delta=-16 MB  (used=10984 MB)
+  [MEM][Server] adj_k[480] 생성 (누적 480회 MCP)                    delta=-16 MB  (used=20442 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -3048,7 +3039,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[490] 생성 (누적 490회 MCP)                    delta=-16 MB  (used=11104 MB)
+  [MEM][Server] adj_k[490] 생성 (누적 490회 MCP)                    delta=-16 MB  (used=20562 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -3109,7 +3100,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[500] 생성 (누적 500회 MCP)                    delta=-16 MB  (used=11224 MB)
+  [MEM][Server] adj_k[500] 생성 (누적 500회 MCP)                    delta=-16 MB  (used=20682 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -3170,7 +3161,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[510] 생성 (누적 510회 MCP)                    delta=-16 MB  (used=11344 MB)
+  [MEM][Server] adj_k[510] 생성 (누적 510회 MCP)                    delta=-16 MB  (used=20802 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -3231,7 +3222,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[520] 생성 (누적 520회 MCP)                    delta=-16 MB  (used=11464 MB)
+  [MEM][Server] adj_k[520] 생성 (누적 520회 MCP)                    delta=-16 MB  (used=20922 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -3292,7 +3283,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[530] 생성 (누적 530회 MCP)                    delta=-16 MB  (used=11584 MB)
+  [MEM][Server] adj_k[530] 생성 (누적 530회 MCP)                    delta=-16 MB  (used=21042 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -3353,7 +3344,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[540] 생성 (누적 540회 MCP)                    delta=-16 MB  (used=11704 MB)
+  [MEM][Server] adj_k[540] 생성 (누적 540회 MCP)                    delta=-16 MB  (used=21162 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -3414,7 +3405,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[550] 생성 (누적 550회 MCP)                    delta=-16 MB  (used=11824 MB)
+  [MEM][Server] adj_k[550] 생성 (누적 550회 MCP)                    delta=-16 MB  (used=21282 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -3475,7 +3466,7 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] adj_k[560] 생성 (누적 560회 MCP)                    delta=-16 MB  (used=11944 MB)
+  [MEM][Server] adj_k[560] 생성 (누적 560회 MCP)                    delta=-16 MB  (used=21402 MB)
   [Normalize] basis=chebyshev, dim=2, eps_sq=0.001807
   [Normalize] mcp_delta=0.000001 (= 2^-20.00)
   [Normalize] margin_val=0.000002, threshold=0.001809
@@ -3494,9 +3485,9 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
   [Normalize] eps_effective=0.04253 (+0.1%)
   [Normalize] bound=2.100000 (= 1.05·dim), scale=0.476190
   - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-[TIME] Normalize: 10657.39초
+[TIME] Normalize: 1868.97초
   [진단] Normalize 구간 표준 bootstrap 호출 수 = 0회  → bootstrap_key 불필요! 생성 지연 가능(13.4GB 확보)
-  [MEM][Server] Normalize 완료 (adj_k_list 563개 = k=1..563)      used=11994 MB
+  [MEM][Server] Normalize 완료 (adj_k_list 563개 = k=1..563)      used=21452 MB
 
 [DEBUG] total_neighbors (앞 10개): [31. 32. 61. 68. 76. 46. 53. 71. 55. 69.]
 ✅ 저장 완료: debug_normalize_eps0.0425_min50.csv
@@ -3508,82 +3499,75 @@ eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력
 [Server] Core: N=5000, min_pts=50.0, scale=1/5000=2.0000e-04
 [Server] Core: delta=6.10352e-05 (= 2^-14.00) < 0.5/N=0.00010 ✓ (여유 1.6배)
   - [Core] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
-  [MEM][Server] identify_core_points_fhe() 완료                  delta=+12 MB  (used=12006 MB)
-[TIME] Core: 18.47초
+  [MEM][Server] identify_core_points_fhe() 완료                  delta=+12 MB  (used=21464 MB)
+[TIME] Core: 2.44초
 [DEBUG] Core 마스크 (앞 10개): [-0.  0.  1.  1.  1.  0.  1.  1.  1.  1.]
   → Core 포인트: 4280/5000
 ✅ 저장 완료: debug_core_eps0.0425_min50.csv
 
 [Step 3] Label Propagation 시작
-  방식: KD-dense  k=1..563, n_rounds=2
-  T(563)=158766 ≥ N=5000  (fhe_max≈6756회)
+  방식: KD-dense  k=1..563, n_rounds=1
+  T(563)=158766 ≥ N=5000  (fhe_max≈4504회)
 
 [KD-LP] ══════════════════════════════════════════
 [KD-LP] KD-tree dense stride 전파 (k=1..563)  [Phase1 재구성]
-[KD-LP] N=5000, k_max=563, n_rounds=2, label_scale=1.1 (인셋 1.1)
+[KD-LP] N=5000, k_max=563, n_rounds=1, label_scale=1.1 (인셋 1.1)
 [KD-LP] T(563)=158766  ✓ ≥ N
-[KD-LP] fhe_max: 2256회 (Phase1 1504 + Phase2 752)  [순차식이면 6756회 → 3.0배 감소]
+[KD-LP] fhe_max: 1504회 (Phase1 752 + Phase2 752)  [순차식이면 4504회 → 3.0배 감소]
 [KD-LP] 라벨 레벨 가드 임계: 7 (budget=10 가정)
 [KD-LP] ══════════════════════════════════════════
 
-  [DBG] 초기 core_labels: min=-0.0000  max=0.9970  mean=0.4258
-         [-0.0, 0.0, 0.0006, 0.0008, 0.001, -0.0]
-[KD-LP] Core-Core adjm 사전계산: 563 ciphertext (fwd만 저장, bwd=shift(fwd) 유도 / 라운드 불변 호이스팅)
+  [DBG] 초기 core_labels: min=-0.0000  max=0.9955  mean=0.4255
+         [-0.0, 0.0, 0.0006, 0.0008, 0.001, 0.0]
+[KD-LP] adjm 사전계산 판정: free=3046MB  need≈11508MB (k_max 563×16MB + 여유 2500MB) → 즉석 계산 (OFF)
 [KD-LP] ★ Label_Propagation 버전: 2026-07-r9-nowrap  _FORCE_GROUP_SIZE=None
 [KD-LP] ★감싸기 검사: (n_region 4 + half 2)×N 5000 = 30000  vs slot_count 32768  ✓ 안전  (슬롯 채움 61.0%)
 [KD-LP] 그룹 트리-max: m=3 (슬롯 용량 ⌊32768/5000⌋−1=5, k_max=563) → 188그룹 × 2방향
-[KD-LP] 암호문 회계: adj_k_half_list 563 + adjm_cache 563 + packed 1 + adjm 1 + 임시 ~3 ≈ 1131개
+[KD-LP] 암호문 회계: adj_k_half_list 563 + adjm_cache 0 + packed 1 + adjm 1 + 임시 ~3 ≈ 568개
 [KD-LP] (그룹 수 188는 순차 반복 횟수이며 암호문 수가 아님)
-[KD-LP] Phase1: Core-Core Round1/2 (forward)
+[KD-LP] Phase1: Core-Core Round1/1 (forward)
   [LabelProp] N=5000 → α=13 MCP 로드: mcp_alpha13_lp_clean1.json (degrees=[15, 15, 15, 31])
-[KD-LP]   (라벨 refresh 누계: 281, GPU 18808 MB)
-  [DBG] P1-R1-forward 완료: min=-0.0000  max=0.9954  mean=0.4864
-         [-0.0, -0.0, 0.0624, 0.0624, 0.0624, -0.0]
-[KD-LP] Phase1: Core-Core Round1/2 (backward)
-[KD-LP]   (라벨 refresh 누계: 657, GPU 18808 MB)
-  [DBG] P1-R1-backward 완료: min=-0.0000  max=0.9948  mean=0.4860
-         [-0.0, -0.0, 0.0617, 0.0617, 0.0617, -0.0]
-[KD-LP] Phase1: Core-Core Round2/2 (forward)
-[KD-LP]   (라벨 refresh 누계: 939, GPU 18808 MB)
-  [DBG] P1-R2-forward 완료: min=-0.0000  max=0.9931  mean=0.4845
-         [-0.0, 0.0, 0.0601, 0.0601, 0.0601, 0.0]
-[KD-LP] Phase1: Core-Core Round2/2 (backward)
-[KD-LP]   (라벨 refresh 누계: 1315, GPU 18808 MB)
-  [DBG] P1-R2-backward 완료: min=-0.0000  max=0.9925  mean=0.4840
-         [-0.0, -0.0, 0.0595, 0.0595, 0.0595, -0.0]
+[KD-LP]   (라벨 refresh 누계: 187, GPU 21514 MB)
+  [DBG] P1-R1-forward 완료: min=-0.0000  max=0.7932  mean=0.4261
+         [0.0, -0.0, 0.0644, 0.0644, 0.0644, -0.0]
+[KD-LP] Phase1: Core-Core Round1/1 (backward)
+[KD-LP]   (라벨 refresh 누계: 563, GPU 21514 MB)
+  [DBG] P1-R1-backward 완료: min=-0.0000  max=0.6055  mean=0.3587
+         [-0.0, -0.0, 0.0653, 0.0653, 0.0653, -0.0]
+[KD-LP] 라벨 refresh 방식: lossy_bootstrap  | core/border 동기화: ON
 [KD-LP] Phase2: Core→Border (forward)
-[KD-LP]   (라벨 refresh 누계: 1690)
-  [DBG] P2-forward 완료: min=-0.0000  max=0.9925  mean=0.0567
-         [0.0595, 0.0595, 0.0, 0.0, -0.0, 0.0595]
+[KD-LP]   (라벨 refresh 누계: 751, core 동기화 누계: 187)
+  [DBG] P2-forward 완료: min=-0.0000  max=0.5522  mean=0.0396
+         [0.0658, 0.0658, 0.0, -0.0, -0.0, 0.0658]
 [KD-LP] Phase2: Core→Border (backward)
-[KD-LP]   (라벨 refresh 누계: 2066)
-  [DBG] P2-backward 완료: min=-0.0000  max=0.9925  mean=0.0747
-         [0.0595, 0.0595, 0.0, -0.0, 0.0, 0.0595]
-[KD-LP] 라벨 lineage 표준 bootstrap 총계: 2066 (+ 최종 1회)  ← 이전 구조 추정치 6768~9024회
-  [DBG] 최종 [0,5000]: min=-0.0588  max=4962.6624  mean=2793.7449
-         [297.5776, 297.3627, 297.3583, 297.338, 297.3513, 297.5599]
-  [MEM][Server] Label Propagation 완료                           delta=+12 MB  (used=12018 MB)
-[TIME] Label_Propagation: 63457.35초
+[KD-LP]   (라벨 refresh 누계: 939, core 동기화 누계: 375)
+  [DBG] P2-backward 완료: min=-0.0000  max=0.5113  mean=0.0494
+         [0.0662, 0.0662, 0.0, -0.0, 0.0, 0.0662]
+[KD-LP] 라벨 lineage 표준 bootstrap 총계: 939 (+ 최종 1회)  ← 이전 구조 추정치 4512~6016회
+  [DBG] 최종 [0,5000]: min=-0.6564  max=2555.2148  mean=1844.6541
+         [330.2841, 330.7421, 330.5341, 330.1433, 330.3317, 331.0612]
+  [MEM][Server] Label Propagation 완료                           delta=+16 MB  (used=21480 MB)
+[TIME] Label_Propagation: 6308.95초
 
-[DEBUG] 최종 라벨 (Heap 순서, 앞 10개): [297.58 297.36 297.36 297.34 297.35 297.56 297.34 297.34 297.25 297.36]
-  범위: min=-0.06, max=4962.66  (정상: [0,5000])
+[DEBUG] 최종 라벨 (Heap 순서, 앞 10개): [330.28 330.74 330.53 330.14 330.33 331.06 330.07 330.45 330.39 330.64]
+  범위: min=-0.66, max=2555.21  (정상: [0,5000])
   ※ 클라이언트에서 inv_perm 적용 후 원래 순서 복원
 ✅ 저장 완료: debug_labelprop_final_eps0.0425_min50.csv
-  [MEM][Server] send_to_server_fhe() 완료                        used=12018 MB
+  [MEM][Server] send_to_server_fhe() 완료                        used=21480 MB
 
 [k_max] 563  (PCA(PC1) ε-window 상한, 클라이언트 산출)
-[n_rounds] 2  (사용자 입력)
-  [MEM] decrypt                                        delta=+0 MB  (used=5224 MB)
-[FHE] [Client] 적응형 thr: thr=0.9925 | 내부최대 0.1634, 분리 14곳 | 감쇠 c≈0.9925
-[Client] 간격판정: thr=0.9925324798451355 → 클러스터 15개, 노이즈 85개
-[Client]   내부 최대 간격 0.1634 < thr 0.9925324798451355 < 사이 최소 간격 26.2825   여유 161배
-▶ FHE: 74133.49초
+[n_rounds] 1  (사용자 입력)
+  [MEM] decrypt                                        delta=+0 MB  (used=14680 MB)
+[FHE] [Client] 적응형 thr: thr=0.5110 | 내부최대 0.1707, 분리 14곳 | 감쇠 c≈0.5110
+[Client] 간격판정: thr=0.5110429620892067 → 클러스터 15개, 노이즈 85개
+[Client]   내부 최대 간격 0.1707 < thr 0.5110429620892067 < 사이 최소 간격 5.8720   여유 34배
+▶ FHE: 8180.62초
 
 ================ 소요 시간 =====================
-Normalize         : 10657.39초
-Core              : 18.47초
-Label_Propagation : 63457.35초
-합계              : 74133.21초
+Normalize         : 1868.97초
+Core              : 2.44초
+Label_Propagation : 6308.95초
+합계              : 8180.36초
 
 ✅ 타이밍 저장: debug_timings_eps44000.0_min50.txt
 ✅ 디버깅 파일: debug_fhe_vs_np_eps44000.0_min50.csv
@@ -3597,4 +3581,4 @@ Label_Propagation : 63457.35초
 📊 [ARI] 실제 정답 vs 평문: 97.84점 / 100점
 📊 [ARI] 평문 vs FHE:       99.96점 / 100점
   => 👍 대부분 일치
-✅ 결과 저장: fhe_heap_result_eps44000.0_min50.csv
+✅ 결과 저장: s1_fhe_heap_result_eps44000.0_min50.csv

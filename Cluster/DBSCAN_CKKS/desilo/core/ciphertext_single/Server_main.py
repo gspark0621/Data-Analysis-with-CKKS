@@ -271,18 +271,20 @@ def send_to_server_fhe(
                     del _prev, sq_ct
 
         before_adj = _gpu_used_mb()
-        adj_k = check_neighbor_closed_interval(
+        adj_k, adj_raw = check_neighbor_closed_interval(
             engine, dist_sq_k, eps**2, keypack, dim,
             num_points=N,          # ★ N 기반 α 자동선택(⌈log₂N⌉+8). mcp_path 고정 제거.
+            return_raw=True,
         )
         if _MEM_AGGRESSIVE_FREE:
             del dist_sq_k               # sign-eval 끝나면 즉시 불필요
-        adj_k_list.append(adj_k)   # k=1..k_max 저장
+        adj_k_list.append(adj_k)   # k=1..k_max 저장 (LP 용: cleaned)
 
         # total_neighbors 누적 (대칭 최적화)
+        # ★ [2026-11] 합산은 cleaning 전 adj_raw 로 (level +2 → Core 첫 성분 통과).
         if 2 * k < N:
-            adj_Nk = fhe_circular_shift(engine, adj_k, N - k, N, keypack)
-            _pair  = engine.add(adj_k, adj_Nk)
+            adj_Nk = fhe_circular_shift(engine, adj_raw, N - k, N, keypack)
+            _pair  = engine.add(adj_raw, adj_Nk)
             if _MEM_AGGRESSIVE_FREE:
                 del adj_Nk
             if total_neighbors_ct is None:
@@ -294,12 +296,13 @@ def send_to_server_fhe(
                     del _acc, _pair
         else:   # k == N//2: double counting 방지
             if total_neighbors_ct is None:
-                total_neighbors_ct = adj_k
+                total_neighbors_ct = adj_raw
             else:
                 _acc = total_neighbors_ct
-                total_neighbors_ct = engine.add(_acc, adj_k)
+                total_neighbors_ct = engine.add(_acc, adj_raw)
                 if _MEM_AGGRESSIVE_FREE:
                     del _acc
+        del adj_raw
 
         if _MEM_AGGRESSIVE_FREE and (k % _GC_EVERY == 0):
             gc.collect()

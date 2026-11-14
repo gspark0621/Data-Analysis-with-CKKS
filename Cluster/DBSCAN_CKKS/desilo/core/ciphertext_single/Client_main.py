@@ -224,7 +224,7 @@ def prepare_client_ordering(
 
 def setup_fhe_engine(verbose: bool = False):
     """FHE 엔진 및 KeyPack 생성. production/test 공통 사용."""
-    engine     = desilofhe.Engine(bootstrap=True, mode="gpu")
+    engine     = desilofhe.Engine(use_bootstrap=True, mode="gpu",compact= True)
     secret_key = engine.create_secret_key()
 
     def _create(name, fn):
@@ -243,29 +243,32 @@ def setup_fhe_engine(verbose: bool = False):
     rk  = _create("rotation_key",        engine.create_rotation_key)
     rlk = _create("relinearization_key", engine.create_relinearization_key)
     ck  = _create("conjugation_key",     engine.create_conjugation_key)
-    sbk = _create("smallbootstrap_key",  engine.create_small_bootstrap_key)
-
-    # ★ [2026-07] full bootstrap_key 생성 생략 (13.4GB → 0).
-    #   DesiloFHE 는 engine.bootstrap(ct, relin, conj, rotation, small_bootstrap)
-    #   형태를 지원하므로, 값 보존 bootstrap(EvalMod) 도 small 키로 수행 가능하다.
-    #   'small' 은 EvalSign 전용 키가 아니라 **키 변형**이다.
-    #   (sign_bootstrap 과 bootstrap 은 여전히 다른 연산 — 라벨처럼 임의 실수를
-    #    나르는 암호문에는 반드시 bootstrap 을 써야 한다. 바뀐 건 키뿐이다.)
-    #   실사용처: Label_Propagation._refresh, cleaning._refresh — 둘 다
-    #   _USE_SMALL_BOOT_FOR_REFRESH=True 로 small 키 경로를 쓴다.
-    #   나머지 3곳(Core.py:72, Normalize.py:68, chebyshev_eval.py:157)은
-    #   죽은 할당/죽은 분기라 None 이어도 무해하다.
-    #   ⇒ GPU 사용량 18.6GB → 약 5.2GB. Step 1(Normalize) 여유 6GB → 19GB.
-    #   문제 시 _CREATE_FULL_BOOTSTRAP_KEY=True + 각 파일의
-    #   _USE_SMALL_BOOT_FOR_REFRESH=False 로 원복.
-    _CREATE_FULL_BOOTSTRAP_KEY = False
-    if _CREATE_FULL_BOOTSTRAP_KEY:
-        bk = _create("bootstrap_key",    engine.create_bootstrap_key)
+    # ★ [2026-11] small_bootstrap_key 폐기 → lossy_bootstrap_key 하나로 통일.
+    #   sign_bootstrap : engine.sign_bootstrap(ct, relin, conj, lossy_bootstrap_key)
+    #   일반 bootstrap : engine.lossy_bootstrap(ct, relin, conj, lossy_bootstrap_key)
+    #   KeyPack(util/keypack.py, 다른 경로와 공유)의 필드명은 그대로 두고
+    #   bootstrap_key 필드에 LossyBootstrapKey 를 담는다.
+    # ★ [2026-11] stage_count 3→4: 키 12.3GB → 9.1GB (medium 기준).
+    #   s1(N=5000, k_max=563)에서 stage 3 은 Normalize 중 OOM.
+    #   stage 5(7.0GB)는 bootstrap 간 가용 level 6 → MCP 성분이 안 들어가 sign_bootstrap 실패.
+    #   값은 cleaning.LOSSY_STAGE_COUNT 한 곳에서 관리 (최소 입력 level 상수와 연동).
+    from core.ciphertext_single.cleaning import LOSSY_STAGE_COUNT as _LOSSY_STAGE_COUNT
+    bk = _create(f"lossy_bootstrap_key(stage={_LOSSY_STAGE_COUNT})",
+                 lambda sk: engine.create_lossy_bootstrap_key(
+                     sk, stage_count=_LOSSY_STAGE_COUNT, size="medium"))
+    # ★ [2026-11b] 라벨(실수값) refresh 전용 small_bootstrap_key (~232MB).
+    #   lossy_bootstrap 은 노이즈가 커서 라벨이 값 크기에 비례해 압축되고
+    #   core/border 의 refresh 횟수 차이로 클러스터가 쪼개짐 (tetra ARI 82).
+    #   라벨만 engine.bootstrap(ct, relin, conj, rotation, small_bootstrap_key) 로 refresh.
+    #   False → small 키 미생성: 라벨도 lossy_bootstrap + core/border refresh 동기화
+    #   (Label_Propagation._SYNC_CORE_REFRESH) 로 자동 전환.
+    _USE_SMALL_BOOTSTRAP_KEY = False
+    if _USE_SMALL_BOOTSTRAP_KEY:
+        sbk = _create("smallbootstrap_key", engine.create_small_bootstrap_key)
     else:
-        bk = None
+        sbk = None
         if verbose:
-            print(f"  [MEM] bootstrap_key                             "
-                  f"생략 (small 키로 대체)  (used={_gpu_used_mb():.0f} MB)")
+            print("  [MEM] smallbootstrap_key  생략 (라벨 lossy + 동기화 모드)")
 
     keypack = KeyPack(
         public_key=pk, rotation_key=rk, relinearization_key=rlk,
@@ -455,7 +458,11 @@ def assign_clusters_by_gap(orig_labels, N, thr=None, noise_band=None):
     v = np.asarray(orig_labels, dtype=float)
     out = np.full(len(v), -1, dtype=int)
 
-    live = np.where(np.abs(v) >= noise_band)[0]
+    # ★ [2026-11] 한쪽 판정: 라벨은 0(노이즈) 또는 [1, N] 이라 음수일 수 없다.
+    #   노이즈 점의 복호값은 0 이 아니라 약 −1e-4·N 으로 치우친다 (s1 N=5000: −0.48±0.08).
+    #   |v| 로 판정하면 −0.5 아래로 내려간 노이즈 점이 '클러스터'로 잡힌다
+    #   (s1: 노이즈 85개 중 35개가 16번째 클러스터가 됨).
+    live = np.where(v >= noise_band)[0]
     if len(live) == 0:
         print(f"[Client] 간격판정: 전부 노이즈 (|라벨| < {noise_band})")
         return out.tolist()

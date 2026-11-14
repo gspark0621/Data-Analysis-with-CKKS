@@ -1,0 +1,625 @@
+============================================================
+  FHE DBSCAN E2E 테스트 (Heap KD-tree depth 전파)
+============================================================
+
+▶ 데이터셋: /home/junhyung/study/Data-Analysis-with-CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/swiss_banknote_shifted.arff
+eps 값 > min_pts 값 > Round 값 (양의 정수 / 정할 수 없으면 y 입력 → grid 기반 자동 산출) > 
+▶ eps=1.09, min_pts=4, n_rounds=8 (입력값)
+
+[Client] n_rounds=8 (사용자 입력 — grid 기반 산출 생략)
+
+[MCP] N=200 기반 alpha별 MCP 준비
+      Core: alpha=9 -> mcp_alpha9_lp_cheb.json 존재, 스킵
+      LP:   alpha=8 -> mcp_alpha8_lp_clean1.json 존재, 스킵
+데이터: 200개, 6차원  정규화 eps=0.188046
+⚠️  200개 → 긴 시간 소요 예상
+
+
+[Ball Tree] BFS level-order 정렬 + k_max 구조 분석...
+[Client] PCA(PC1) 정렬 구축: 0.000초  (중심화+thin SVD+argsort, O(N log N))
+[Client] k_max ε-window 상한: 0.000초 (two-pointer O(N), eps-이웃 조회 없음)
+[Client] k_max 상한=68   (1-Lipschitz 보장: ε-이웃 ⇒ |Δz|≤ε)
+         T(68)=2346  안전값=100
+✅ Heap 순서 저장: debug_heap_order_N200.csv
+  → k_max=68  T(68)=2346  ✓ ≥ N=200
+
+================ Plaintext (sklearn DBSCAN) ===================
+[평문/sklearn] 클러스터 2개, 노이즈 4개, core 186개
+▶ Plaintext: 0.01초
+
+================ FHE (kd_dense) ========================
+  [MEM] Engine 초기화 전                                   used=482 MB  free=24082 MB
+  [MEM] Engine 초기화  used=1090 MB
+  [MEM] public_key                                delta=+32 MB  (used=1122 MB)
+  [MEM] rotation_key                              delta=+3790 MB  (used=4912 MB)
+  [MEM] relinearization_key                       delta=+252 MB  (used=5164 MB)
+  [MEM] conjugation_key                           delta=+252 MB  (used=5416 MB)
+  [MEM] lossy_bootstrap_key(stage=4)              delta=+9160 MB  (used=14576 MB)
+  [MEM] smallbootstrap_key  생략 (라벨 lossy + 동기화 모드)
+  [MEM] 모든 키 생성 완료  used=14576 MB
+  slot_count=32,768  N=200  dim=6
+[Client] Starting encryption for 6 dimensions...
+  [MEM][Encrypt] slot_count=32,768  num_points=200  dim=6
+  [MEM][Encrypt] 슬롯 사용률: 200/32768 (0.61%)
+  [MEM][Encrypt] 생성될 ciphertext 수: 6개
+  [MEM][Encrypt] encrypt dim[0]                            delta=+28 MB  (used=14604 MB)
+  [MEM][Encrypt] encrypt dim[1]                            delta=+28 MB  (used=14632 MB)
+  [MEM][Encrypt] encrypt dim[2]                            delta=+28 MB  (used=14660 MB)
+  [MEM][Encrypt] encrypt dim[3]                            delta=+28 MB  (used=14688 MB)
+  [MEM][Encrypt] encrypt dim[4]                            delta=+28 MB  (used=14716 MB)
+  [MEM][Encrypt] encrypt dim[5]                            delta=+28 MB  (used=14744 MB)
+  [MEM] encrypt_data Ball-sorted (6개)                  delta=+168 MB  (used=14744 MB)
+[Server] n_rounds=8 (클라이언트 grid 산출값 수신)
+  [MEM][Server] send_to_server_fhe() 진입                        used=14744 MB
+  N=200  dim=6  eps^2=0.0354  min_pts=4.0
+  k_max=68  T(k_max)=2346  전파방식=KD-dense  n_rounds=8
+
+[Step 1] Normalize 시작 (k=1..68, eps^2=0.0354)
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [MEM][Server] adj_k[10] 생성 (누적 10회 MCP)                      delta=-16 MB  (used=14912 MB)
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [MEM][Server] adj_k[20] 생성 (누적 20회 MCP)                      delta=-16 MB  (used=15032 MB)
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [MEM][Server] adj_k[30] 생성 (누적 30회 MCP)                      delta=-16 MB  (used=15152 MB)
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [MEM][Server] adj_k[40] 생성 (누적 40회 MCP)                      delta=-16 MB  (used=15272 MB)
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [MEM][Server] adj_k[50] 생성 (누적 50회 MCP)                      delta=-16 MB  (used=15394 MB)
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [MEM][Server] adj_k[60] 생성 (누적 60회 MCP)                      delta=-16 MB  (used=15514 MB)
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [Normalize] basis=chebyshev, dim=6, eps_sq=0.035361
+  [Normalize] mcp_delta=0.000015 (= 2^-16.00)
+  [Normalize] margin_val=0.000096, threshold=0.035458
+  [Normalize] eps_effective=0.18830 (+0.1%)
+  [Normalize] bound=6.300000 (= 1.05·dim), scale=0.158730
+  - [Normalize] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+[TIME] Normalize: 241.83초
+  [진단] Normalize 구간 표준 bootstrap 호출 수 = 0회  → bootstrap_key 불필요! 생성 지연 가능(13.4GB 확보)
+  [MEM][Server] Normalize 완료 (adj_k_list 68개 = k=1..68)        used=15624 MB
+
+[DEBUG] total_neighbors (앞 10개): [ 9. 10.  2. 28. 15. 28. 15. 30. 37. 18.]
+✅ 저장 완료: debug_normalize_eps0.1880_min4.csv
+
+[Step 2] Core Point 판별 시작
+[Core] N=200 → α=9 MCP 로드: mcp_alpha9_lp_cheb.json (gap=0.5/200=0.00250, δ=2^-9, 여유=1.3배 — ★sanity_check 로 실측 재확인 권장)
+[Server] Core: Chebyshev BSGS MCP 로드 (mcp_alpha9_lp_cheb.json)
+[Server] Core: degrees=[7, 7, 7, 13], sign_err=2.6697e-03
+[Server] Core: N=200, min_pts=4.0, scale=1/200=5.0000e-03
+[Server] Core: delta=1.95312e-03 (= 2^-9.00) < 0.5/N=0.00250 ✓ (여유 1.3배)
+  - [Core] bit_cleaning (n_iters=1, 일반 bootstrap 대체)...
+  [MEM][Server] identify_core_points_fhe() 완료                  delta=+12 MB  (used=15636 MB)
+[TIME] Core: 1.83초
+[DEBUG] Core 마스크 (앞 10개): [1. 1. 0. 1. 1. 1. 1. 1. 1. 1.]
+  → Core 포인트: 186/200
+✅ 저장 완료: debug_core_eps0.1880_min4.csv
+
+[Step 3] Label Propagation 시작
+  방식: KD-dense  k=1..68, n_rounds=8
+  T(68)=2346 ≥ N=200  (fhe_max≈2448회)
+
+[KD-LP] ══════════════════════════════════════════
+[KD-LP] KD-tree dense stride 전파 (k=1..68)  [Phase1 재구성]
+[KD-LP] N=200, k_max=68, n_rounds=8, label_scale=1.1 (인셋 1.1)
+[KD-LP] T(68)=2346  ✓ ≥ N
+[KD-LP] fhe_max: 126회 (Phase1 112 + Phase2 14)  [순차식이면 2448회 → 19.4배 감소]
+[KD-LP] 라벨 레벨 가드 임계: 7 (budget=10 가정)
+[KD-LP] ══════════════════════════════════════════
+
+  [DBG] 초기 core_labels: min=-0.0000  max=0.9984  mean=0.4705
+         [0.005, 0.01, -0.0, 0.02, 0.025, 0.03]
+[KD-LP] adjm 사전계산 판정: free=8874MB  need≈3588MB (k_max 68×16MB + 여유 2500MB) → 사전계산 ON
+[KD-LP] Core-Core adjm 사전계산: 68 ciphertext (fwd만 저장, bwd=shift(fwd) 유도 / 라운드 불변 호이스팅)
+[KD-LP] ★ Label_Propagation 버전: 2026-07-r9-nowrap  _FORCE_GROUP_SIZE=None
+[KD-LP] ★감싸기 검사: (n_region 69 + half 35)×N 200 = 20800  vs slot_count 32768  ✓ 안전  (슬롯 채움 42.1%)
+[KD-LP] 그룹 트리-max: m=68 (슬롯 용량 ⌊32768/200⌋−1=162, k_max=68) → 1그룹 × 2방향
+[KD-LP] 암호문 회계: adj_k_half_list 68 + adjm_cache 68 + packed 1 + adjm 1 + 임시 ~3 ≈ 141개
+[KD-LP] (그룹 수 1는 순차 반복 횟수이며 암호문 수가 아님)
+[KD-LP] Phase1: Core-Core Round1/8 (forward)
+  [LabelProp] N=200 → α=8 MCP 로드: mcp_alpha8_lp_clean1.json (degrees=[7, 15, 15])
+[KD-LP]   (라벨 refresh 누계: 3, GPU 16502 MB)
+  [DBG] P1-R1-forward 완료: min=-0.0000  max=0.9938  mean=0.6001
+         [0.115, 0.08, 0.0, 0.175, 0.175, 0.195]
+[KD-LP] Phase1: Core-Core Round1/8 (backward)
+[KD-LP]   (라벨 refresh 누계: 7, GPU 16502 MB)
+  [DBG] P1-R1-backward 완료: min=-0.0000  max=0.9877  mean=0.6122
+         [0.115, 0.08, -0.0, 0.175, 0.175, 0.195]
+[KD-LP] Phase1: Core-Core Round2/8 (forward)
+[KD-LP]   (라벨 refresh 누계: 11, GPU 16502 MB)
+  [DBG] P1-R2-forward 완료: min=-0.0000  max=0.9817  mean=0.6648
+         [0.3742, 0.2996, 0.0, 0.3791, 0.3742, 0.3791]
+[KD-LP] Phase1: Core-Core Round2/8 (backward)
+[KD-LP]   (라벨 refresh 누계: 15, GPU 16502 MB)
+  [DBG] P1-R2-backward 완료: min=-0.0000  max=0.9759  mean=0.6660
+         [0.3739, 0.2995, -0.0, 0.3789, 0.3789, 0.3789]
+[KD-LP] Phase1: Core-Core Round3/8 (forward)
+[KD-LP]   (라벨 refresh 누계: 19, GPU 16502 MB)
+  [DBG] P1-R3-forward 완료: min=-0.0000  max=0.9701  mean=0.6781
+         [0.4524, 0.4524, -0.0, 0.4622, 0.4622, 0.4622]
+[KD-LP] Phase1: Core-Core Round3/8 (backward)
+[KD-LP]   (라벨 refresh 누계: 23, GPU 16502 MB)
+  [DBG] P1-R3-backward 완료: min=-0.0000  max=0.9645  mean=0.6765
+         [0.4519, 0.4519, -0.0, 0.4616, 0.4616, 0.4616]
+[KD-LP] Phase1: Core-Core Round4/8 (forward)
+[KD-LP]   (라벨 refresh 누계: 27, GPU 16502 MB)
+  [DBG] P1-R4-forward 완료: min=-0.0000  max=0.9589  mean=0.6786
+         [0.4708, 0.4708, -0.0, 0.4951, 0.4951, 0.4951]
+[KD-LP] Phase1: Core-Core Round4/8 (backward)
+[KD-LP]   (라벨 refresh 누계: 31, GPU 16502 MB)
+  [DBG] P1-R4-backward 완료: min=-0.0000  max=0.9534  mean=0.6761
+         [0.4702, 0.4702, 0.0, 0.4944, 0.4944, 0.4944]
+[KD-LP] Phase1: Core-Core Round5/8 (forward)
+[KD-LP]   (라벨 refresh 누계: 35, GPU 16502 MB)
+  [DBG] P1-R5-forward 완료: min=-0.0000  max=0.9481  mean=0.6747
+         [0.4937, 0.4937, -0.0, 0.5033, 0.5033, 0.5033]
+[KD-LP] Phase1: Core-Core Round5/8 (backward)
+[KD-LP]   (라벨 refresh 누계: 39, GPU 16502 MB)
+  [DBG] P1-R5-backward 완료: min=-0.0000  max=0.9428  mean=0.6720
+         [0.493, 0.493, -0.0, 0.5025, 0.5025, 0.5025]
+[KD-LP] Phase1: Core-Core Round6/8 (forward)
+[KD-LP]   (라벨 refresh 누계: 43, GPU 16502 MB)
+  [DBG] P1-R6-forward 완료: min=-0.0000  max=0.9376  mean=0.6693
+         [0.5018, 0.5018, -0.0, 0.5018, 0.5018, 0.5018]
+[KD-LP] Phase1: Core-Core Round6/8 (backward)
+[KD-LP]   (라벨 refresh 누계: 47, GPU 16502 MB)
+  [DBG] P1-R6-backward 완료: min=-0.0000  max=0.9325  mean=0.6666
+         [0.5011, 0.5011, -0.0, 0.5011, 0.5011, 0.5011]
+[KD-LP] Phase1: Core-Core Round7/8 (forward)
+[KD-LP]   (라벨 refresh 누계: 51, GPU 16502 MB)
+  [DBG] P1-R7-forward 완료: min=-0.0000  max=0.9275  mean=0.6640
+         [0.5004, 0.5004, -0.0, 0.5004, 0.5004, 0.5004]
+[KD-LP] Phase1: Core-Core Round7/8 (backward)
+[KD-LP]   (라벨 refresh 누계: 55, GPU 16502 MB)
+  [DBG] P1-R7-backward 완료: min=-0.0000  max=0.9226  mean=0.6613
+         [0.4997, 0.4997, 0.0, 0.4997, 0.4997, 0.4997]
+[KD-LP] Phase1: Core-Core Round8/8 (forward)
+[KD-LP]   (라벨 refresh 누계: 59, GPU 16502 MB)
+  [DBG] P1-R8-forward 완료: min=-0.0000  max=0.9177  mean=0.6587
+         [0.4989, 0.4989, -0.0, 0.4989, 0.4989, 0.4989]
+[KD-LP] Phase1: Core-Core Round8/8 (backward)
+[KD-LP]   (라벨 refresh 누계: 63, GPU 16502 MB)
+  [DBG] P1-R8-backward 완료: min=-0.0000  max=0.9129  mean=0.6562
+         [0.4982, 0.4982, -0.0, 0.4982, 0.4982, 0.4982]
+[KD-LP] 라벨 refresh 방식: lossy_bootstrap  | core/border 동기화: ON
+[KD-LP] Phase2: Core→Border (forward)
+[KD-LP]   (라벨 refresh 누계: 67, core 동기화 누계: 3)
+  [DBG] P2-forward 완료: min=-0.0000  max=0.9082  mean=0.0306
+         [-0.0, 0.0, -0.0, -0.0, -0.0, -0.0]
+[KD-LP] Phase2: Core→Border (backward)
+[KD-LP]   (라벨 refresh 누계: 71, core 동기화 누계: 7)
+  [DBG] P2-backward 완료: min=-0.0000  max=0.9048  mean=0.0330
+         [-0.0, 0.0, 0.497, -0.0, -0.0, 0.0]
+[KD-LP] 라벨 lineage 표준 bootstrap 총계: 71 (+ 최종 1회)  ← 이전 구조 추정치 378~504회
+  [DBG] 최종 [0,200]: min=-0.0014  max=180.7230  mean=136.7095
+         [99.33, 99.3307, 99.3646, 99.3289, 99.3292, 99.33]
+  [MEM][Server] Label Propagation 완료                           delta=+16 MB  (used=15652 MB)
+[TIME] Label_Propagation: 564.88초
+
+[DEBUG] 최종 라벨 (Heap 순서, 앞 10개): [99.33 99.33 99.36 99.33 99.33 99.33 99.33 99.33 99.33 99.33]
+  범위: min=-0.00, max=180.72  (정상: [0,200])
+  ※ 클라이언트에서 inv_perm 적용 후 원래 순서 복원
+✅ 저장 완료: debug_labelprop_final_eps0.1880_min4.csv
+  [MEM][Server] send_to_server_fhe() 완료                        used=15652 MB
+
+[k_max] 68  (PCA(PC1) ε-window 상한, 클라이언트 산출)
+[n_rounds] 8  (사용자 입력)
+  [MEM] decrypt                                        delta=+0 MB  (used=14794 MB)
+[FHE] [Client] 적응형 thr: thr=0.9036 | 내부최대 0.2279, 분리 1곳 | 감쇠 c≈0.9036
+[Client] 간격판정: thr=0.9036148117447377 → 클러스터 2개, 노이즈 4개
+[Client]   내부 최대 간격 0.2279 < thr 0.9036148117447377 < 사이 최소 간격 81.1283   여유 356배
+▶ FHE: 808.67초
+
+================ 소요 시간 =====================
+Normalize         : 241.83초
+Core              : 1.83초
+Label_Propagation : 564.88초
+합계              : 808.54초
+
+✅ 타이밍 저장: debug_timings_eps1.09_min4.txt
+✅ 디버깅 파일: debug_fhe_vs_np_eps1.09_min4.csv
+
+================ 검증 결과 ==============================
+[True]      클러스터 2개
+[Plaintext] 클러스터 2개
+[FHE]       클러스터 2개
+
+📊 [ARI] 실제 정답 vs FHE:  94.06점 / 100점  ← 핵심 지표
+📊 [ARI] 실제 정답 vs 평문: 94.06점 / 100점
+📊 [ARI] 평문 vs FHE:       100.00점 / 100점
+  => 👍 대부분 일치
+✅ 결과 저장: swiss_banknote_shifted_fhe_heap_result_eps1.09_min4.csv

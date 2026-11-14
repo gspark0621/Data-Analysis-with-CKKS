@@ -49,9 +49,18 @@ from util.keypack import KeyPack
 # 각 cleaning 1회가 소비하는 multiplicative level (square 1 + multiply 1).
 _LEVEL_PER_ITER = 2
 
-# sign_bootstrap 등 후속 연산이 요구하는 최소 입력 level (사용자 확인: 3).
+# ★ [2026-11] lossy_bootstrap_key 의 stage_count. Client_main 이 키 생성에 사용.
+#   실측 (compact=True, max_level=25):
+#     stage  키(medium)  bootstrap 최소 입력 level  출력 level  bootstrap 간 가용 level
+#       3     12.3 GB            3                    13              10
+#       4      9.1 GB            4                    12               8
+#       5      7.0 GB            5                    11               6   ← MCP deg31 성분(≥7 필요) 실패
+#   sign_bootstrap / lossy_bootstrap 모두 "최소 입력 level = stage_count".
+LOSSY_STAGE_COUNT = 4
+
+# sign_bootstrap 등 후속 연산이 요구하는 최소 입력 level (= stage_count).
 # cleaning 완료 후 이 미만이면 _refresh로 복구.
-_MIN_SAFE_LEVEL = 3
+_MIN_SAFE_LEVEL = LOSSY_STAGE_COUNT
 
 
 # ★ [2026-07 진단] 표준 bootstrap(=bootstrap_key, 13.4GB) 이 실제로 몇 번
@@ -73,30 +82,13 @@ def std_boot_count(reset: bool = False) -> int:
     return n
 
 
-# ★ [2026-07] True 면 표준 bootstrap 에도 small_bootstrap_key 를 쓴다
-#   (full bootstrap_key 13.4GB 생성 불필요). 문제 시 False 로 원복.
-_USE_SMALL_BOOT_FOR_REFRESH = True
-
-
 def _refresh(engine: Engine, ct: Ciphertext, keypack: KeyPack) -> Ciphertext:
-    """일반 bootstrap으로 level 복구 (Label_Propagation._refresh와 동일)."""
+    """일반 bootstrap(lossy)으로 level 복구 (Label_Propagation._refresh와 동일)."""
     _STD_BOOT_COUNT["total"] += 1
-    # ★ [2026-07] small_bootstrap_key 로 전환.
-    #   DesiloFHE 는 engine.bootstrap(ct, relin, conj, rotation, small_bootstrap)
-    #   형태를 지원한다. 'small' 은 EvalSign 전용 키가 아니라 키 변형이므로
-    #   값 보존 bootstrap 에도 쓸 수 있다. 이로써 13.4GB 짜리 full bootstrap_key
-    #   를 아예 생성하지 않아도 된다(GPU 18.6GB → 5.2GB).
-    #   ※ sign_bootstrap 과 bootstrap 은 여전히 다른 연산이다. 라벨처럼 임의
-    #     실수를 나르는 암호문에는 반드시 bootstrap(EvalMod) 을 써야 한다.
-    if _USE_SMALL_BOOT_FOR_REFRESH:
-        return engine.bootstrap(
-            engine.intt(ct),
-            keypack.relinearization_key,
-            keypack.conjugation_key,
-            keypack.rotation_key,
-            keypack.smallbootstrap_key,
-        )
-    return engine.bootstrap(
+    # ★ [2026-11] small_bootstrap_key 폐기 → lossy_bootstrap 으로 전환.
+    #   keypack.bootstrap_key 에는 setup_fhe_engine 이 만든
+    #   engine.create_lossy_bootstrap_key(secret_key) 결과(LossyBootstrapKey)가 들어있다.
+    return engine.lossy_bootstrap(
         engine.intt(ct),
         keypack.relinearization_key,
         keypack.conjugation_key,

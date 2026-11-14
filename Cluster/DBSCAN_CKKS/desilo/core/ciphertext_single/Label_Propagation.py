@@ -64,6 +64,7 @@ from util.keypack import KeyPack
 from core.ciphertext_single.minimax import load_mcp
 from core.ciphertext_single.chebyshev_eval import eval_mcp_full_chebyshev   # ★ Chebyshev
 from core.ciphertext_single.cleaning import bit_cleaning, sign_cleaning
+from core.ciphertext_single.cleaning import LOSSY_STAGE_COUNT as _CLEAN_STAGE_COUNT
 
 
 _MCP_LABEL_PATH = "mcp_alpha15_lp_cheb.json"   # ★ Chebyshev basis (α 고정 모드 폴백)
@@ -145,6 +146,27 @@ _LABEL_MIN_LEVEL = 7
 #   내리면 스트라이드마다 즉석 계산 (여전히 dest mask 접기는 유지 →
 #   post-max ×core_mask는 어느 쪽이든 제거됨).
 _HOIST_ADJ_MASKS = True
+# ★ [2026-11] 자동 판정: 남은 GPU 메모리가 adjm_cache(k_max × ct) + 여유보다 작으면
+#   사전계산을 끄고 즉석 계산 (s1: k_max=563 → 약 9GB 필요, lossy 키 사용 시 부족).
+_HOIST_AUTO       = True
+_HOIST_CT_MB      = 16.0     # 암호문 1개 실측 (Normalize adj_k 10개당 +160MB)
+_HOIST_MARGIN_MB  = 2500.0   # LP 작업 암호문 + 단편화 여유
+
+
+def _hoist_fits(k_max: int) -> bool:
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        h = pynvml.nvmlDeviceGetHandleByIndex(0)
+        free_mb = pynvml.nvmlDeviceGetMemoryInfo(h).free / (1024 ** 2)
+    except Exception:
+        return True
+    need_mb = k_max * _HOIST_CT_MB + _HOIST_MARGIN_MB
+    ok = free_mb >= need_mb
+    print(f"[KD-LP] adjm 사전계산 판정: free={free_mb:.0f}MB  need≈{need_mb:.0f}MB "
+          f"(k_max {k_max}×{_HOIST_CT_MB:.0f}MB + 여유 {_HOIST_MARGIN_MB:.0f}MB) "
+          f"→ {'사전계산 ON' if ok else '즉석 계산 (OFF)'}")
+    return ok
 
 # ★ [2026-07] 트리-max 레벨 추적 로그 (첫 실행 진단용, 안정화 후 False)
 _TREE_LEVEL_DEBUG = False   # ★ [2026-07 메모리] True → False.
@@ -261,34 +283,83 @@ def _dbg(engine, secret_key, ct, tag, num_points, show=6):
 #   → 삭제. 라벨 refresh 는 _ensure_label_level → _refresh 단일 경로.
 
 
-# ★ [2026-07] True 면 표준 bootstrap 에도 small_bootstrap_key 를 쓴다
-#   (full bootstrap_key 13.4GB 생성 불필요). 문제 시 False 로 원복.
-_USE_SMALL_BOOT_FOR_REFRESH = True
-
-
 def _refresh(engine: Engine, ct: Ciphertext, keypack: KeyPack) -> Ciphertext:
-    """일반 bootstrap. ★ 라벨 운반 암호문에는 _ensure_label_level 경유로만 사용."""
-    # ★ [2026-07] small_bootstrap_key 로 전환.
-    #   DesiloFHE 는 engine.bootstrap(ct, relin, conj, rotation, small_bootstrap)
-    #   형태를 지원한다. 'small' 은 EvalSign 전용 키가 아니라 키 변형이므로
-    #   값 보존 bootstrap 에도 쓸 수 있다. 이로써 13.4GB 짜리 full bootstrap_key
-    #   를 아예 생성하지 않아도 된다(GPU 18.6GB → 5.2GB).
+    """일반 bootstrap(lossy). ★ 라벨 운반 암호문에는 _ensure_label_level 경유로만 사용."""
+    # ★ [2026-11] small_bootstrap_key 폐기 → lossy_bootstrap 으로 전환.
+    #   keypack.bootstrap_key 에는 setup_fhe_engine 이 만든
+    #   engine.create_lossy_bootstrap_key(secret_key) 결과(LossyBootstrapKey)가 들어있다.
     #   ※ sign_bootstrap 과 bootstrap 은 여전히 다른 연산이다. 라벨처럼 임의
-    #     실수를 나르는 암호문에는 반드시 bootstrap(EvalMod) 을 써야 한다.
-    if _USE_SMALL_BOOT_FOR_REFRESH:
-        return engine.bootstrap(
-            engine.intt(ct),
-            keypack.relinearization_key,
-            keypack.conjugation_key,
-            keypack.rotation_key,
-            keypack.smallbootstrap_key,
-        )
-    return engine.bootstrap(
+    #     실수를 나르는 암호문에는 반드시 (lossy_)bootstrap 을 써야 한다.
+    return engine.lossy_bootstrap(
         engine.intt(ct),
         keypack.relinearization_key,
         keypack.conjugation_key,
         keypack.bootstrap_key,
     )
+
+
+# ★ [2026-11b] 라벨(실수값) 전용 refresh: 정밀 bootstrap + small_bootstrap_key.
+#   lossy_bootstrap 은 값이 클수록 라벨을 압축(0.9625→0.9611)하고, core(12회)와
+#   border(+17회)의 refresh 횟수 차이로 같은 클러스터가 두 무리로 갈라졌다.
+#   False 로 두거나 keypack.smallbootstrap_key 가 None 이면 _refresh(lossy) 로 동작.
+_USE_PRECISE_LABEL_REFRESH = True
+
+# ★ [2026-11c] lossy 라벨 refresh 시 core/border refresh 동기화.
+#   lossy 압축 f 는 값에 대해 결정적이므로, border 계열이 refresh 될 때마다
+#   core_labels_ct 도 같은 횟수 refresh 하면 복사된 값과 원본의 이력이 같아져
+#   같은 클러스터의 core/border 라벨이 같은 값으로 맞춰진다.
+#   정밀 refresh(small 키) 경로에서는 자동으로 꺼진다.
+_SYNC_CORE_REFRESH = True
+
+
+def _precise_label_refresh_on(keypack: KeyPack) -> bool:
+    return (_USE_PRECISE_LABEL_REFRESH
+            and getattr(keypack, "smallbootstrap_key", None) is not None)
+
+
+def _label_refresh(engine: Engine, ct: Ciphertext, keypack: KeyPack) -> Ciphertext:
+    """라벨 운반 암호문 refresh (값 보존 정밀 bootstrap)."""
+    if not _precise_label_refresh_on(keypack):
+        return _refresh(engine, ct, keypack)
+    return engine.bootstrap(
+        engine.intt(ct),
+        keypack.relinearization_key,
+        keypack.conjugation_key,
+        keypack.rotation_key,
+        keypack.smallbootstrap_key,
+    )
+
+
+# ★ [2026-11] 0/1 마스크 전용 refresh: lossy_bootstrap 대신 sign_bootstrap.
+#   m ∈ {0,1} → 2m−1 ∈ {−1,+1} → sign_bootstrap → (s+1)/2 ∈ {0,1}
+#   lossy_bootstrap 은 마스크를 ~0.9985 로 남겨, 전파 후보 adjm⊙shift(라벨) 마다
+#   라벨이 ×0.9985 씩 감쇠했다 (tetra: 초기 core_labels max 0.9625 → 0.9611).
+#   sign_bootstrap 은 레벨 복구와 동시에 ±1 로 squash 하므로 이 감쇠가 사라진다.
+#   ※ 라벨(실수값) 암호문에는 절대 사용 금지 — 값이 0/1 로 뭉개진다.
+#   False 로 두면 기존 _refresh(lossy_bootstrap) 경로로 원복.
+_USE_SIGN_MASK_REFRESH = True
+_SIGN_BOOT_MIN_LEVEL   = _CLEAN_STAGE_COUNT   # sign_bootstrap 입력 최소 level (= stage_count)
+
+
+def _mask_refresh(engine: Engine, ct: Ciphertext, keypack: KeyPack) -> Ciphertext:
+    """0/1 마스크 암호문의 level 복구 + 노이즈 제거."""
+    if not _USE_SIGN_MASK_REFRESH:
+        return _refresh(engine, ct, keypack)
+    slot_count = engine.slot_count
+    # level 부족 시 먼저 lossy refresh — 그 노이즈는 뒤의 sign 이 squash 하므로 무해
+    if getattr(ct, "level", 99) < _SIGN_BOOT_MIN_LEVEL:
+        ct = _refresh(engine, ct, keypack)
+    # 2m − 1 : add/subtract 만 사용 → level 소모 없음
+    pm = engine.subtract(engine.add(ct, ct), engine.encode([1.0] * slot_count))
+    s = engine.sign_bootstrap(
+        engine.intt(pm),
+        keypack.relinearization_key,
+        keypack.conjugation_key,
+        keypack.bootstrap_key,       # LossyBootstrapKey
+    )
+    # (s + 1) / 2 : plaintext 곱 1회
+    s = engine.add(s, engine.encode([1.0] * slot_count))
+    return engine.multiply(s, engine.encode([0.5] * slot_count))
 
 
 def _ensure_label_level(engine, ct, keypack, tag=""):
@@ -302,7 +373,7 @@ def _ensure_label_level(engine, ct, keypack, tag=""):
     lvl = getattr(ct, "level", None)
     if lvl is not None and lvl < _LABEL_MIN_LEVEL:
         _label_refresh_count += 1
-        ct = _refresh(engine, ct, keypack)
+        ct = _label_refresh(engine, ct, keypack)   # ★ [2026-11b] 정밀 bootstrap
     return ct
 
 
@@ -436,7 +507,7 @@ def _build_adjm_fwd(engine, keypack, adj_k, dest_mask_ct, core_mask_ct, k, N):
     adjm_fwd = engine.multiply(
         engine.multiply(adj_k, s_mask_k, relin_key),
         dest_mask_ct, relin_key)
-    adjm_fwd = _refresh(engine, adjm_fwd, keypack)
+    adjm_fwd = _mask_refresh(engine, adjm_fwd, keypack)   # ★ [2026-11] sign 기반
     adjm_fwd = bit_cleaning(engine, adjm_fwd, keypack, n_iters=1,
                             slot_count=engine.slot_count,
                             ensure_output_level=False)
@@ -463,7 +534,7 @@ def _build_adjm_border_pair(engine, keypack, adj_k, non_core_ct, core_mask_ct, k
         bwd = engine.multiply(
             engine.multiply(adj_Nk, s_mask_Nk, relin_key),
             non_core_ct, relin_key)
-        bwd = _refresh(engine, bwd, keypack)
+        bwd = _mask_refresh(engine, bwd, keypack)          # ★ [2026-11] sign 기반
         bwd = bit_cleaning(engine, bwd, keypack, n_iters=1,
                            slot_count=engine.slot_count,
                            ensure_output_level=False)
@@ -754,12 +825,12 @@ def fhe_kd_dense_propagation(
 
     # ── 초기화 ─────────────────────────────────────────────────
     # core_mask 정밀도 복원 (작업 A): refresh로 레벨 확보 후 bit_cleaning.
-    core_mask_ct = _refresh(engine, core_ct, keypack)
+    core_mask_ct = _mask_refresh(engine, core_ct, keypack)      # ★ [2026-11] sign 기반
     core_mask_ct = bit_cleaning(engine, core_mask_ct, keypack,
                                 n_iters=1, slot_count=slot_count,
                                 ensure_output_level=False)
     non_core_ct  = engine.subtract(engine.encode([1.0] * slot_count), core_mask_ct)
-    non_core_ct  = _refresh(engine, non_core_ct, keypack)
+    non_core_ct  = _mask_refresh(engine, non_core_ct, keypack)  # ★ [2026-11] sign 기반
     non_core_ct  = bit_cleaning(engine, non_core_ct, keypack,
                                 n_iters=1, slot_count=slot_count,
                                 ensure_output_level=False)
@@ -767,14 +838,14 @@ def fhe_kd_dense_propagation(
     _lbl_unit = 1.0 / float(N)   # ★ 라벨 (0,1] 스케일: 패킹시 계수노름↑ → bootstrap aliasing 방지
     id_enc = engine.encode(
         [float(i + 1) * _lbl_unit for i in range(N)] + [0.0] * (slot_count - N))
-    core_labels_ct = _refresh(engine,
+    core_labels_ct = _label_refresh(engine,                     # ★ [2026-11b] 정밀
         engine.multiply(core_mask_ct, id_enc), keypack)
 
     _dbg(engine, secret_key, core_labels_ct, "초기 core_labels", N)
 
     # ── ★ [Phase1-②] adjm 사전계산 (Core-Core용, 라운드 불변) ──
     adjm_cache = None
-    if _HOIST_ADJ_MASKS:
+    if _HOIST_ADJ_MASKS and (not _HOIST_AUTO or _hoist_fits(k_max)):
         adjm_cache = _build_adjm_cache(
             engine, keypack, adj_k_half_list, core_mask_ct,
             core_mask_ct, k_max, N, tag="Core-Core")
@@ -846,8 +917,23 @@ def fhe_kd_dense_propagation(
                  f"P1-R{rnd+1}-{pass_name} 완료", N)
 
     # ── Phase 2: Core→Border ───────────────────────────────────
-    border_labels_ct = _refresh(engine,
+    border_labels_ct = _label_refresh(engine,                   # ★ [2026-11b] 정밀
         engine.multiply(engine.encode([0.0] * slot_count), non_core_ct), keypack)
+
+    _sync_on = _SYNC_CORE_REFRESH and not _precise_label_refresh_on(keypack)
+    _sync_total = 0
+    print(f"[KD-LP] 라벨 refresh 방식: "
+          f"{'정밀 bootstrap(small 키)' if _precise_label_refresh_on(keypack) else 'lossy_bootstrap'}"
+          f"  | core/border 동기화: {'ON' if _sync_on else 'OFF'}")
+
+    # ★ [2026-11d] Phase2 진입 전 source(core_labels_ct) level 확보.
+    #   Phase2 에서 core 는 source 로만 쓰여 가드를 거치지 않는다. Phase1 이 낮은 level
+    #   (hepta stage 4: 5)로 끝나면 cand = adjm × shift(core) 가 level 3 이 되고,
+    #   packed 도 3 으로 내려가 트리의 첫 refresh 가 lossy 최소 입력(stage_count=4)에
+    #   못 미쳐 실패한다. 아직 border 로 복사된 라벨이 없으므로 이 refresh 는 이후 모든
+    #   복사본에 공통으로 들어가 core/border 동기화를 깨지 않는다.
+    core_labels_ct = _ensure_label_level(
+        engine, core_labels_ct, keypack, tag="P2 source")
 
     for pass_name in ("forward", "backward"):
         print(f"[KD-LP] Phase2: Core→Border ({pass_name})")
@@ -866,6 +952,7 @@ def fhe_kd_dense_propagation(
                     else:
                         del fwd
                         yield bwd, N - k          # bwd=None이면 _pack_candidates가 스킵
+            _cnt0 = _label_refresh_count
             border_labels_ct = _ensure_label_level(
                 engine, border_labels_ct, keypack, tag=f"P2 {pass_name}")
             # base=border 누적,  source=core_labels  (원본 로직과 동일)
@@ -877,11 +964,19 @@ def fhe_kd_dense_propagation(
                 secret_key=secret_key, tag=f"P2-{pass_name}")
             del packed
             gc.collect()      # ★ [2026-07 메모리] Phase1 과 동일 이유
-        print(f"[KD-LP]   (라벨 refresh 누계: {_label_refresh_count})")
+            # ★ [2026-11c] 이 그룹에서 border 계열(ensure + tree-max 내부)이 받은
+            #   lossy refresh 횟수만큼 core_labels_ct 도 refresh → 이력 동기화.
+            #   다음 그룹은 동기화된 core 에서 복사하므로 복사 시점과 무관하게 일치.
+            if _sync_on:
+                for _ in range(_label_refresh_count - _cnt0):
+                    core_labels_ct = _refresh(engine, core_labels_ct, keypack)
+                    _sync_total += 1
+        print(f"[KD-LP]   (라벨 refresh 누계: {_label_refresh_count}"
+              f"{f', core 동기화 누계: {_sync_total}' if _sync_on else ''})")
         _dbg(engine, secret_key, border_labels_ct, f"P2-{pass_name} 완료", N)
 
     # ★ [r7] core/border 는 _tree_max_packed 에서 [0,N) 클린 보장됨.
-    final_ct = _refresh(engine,
+    final_ct = _label_refresh(engine,                           # ★ [2026-11b] 정밀
         engine.add(core_labels_ct, border_labels_ct), keypack)
     # ★ 라벨 스케일 복원: 이후 bootstrap 없음 → 클라이언트/간격판정 [1,N] 그대로
     final_ct = engine.multiply(final_ct, engine.encode([float(N)] * slot_count))

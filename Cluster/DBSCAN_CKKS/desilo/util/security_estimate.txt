@@ -1,0 +1,9 @@
+N = 65536, log2 PQ = 1704.00, secret = D(σ=0.82, μ=0.00), sigma = 3.19000000000000
+  usvp         BDGL16    lambda = 133.9
+  usvp         core-SVP  lambda = 97.5
+  bdd          BDGL16    lambda = 133.9
+  bdd          core-SVP  lambda = 97.5
+  dual_hybrid  BDGL16    lambda = 133.9
+  dual_hybrid  core-SVP  lambda = 97.5
+-> lambda (BDGL16) = 133.9 bits
+-> lambda (core-SVP) = 97.5 bits
