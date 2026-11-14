@@ -49,9 +49,18 @@ from util.keypack import KeyPack
 # 각 cleaning 1회가 소비하는 multiplicative level (square 1 + multiply 1).
 _LEVEL_PER_ITER = 2
 
-# sign_bootstrap 등 후속 연산이 요구하는 최소 입력 level (사용자 확인: 3).
+# ★ [2026-11] lossy_bootstrap_key 의 stage_count. Client_main 이 키 생성에 사용.
+#   실측 (compact=True, max_level=25):
+#     stage  키(medium)  bootstrap 최소 입력 level  출력 level  bootstrap 간 가용 level
+#       3     12.3 GB            3                    13              10
+#       4      9.1 GB            4                    12               8
+#       5      7.0 GB            5                    11               6   ← MCP deg31 성분(≥7 필요) 실패
+#   sign_bootstrap / lossy_bootstrap 모두 "최소 입력 level = stage_count".
+LOSSY_STAGE_COUNT = 4
+
+# sign_bootstrap 등 후속 연산이 요구하는 최소 입력 level (= stage_count).
 # cleaning 완료 후 이 미만이면 _refresh로 복구.
-_MIN_SAFE_LEVEL = 3
+_MIN_SAFE_LEVEL = LOSSY_STAGE_COUNT
 
 
 # ★ [2026-07 진단] 표준 bootstrap(=bootstrap_key, 13.4GB) 이 실제로 몇 번

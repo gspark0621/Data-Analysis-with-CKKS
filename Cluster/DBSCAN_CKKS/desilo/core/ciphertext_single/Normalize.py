@@ -112,6 +112,7 @@ def check_neighbor_closed_interval(
     num_points=None,                       # ★ N: α 자동선택용 (⌈log₂N⌉+8)
     mcp_path=None,                         # ★ 명시하면 override; None 이면 N 기반
     debug: bool = False,
+    return_raw: bool = False,              # ★ [2026-11] True → (cleaned, raw) 반환
 ):
     """
     FHE 이웃 판별: dist² ≤ eps² → 1, else → 0.
@@ -223,8 +224,16 @@ def check_neighbor_closed_interval(
     #     adj_k는 Server에서 합산(add)/회전(rotate)에 쓰이고(레벨 소비 無),
     #     LP 곱셈 전 _refresh되므로 이중 안전.
     print(f"  - [Normalize] bit_cleaning (n_iters={_CLEANING_ITERS}, 일반 bootstrap 대체)...")
+    raw = result
     result = bit_cleaning(
         engine, result, keypack,
         n_iters=_CLEANING_ITERS, slot_count=slot_count,
     )
+    # ★ [2026-11] raw = cleaning 전 adj (level 2 더 높음). Server_main 의 이웃수
+    #   합산용. stage 4 lossy 키에서 cleaned adj 로 합산하면 Core 진입 level 7 →
+    #   첫 성분(deg 7, 4 level) 뒤 3 < sign_bootstrap 최소 4 로 실패.
+    #   raw 정밀도: 실측 SB 출력 오차 ≈ 1.23·d² (입력 1−d), 포화 입력에서 adj 오차 ~1e-6
+    #   → s1(2·k_max=1126항) 누적 ~1e-3 ≪ Core 허용 오차.
+    if return_raw:
+        return result, raw
     return result

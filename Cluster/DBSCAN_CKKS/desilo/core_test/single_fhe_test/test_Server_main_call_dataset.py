@@ -91,7 +91,7 @@ from core.ciphertext_single.minimax import (
 #   (Core/LP 용 α 별 MCP 는 아래 _ensure_mcp_files_for_N(N) 이 N 확정 후 생성하고,
 #    Normalize 용은 런타임에 _ensure_norm_mcp 가 자동 생성한다.)
 
-DATASET_PATH = "/home/junhyung/study/Data-Analysis-with-CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/hepta.arff"
+DATASET_PATH = "/home/junhyung/study/Data-Analysis-with-CKKS/Cluster/DBSCAN_CKKS/desilo/dataset/Other_cluster/s1.arff"
 
 
 def _ensure_mcp_files_for_N(N: int):

@@ -45,13 +45,13 @@ python: 3.12.10
     - minpts: 50
     - round: 2
     - 결과: 군집 6개 / ARI 
-11. leukemia(554개)
-    - eps: 0.85
+11. wbc_original(683개)
+    - eps: 4.5
+    - minpts: 18
+    - round: 2
+    - 결과: 군집 2개 / ARI 0.8798
+12. swissbanknote(200개)
+    - eps: 1.09
     - minpts: 4
-    - round: 4
-    - 결과: 군집 4개 / ARI 0.9959
-11. swiss_banknote(200개)
-    - eps: 0.85
-    - minpts: 4
-    - round: 6
-    - 결과: 군집 2개 / ARI 0.9701
+    - round: 8
+    - 결과: 군집 2개 / ARI 0.9406

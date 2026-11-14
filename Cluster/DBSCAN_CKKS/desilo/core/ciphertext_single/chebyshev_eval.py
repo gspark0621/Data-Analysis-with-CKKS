@@ -33,6 +33,17 @@ from util.keypack import KeyPack
 #   "standard" : 이전 동작 (표준 bootstrap, 노이즈 주입 — 거짓 양성 원인)
 _INTER_COMPONENT_BOOTSTRAP = "sign"
 
+# ★ [2026-11] 다음 성분의 1/domain_b 배율을 현재 성분의 Chebyshev 계수에 미리 곱한다.
+#   [문제] 성분 출력은 [1−τ, 1+τ] 이고 sign_bootstrap 은 sin(πz/2) 꼴이라 z=2 에서
+#     0 으로 접힌다. Normalize α=20 (N=5000) 은 첫 성분 최대 출력이 1.99995 라
+#     2 까지 여유가 4.6e-5 뿐이고, lossy 키 sign_bootstrap 이 이 구간에서 부호를
+#     뒤집었다 (s1: 먼 쌍이 이웃으로 오판 → 15개 클러스터가 하나로 병합).
+#   [해결] 배율을 sign_bootstrap 앞으로 옮기면 입력이 [(1−τ)/(1+τ), 1] 로 들어와
+#     접힘 구간에 닿지 않는다. 다음 성분이 받는 최솟값은 이전과 같고(≈(π/2)(1−τ)/(1+τ)),
+#     계수에 곱하므로 level 을 쓰지 않는다 (성분당 곱셈 1회·level 1 절약).
+#   False 로 두면 이전 동작 (sign_bootstrap 뒤에 1/domain_b 곱셈).
+_FOLD_DOMAIN_SCALE = True
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # 유틸리티: odd → full Chebyshev coefficients
@@ -97,12 +108,16 @@ def eval_mcp_full_chebyshev(
         domain_b = comp.get("domain_b", 1.0)
 
         # ── 1. domain_b 정규화 ────────────────────────────────────────
-        if abs(domain_b - 1.0) > 1e-9:
+        #   _FOLD_DOMAIN_SCALE 이면 idx>0 의 배율은 앞 성분 계수에 이미 곱해져 있다.
+        if abs(domain_b - 1.0) > 1e-9 and (idx == 0 or not _FOLD_DOMAIN_SCALE):
             scale = 1.0 / domain_b
             current = engine.multiply(current, engine.encode([scale] * slot_count))
 
         # ── 2. odd → full Chebyshev coefficients ─────────────────────
         odd_coeffs  = comp["coeffs"]
+        if _FOLD_DOMAIN_SCALE and idx + 1 < len(components):
+            _out_scale = 1.0 / components[idx + 1].get("domain_b", 1.0)
+            odd_coeffs = [float(c) * _out_scale for c in odd_coeffs]
         full_coeffs = odd_coeffs_to_full(odd_coeffs)
 
         # ── 3. ★ Chebyshev 평가 전 intt (NTT → coefficient form) ─────
